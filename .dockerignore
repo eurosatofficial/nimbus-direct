@@ -1,0 +1,10 @@
+.env
+.git
+.DS_Store
+outputs/
+work/
+node_modules/
+npm-debug.log
+data/
+secrets/
+*.sqlite*

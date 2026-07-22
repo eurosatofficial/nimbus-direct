@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f4f6fb" />
+    <meta name="description" content="Nimbus Direct — secure self-service control for individually assigned Proxmox guests" />
+    <title>Nimbus Direct</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/styles.css?v=20260722-4" />
+  </head>
+  <body class="auth-pending">
+    <a class="skip-link" href="#pageContent">Skip to content</a>
+
+    <section class="auth-view" id="authView" aria-labelledby="loginTitle">
+      <div class="auth-brand" aria-label="Nimbus Direct">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="brand-name">nimbus<span>direct</span></span>
+      </div>
+      <div class="auth-card">
+        <span class="auth-icon" aria-hidden="true">⌁</span>
+        <p class="eyebrow">Secure customer access</p>
+        <h1 id="loginTitle">Sign in to your infrastructure</h1>
+        <p>Use the account issued by your infrastructure provider.</p>
+        <form id="loginForm">
+          <label for="loginEmail">Email address</label>
+          <input id="loginEmail" type="email" name="email" autocomplete="username" required placeholder="you@company.com" />
+          <label for="loginPassword">Password</label>
+          <input id="loginPassword" type="password" name="password" autocomplete="current-password" required minlength="12" />
+          <p class="form-message error" id="authError" role="alert"></p>
+          <button class="button primary auth-submit" type="submit">Sign in</button>
+        </form>
+        <small>Sessions are protected with secure, HTTP-only cookies.</small>
+      </div>
+    </section>
+
+    <div class="app-shell" id="appShell" aria-hidden="true">
+      <aside class="sidebar" id="sidebar" aria-label="Account navigation">
+        <a class="brand" href="#overview" aria-label="Nimbus Direct overview">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span class="brand-name">nimbus<span>direct</span></span>
+        </a>
+
+        <nav class="nav" aria-label="Main navigation">
+          <p class="nav-label">Workspace</p>
+          <a class="nav-item" href="#overview" data-view="overview"><span class="nav-icon" aria-hidden="true">⌂</span><span>Overview</span></a>
+          <a class="nav-item" href="#instances" data-view="instances"><span class="nav-icon" aria-hidden="true">▤</span><span>Instances</span><span class="nav-badge" id="instanceCount">0</span></a>
+          <a class="nav-item" href="#network" data-view="network"><span class="nav-icon" aria-hidden="true">⌘</span><span>Network</span></a>
+          <a class="nav-item" href="#activity" data-view="activity"><span class="nav-icon" aria-hidden="true">◷</span><span>Activity</span></a>
+
+          <p class="nav-label second">Account</p>
+          <a class="nav-item" href="#settings" data-view="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>Settings</span></a>
+          <a class="nav-item admin-nav" href="#admin" data-view="admin" hidden><span class="nav-icon" aria-hidden="true">◇</span><span>Control center</span></a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="profile-card">
+            <span class="avatar" id="profileAvatar" aria-hidden="true">NC</span>
+            <span class="profile-copy"><strong id="profileName">Account</strong><small id="profileTenant">Tenant</small></span>
+            <button class="icon-button logout-button" id="logoutButton" type="button" aria-label="Sign out">↪</button>
+          </div>
+        </div>
+      </aside>
+
+      <div class="sidebar-backdrop" id="sidebarBackdrop" hidden></div>
+
+      <main class="main" id="pageContent" tabindex="-1">
+        <header class="topbar">
+          <div class="topbar-left">
+            <button class="icon-button mobile-menu" id="menuButton" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">☰</button>
+            <div class="crumb"><span id="currentSection">Overview</span><small id="tenantPlan"></small></div>
+          </div>
+          <div class="top-actions">
+            <label class="global-search" for="globalSearch">
+              <span aria-hidden="true">⌕</span>
+              <span class="visually-hidden">Filter current view</span>
+              <input id="globalSearch" type="search" placeholder="Filter this view" autocomplete="off" />
+            </label>
+            <button class="button secondary refresh-button" id="refreshButton" type="button"><span aria-hidden="true">↻</span><span class="refresh-copy">Refresh</span></button>
+          </div>
+        </header>
+
+        <div class="content">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow" id="todayLabel"></p>
+              <h1 id="pageTitle">Infrastructure overview</h1>
+              <p id="pageDescription">Live resources assigned to your account.</p>
+            </div>
+            <div class="connection-card" id="connectionHealth" role="status">
+              <span class="pulse-dot" aria-hidden="true"></span>
+              <span><strong id="healthTitle">Connecting securely</strong><small id="healthDetail">Checking Proxmox access</small></span>
+            </div>
+          </div>
+
+          <div class="error-banner" id="errorBanner" role="alert" hidden>
+            <span class="error-icon" aria-hidden="true">!</span>
+            <span><strong id="errorTitle">Connection unavailable</strong><small id="errorMessage"></small></span>
+            <button class="button secondary" id="retryButton" type="button">Try again</button>
+          </div>
+
+          <div id="viewRoot" aria-live="polite" aria-busy="true"></div>
+          <p class="last-updated" id="lastUpdated" role="status"></p>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="instanceDialog" class="dialog detail-dialog" aria-labelledby="instanceDialogTitle">
+      <div class="dialog-shell">
+        <header class="dialog-header">
+          <div><p class="eyebrow">Instance details</p><h2 id="instanceDialogTitle">Loading instance</h2></div>
+          <button class="icon-button dialog-close" type="button" data-close-dialog aria-label="Close instance details">×</button>
+        </header>
+        <div class="dialog-body" id="instanceDialogBody"></div>
+      </div>
+    </dialog>
+
+    <dialog id="actionDialog" class="dialog action-dialog" aria-labelledby="actionDialogTitle">
+      <form method="dialog" id="actionForm" class="dialog-shell">
+        <header class="dialog-header">
+          <div><p class="eyebrow">Confirm action</p><h2 id="actionDialogTitle">Update instance?</h2></div>
+          <button class="icon-button dialog-close" value="cancel" aria-label="Cancel action">×</button>
+        </header>
+        <div class="dialog-body">
+          <p id="actionDialogDescription"></p>
+          <div class="dialog-resource" id="actionDialogResource"></div>
+        </div>
+        <footer class="dialog-footer">
+          <button class="button secondary" value="cancel">Cancel</button>
+          <button class="button danger" id="confirmAction" value="confirm">Confirm</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="editDialog" class="dialog form-dialog" aria-labelledby="editDialogTitle">
+      <form id="editForm" class="dialog-shell">
+        <header class="dialog-header">
+          <div><p class="eyebrow">Platform administration</p><h2 id="editDialogTitle">Edit record</h2></div>
+          <button class="icon-button dialog-close" type="button" data-close-dialog aria-label="Close editor">×</button>
+        </header>
+        <div class="dialog-body" id="editDialogBody"></div>
+        <p class="form-message error dialog-form-error" id="editDialogError" role="alert"></p>
+        <footer class="dialog-footer">
+          <button class="button secondary" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="submit">Save changes</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true">
+      <span class="toast-icon" id="toastIcon" aria-hidden="true">✓</span>
+      <span><strong id="toastTitle">Action complete</strong><small id="toastMessage"></small></span>
+      <button class="icon-button" type="button" id="toastClose" aria-label="Dismiss message">×</button>
+    </div>
+
+    <script src="/app.js?v=20260722-4" type="module"></script>
+  </body>
+</html>

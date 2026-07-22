@@ -1,0 +1,43 @@
+services:
+  panel:
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=1777
+    ports:
+      - "4173:4173"
+    volumes:
+      - nimbus-data:/data
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 4173
+      DATA_DIR: /data
+      APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      ALLOW_DEMO_DATA: ${ALLOW_DEMO_DATA:-false}
+      PROXMOX_REQUEST_TIMEOUT_MS: ${PROXMOX_REQUEST_TIMEOUT_MS:-12000}
+      RESOURCE_SYNC_SECONDS: ${RESOURCE_SYNC_SECONDS:-60}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:-Administrator}
+      BOOTSTRAP_CUSTOMER_ID: ${BOOTSTRAP_CUSTOMER_ID:-}
+      BOOTSTRAP_CUSTOMER_NAME: ${BOOTSTRAP_CUSTOMER_NAME:-Demo customer}
+      BOOTSTRAP_CUSTOMER_EMAIL: ${BOOTSTRAP_CUSTOMER_EMAIL:-}
+      BOOTSTRAP_CUSTOMER_PASSWORD: ${BOOTSTRAP_CUSTOMER_PASSWORD:-}
+      BOOTSTRAP_CUSTOMER_DISPLAY_NAME: ${BOOTSTRAP_CUSTOMER_DISPLAY_NAME:-Customer}
+      BOOTSTRAP_SUPPORT_EMAIL: ${BOOTSTRAP_SUPPORT_EMAIL:-}
+      BOOTSTRAP_PLAN_NAME: ${BOOTSTRAP_PLAN_NAME:-Managed infrastructure}
+
+    # Layer the included compose.internal.yaml file when Proxmox must resolve
+    # to an internal address and/or uses a private CA. See README.md.
+
+volumes:
+  nimbus-data:

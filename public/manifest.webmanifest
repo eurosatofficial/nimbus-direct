@@ -1,0 +1,17 @@
+{
+  "name": "Nimbus Direct",
+  "short_name": "Nimbus Direct",
+  "description": "Direct-assignment Proxmox customer control panel",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f6fa",
+  "theme_color": "#11172a",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

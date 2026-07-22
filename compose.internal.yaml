@@ -1,0 +1,18 @@
+# Optional overlay for a Proxmox API reached through an internal address while
+# retaining the certificate hostname entered for the cluster in Nimbus Direct.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.internal.yaml up -d --build
+services:
+  panel:
+    environment:
+      NODE_EXTRA_CA_CERTS: ${NODE_EXTRA_CA_CERTS:-/etc/ssl/proxmox/pve-root-ca.pem}
+    volumes:
+      - type: bind
+        source: ${PROXMOX_CA_FILE:-./secrets/pve-root-ca.pem}
+        target: /etc/ssl/proxmox/pve-root-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    extra_hosts:
+      - "${PROXMOX_HOSTNAME:?Set PROXMOX_HOSTNAME in .env}:${PROXMOX_INTERNAL_IP:?Set PROXMOX_INTERNAL_IP in .env}"

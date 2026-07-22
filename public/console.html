@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Secure console · Nimbus Direct</title>
+    <link rel="stylesheet" href="/console.css?v=20260722-4" />
+  </head>
+  <body>
+    <header>
+      <div class="brand"><span class="mark"><i></i><i></i><i></i></span><strong>nimbus<span>direct</span></strong></div>
+      <div class="session"><i></i><span id="sessionStatus">Validating one-time ticket</span></div>
+      <button id="closeButton">Close console</button>
+    </header>
+    <main>
+      <div class="console-head"><span id="resourceName">Secure console</span><small id="resourceMeta">Preparing connection…</small></div>
+      <div class="screen" id="screen" role="application" aria-label="Virtual machine console">
+        <div class="terminal" id="terminal"><span class="muted">Nimbus Direct secure console gateway</span><br><span class="muted">Waiting for the short-lived Proxmox ticket…</span></div>
+      </div>
+      <footer><span>Ticket expires in <strong id="countdown">—</strong></span><span>Credentials stay on the Nimbus server</span></footer>
+    </main>
+    <script src="/console.js?v=20260722-4" type="module"></script>
+  </body>
+</html>
