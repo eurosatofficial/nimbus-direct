@@ -5,10 +5,29 @@ const state = {
   admin: null,
   currentView: "overview",
   adminTab: "inventory",
+  isoCandidates: {},
+  isoClusterId: null,
   search: "",
   loading: false,
   lastUpdatedAt: 0,
+  instance: {
+    resourceId: null,
+    details: null,
+    history: null,
+    timeframe: "day",
+    loading: false,
+    refreshing: false,
+    historyLoading: false,
+    media: null,
+    mediaLoading: false,
+    upload: null,
+    error: null,
+  },
 };
+const announcedTaskIds = new Set();
+let taskPollTimer = null;
+let taskPolling = false;
+let mediaPollTimer = null;
 
 const permissions = [
   ["view_status", "View status"], ["start", "Start"], ["stop", "Stop"], ["shutdown", "Shutdown"],
@@ -16,11 +35,14 @@ const permissions = [
   ["console", "Console access"], ["view_config", "View configuration"], ["view_usage", "Usage statistics"],
   ["snapshot_create", "Create snapshots"], ["snapshot_restore", "Restore snapshots"], ["snapshot_delete", "Delete snapshots"],
   ["config_change", "Change selected configuration"],
+  ["iso_view", "View installation media"], ["iso_upload", "Upload ISO images"],
+  ["iso_mount", "Mount and eject ISO images"], ["iso_delete", "Delete uploaded ISO images"],
 ];
 
 const views = {
   overview: ["Infrastructure overview", "Resources assigned directly to this account."],
   instances: ["Virtual machines & containers", "Power controls and detailed resource information."],
+  instance: ["Instance details", "Live status, usage, networking, controls, and task progress."],
   network: ["Network", "Basic addresses for assigned guests."],
   activity: ["Activity", "Recent account actions and Proxmox task requests."],
   settings: ["Account settings", "Manage your profile and security."],
@@ -30,8 +52,8 @@ const views = {
 const els = Object.fromEntries([
   "authView", "appShell", "loginForm", "authError", "viewRoot", "pageTitle", "pageDescription", "currentSection",
   "tenantPlan", "connectionHealth", "healthTitle", "healthDetail", "instanceCount", "profileName", "profileTenant",
-  "profileAvatar", "globalSearch", "refreshButton", "logoutButton", "todayLabel", "lastUpdated", "instanceDialog",
-  "instanceDialogTitle", "instanceDialogBody", "actionDialog", "actionForm", "actionDialogTitle", "actionDialogDescription",
+  "profileAvatar", "globalSearch", "refreshButton", "logoutButton", "todayLabel", "lastUpdated",
+  "actionDialog", "actionForm", "actionDialogTitle", "actionDialogDescription",
   "actionDialogResource", "confirmAction", "editDialog", "editForm", "editDialogTitle", "editDialogBody", "editDialogError",
   "toast", "toastIcon", "toastTitle", "toastMessage", "toastClose", "menuButton", "sidebar", "sidebarBackdrop",
 ].map((id) => [id, document.getElementById(id)]));
@@ -46,6 +68,7 @@ function initials(value) {
 
 function plural(value, word) { return `${value} ${word}${value === 1 ? "" : "s"}`; }
 function pct(value) { return `${Math.max(0, Math.min(100, Number(value) || 0))}%`; }
+function percent(value, total) { return total > 0 ? Math.max(0, Math.min(100, value / total * 100)) : 0; }
 function formatUptime(seconds) {
   if (!seconds) return "—";
   const days = Math.floor(seconds / 86400);
@@ -57,6 +80,35 @@ function formatDate(value, options = {}) {
   return new Intl.DateTimeFormat(undefined, options.dateOnly
     ? { dateStyle: "medium" }
     : { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+function formatRate(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB/s`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB/s`;
+  return `${Math.round(value)} B/s`;
+}
+function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(value >= 10 * 1024 ** 3 ? 0 : 1)} GB`;
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(value >= 10 * 1024 ** 2 ? 0 : 1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${Math.round(value)} B`;
+}
+function formatRelative(value) {
+  if (!value) return "Just now";
+  const seconds = Math.max(0, Math.round((Date.now() - Number(value)) / 1000));
+  if (seconds < 60) return "Just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+function actionLabel(action) {
+  return ({ start: "Starting", stop: "Stopping", shutdown: "Shutting down", reboot: "Rebooting", reset: "Resetting", suspend: "Suspending", resume: "Resuming" })[action] || "Processing";
+}
+function actionName(action) {
+  return ({ start: "Start", stop: "Force stop", shutdown: "Shutdown", reboot: "Reboot", reset: "Force reset", suspend: "Suspend", resume: "Resume" })[action] || "Power";
 }
 
 async function apiFetch(path, options = {}) {
@@ -83,7 +135,7 @@ async function apiFetch(path, options = {}) {
   if (response.status !== 204) {
     try { payload = await response.json(); } catch { payload = {}; }
   }
-  if (!response.ok) throw Object.assign(new Error(payload?.message || payload?.error || `Request failed (${response.status})`), { code: payload?.error, status: response.status });
+  if (!response.ok) throw Object.assign(new Error(payload?.message || payload?.error || `Request failed (${response.status})`), { code: payload?.error, status: response.status, payload });
   return payload;
 }
 
@@ -94,8 +146,31 @@ function friendlyError(error) {
     invalid_csrf_token: "Your session changed. Refresh the page and try again.",
     request_timeout: "The panel request timed out. Check the reverse proxy and container API logs.",
     resource_not_found: "That resource is not assigned to your account or the permission is disabled.",
+    resource_task_in_progress: "Another action is already running for this resource. Wait for it to finish.",
+    task_not_found: "That task is no longer available to this account.",
+    invalid_timeframe: "That usage-history range is not supported.",
     last_admin: "The final active administrator cannot be changed or deleted.",
     proxmox_unreachable: "The Proxmox cluster could not be reached.",
+    iso_qemu_only: "Installation media is available only for virtual machines, not LXC containers.",
+    iso_policy_not_found: "No enabled ISO storage policy is available for this VM.",
+    iso_policy_disabled: "That ISO storage policy is currently disabled.",
+    iso_storage_unavailable: "The ISO storage is not available on this VM's Proxmox node.",
+    iso_not_on_node: "That ISO is on node-local storage on another node. Upload it from this VM or use shared ISO storage.",
+    invalid_iso_filename: "Choose a file whose name ends in .iso.",
+    invalid_iso_size: "Nimbus could not determine the selected ISO size.",
+    iso_too_large: "That ISO is larger than the configured upload limit.",
+    iso_quota_exceeded: "This upload would exceed your ISO storage quota.",
+    iso_upload_size_mismatch: "The ISO upload ended with an unexpected size. Please retry.",
+    iso_not_ready: "That ISO is still being processed and cannot be mounted yet.",
+    cdrom_in_use: "An ISO is already mounted. Eject it before mounting another.",
+    cdrom_state_changed: "The virtual CD/DVD drive changed outside Nimbus. Refresh before retrying.",
+    iso_mounted: "Eject this ISO before deleting it.",
+    iso_delete_disabled: "Customer ISO deletion is disabled for this storage.",
+    iso_operation_in_progress: "That ISO operation is still in progress.",
+    too_many_uploads: "Too many ISO uploads were started. Please wait before trying again.",
+    iso_policy_in_use: "Disable this policy instead; customer ISO records still use it.",
+    resource_iso_mounted: "Eject the customer ISO before changing this VM assignment.",
+    customer_iso_images_exist: "Delete this customer's ISO images before deleting the customer account.",
   };
   return messages[error?.code] || error?.message || "Something went wrong.";
 }
@@ -156,6 +231,7 @@ async function loadDashboard() {
   els.lastUpdated.textContent = `Updated ${formatDate(state.lastUpdatedAt)}`;
   setConnection(state.dashboard.mode);
   applyUser();
+  scheduleTaskPolling();
 }
 
 async function loadAdmin() {
@@ -177,7 +253,24 @@ function resourceIdentity(resource) {
 
 function can(resource, permission) { return state.user?.role === "admin" || resource.permissions?.includes(permission); }
 
+function resourceTasks(resourceId) {
+  const tasks = [
+    ...(state.dashboard?.tasks || []),
+    ...(state.instance.details?.tasks || []),
+  ];
+  return [...new Map(tasks.filter((task) => task.resourceId === resourceId).map((task) => [task.id, task])).values()]
+    .sort((left, right) => Number(right.createdAt) - Number(left.createdAt));
+}
+
+function activeTask(resourceId) {
+  return resourceTasks(resourceId).find((task) => !task.completed) || null;
+}
+
 function actionButtons(resource, compact = false) {
+  const pending = activeTask(resource.id);
+  if (pending) {
+    return `<div class="row-buttons"><button class="row-button task-running" disabled><span class="button-spinner" aria-hidden="true"></span>${escapeHtml(actionLabel(pending.action))}…</button><button class="row-button" data-details="${escapeHtml(resource.id)}">View progress</button></div>`;
+  }
   const main = resource.status === "running" ? [["shutdown", "Shutdown"], ["reboot", "Reboot"]] : resource.status === "suspended" ? [["resume", "Resume"]] : [["start", "Start"]];
   const controls = main.filter(([permission]) => can(resource, permission)).map(([action, label]) => `<button class="row-button ${action === "shutdown" ? "danger" : ""}" data-action="${action}" data-resource="${escapeHtml(resource.id)}">${label}</button>`).join("");
   return `<div class="row-buttons">${controls}${can(resource, "console") && !compact ? `<button class="row-button" data-console="${escapeHtml(resource.id)}">Console</button>` : ""}<button class="row-button" data-details="${escapeHtml(resource.id)}">Details</button></div>`;
@@ -221,6 +314,336 @@ function renderInstances() {
   els.viewRoot.innerHTML = resources.length ? `<section class="instance-grid">${resources.map((resource) => `<article class="instance-card"><div class="card-title">${resourceIdentity(resource)}${statusMarkup(resource)}</div><div class="instance-stats"><div class="mini-stat"><small>CPU</small><strong>${pct(resource.cpu)}</strong></div><div class="mini-stat"><small>Memory</small><strong>${resource.memoryUsed} / ${resource.memory} GB</strong></div><div class="mini-stat"><small>Storage</small><strong>${resource.storageUsed} / ${resource.storage} GB</strong></div><div class="mini-stat"><small>Address</small><strong>${escapeHtml(resource.ip || "Unavailable")}</strong></div></div><div class="instance-actions">${actionButtons(resource)}</div></article>`).join("")}</section>` : emptyState("▤", "No resources assigned", "Ask an administrator to assign a VM or container directly to your customer account.");
 }
 
+function detailSkeleton() {
+  return `<div class="instance-detail-skeleton"><div class="skeleton detail-hero-skeleton"></div><div class="skeleton-grid metrics"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div><div class="skeleton detail-panel-skeleton"></div></div>`;
+}
+
+function detailActionButtons(resource) {
+  const pending = activeTask(resource.id);
+  if (pending) {
+    return `<button class="button secondary task-running" disabled><span class="button-spinner" aria-hidden="true"></span>${escapeHtml(actionLabel(pending.action))}…</button>${can(resource, "console") ? `<button class="button secondary" data-console="${escapeHtml(resource.id)}">Open console</button>` : ""}`;
+  }
+  const actions = resource.status === "running"
+    ? [["shutdown", "Shutdown", "secondary"], ["reboot", "Reboot", "primary"], ["suspend", "Suspend", "secondary"], ["stop", "Force stop", "danger"], ["reset", "Force reset", "danger"]]
+    : resource.status === "suspended"
+      ? [["resume", "Resume", "primary"], ["stop", "Force stop", "danger"]]
+      : [["start", "Start", "primary"]];
+  return `${actions.filter(([permission]) => can(resource, permission)).map(([action, label, style]) => `<button class="button ${style}" data-action="${action}" data-resource="${escapeHtml(resource.id)}">${label}</button>`).join("")}${can(resource, "console") ? `<button class="button secondary" data-console="${escapeHtml(resource.id)}">Open console</button>` : ""}`;
+}
+
+function instanceTasksMarkup(tasks = []) {
+  if (!tasks.length) return `<div class="detail-empty"><span>◷</span><strong>No actions yet</strong><small>Power and maintenance tasks will appear here.</small></div>`;
+  return `<div class="task-list">${tasks.slice(0, 10).map((task) => {
+    const stateLabel = task.completed ? (task.success ? "Completed" : "Failed") : "In progress";
+    const icon = task.completed ? (task.success ? "✓" : "!") : `<span class="button-spinner" aria-hidden="true"></span>`;
+    return `<article class="task-item ${escapeHtml(task.state)}"><span class="task-state-icon">${icon}</span><span class="task-copy"><strong>${escapeHtml(actionName(task.action))}</strong><small>${escapeHtml(task.message || stateLabel)}</small></span><span class="task-meta"><strong>${escapeHtml(stateLabel)}</strong><small>${escapeHtml(formatRelative(task.completedAt || task.createdAt))}</small></span></article>`;
+  }).join("")}</div>`;
+}
+
+function networkDetailsMarkup(network, resource) {
+  const addresses = network?.addresses || [];
+  if (!addresses.length) {
+    const message = network?.status === "stopped"
+      ? "Network addresses are unavailable while the guest is stopped."
+      : network?.status === "permission_required"
+        ? "The Proxmox token needs guest-agent audit permission to read addresses."
+        : "No guest address was reported. QEMU guests need the QEMU Guest Agent for live network discovery.";
+    return `<div class="detail-empty compact"><span>⌘</span><strong>Address unavailable</strong><small>${escapeHtml(message)}</small></div>`;
+  }
+  return `<div class="address-list">${addresses.map((address) => `<div class="address-row"><span><small>${escapeHtml(address.interface || "interface")} · ${escapeHtml(address.family || "IP")}</small><strong>${escapeHtml(address.address)}${address.prefix ? `/${address.prefix}` : ""}</strong></span><button class="copy-button" type="button" data-copy="${escapeHtml(address.address)}" aria-label="Copy ${escapeHtml(address.address)}">Copy</button></div>`).join("")}</div><div class="network-location"><span><small>Cluster</small><strong>${escapeHtml(resource.clusterName)}</strong></span><span><small>Node</small><strong>${escapeHtml(resource.node)}</strong></span></div>`;
+}
+
+function configurationMarkup(config = {}, resource) {
+  const preferred = [
+    ["cores", "CPU cores"],
+    ["sockets", "Sockets"],
+    ["memory", "Configured memory"],
+    ["onboot", "Start at boot"],
+    ["ostype", "Guest OS"],
+    ["bios", "Firmware"],
+    ["arch", "Architecture"],
+    ["protection", "Protection"],
+  ];
+  const rows = preferred.filter(([key]) => config[key] !== undefined).map(([key, label]) => {
+    let value = config[key];
+    if (key === "memory") value = `${Math.round(Number(value) / 1024 * 10) / 10} GB`;
+    if (["onboot", "protection"].includes(key)) value = Number(value) ? "Enabled" : "Disabled";
+    return `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`;
+  });
+  rows.unshift(
+    `<div><dt>Guest type</dt><dd>${escapeHtml(resource.type.toUpperCase())}</dd></div>`,
+    `<div><dt>VMID</dt><dd>${resource.vmid}</dd></div>`,
+  );
+  return `<dl class="instance-facts">${rows.join("")}</dl>`;
+}
+
+function historyPanelMarkup(history, timeframe, loading) {
+  const ranges = [["hour", "1 hour"], ["day", "24 hours"], ["week", "7 days"], ["month", "30 days"]];
+  const controls = `<select class="history-range" data-history-timeframe aria-label="Usage history range" ${loading ? "disabled" : ""}>${ranges.map(([value, label]) => `<option value="${value}" ${value === timeframe ? "selected" : ""}>${label}</option>`).join("")}</select>`;
+  if (loading) return `<header class="panel-header"><div><h2>Usage history</h2><p>Loading Proxmox RRD statistics.</p></div>${controls}</header><div class="chart-loading"><span class="spinner"></span>Loading history</div>`;
+  if (!history?.available || !history.points?.length) {
+    return `<header class="panel-header"><div><h2>Usage history</h2><p>CPU and memory over time.</p></div>${controls}</header><div class="detail-empty"><span>⌁</span><strong>History unavailable</strong><small>${history?.reason === "permission_not_enabled" ? "Usage statistics are not enabled for this assignment." : "Proxmox has not returned enough history points yet."}</small></div>`;
+  }
+  const latest = history.points.at(-1) || {};
+  return `<header class="panel-header"><div><h2>Usage history</h2><p>Normalized Proxmox RRD statistics.</p></div>${controls}</header><div class="instance-chart-legend"><span><i class="legend-cpu"></i>CPU ${Math.round(Number(latest.cpu) || 0)}%</span><span><i class="legend-memory"></i>Memory ${Math.round(Number(latest.memory) || 0)}%</span></div><div class="instance-chart-wrap"><canvas id="instanceUsageChart" aria-label="CPU and memory usage history"></canvas><div class="chart-axis-labels"><span>${escapeHtml(formatDate(history.points[0]?.timestamp))}</span><span>${escapeHtml(formatDate(history.points.at(-1)?.timestamp))}</span></div></div>`;
+}
+
+function installationMediaMarkup(resource) {
+  if (resource.type !== "qemu" || !resource.customerId || !can(resource, "iso_view")) return "";
+  if (state.instance.mediaLoading && !state.instance.media) {
+    return `<section class="panel installation-media-panel"><header class="panel-header"><div><h2>Installation media</h2><p>Loading your ISO library.</p></div></header><div class="chart-loading"><span class="spinner"></span>Loading media</div></section>`;
+  }
+  const media = state.instance.media;
+  if (media?.error) {
+    return `<section class="panel installation-media-panel"><header class="panel-header"><div><h2>Installation media</h2><p>Customer-owned ISO images.</p></div><button class="button secondary small" data-refresh-media>Retry</button></header><div class="notice warning"><span>!</span><span>${escapeHtml(friendlyError(media.error))}</span></div></section>`;
+  }
+  const policies = media?.policies || [];
+  const images = media?.images || [];
+  const mounted = media?.mounted || null;
+  const upload = state.instance.upload;
+  const processing = images.some((image) => ["uploading", "processing", "deleting"].includes(image.status));
+  if (processing) scheduleMediaPolling();
+  const uploadMarkup = can(resource, "iso_upload")
+    ? (policies.length
+      ? `<form class="iso-upload-form" id="isoUploadForm">
+          <div class="field"><label for="isoFile">ISO image</label><input id="isoFile" name="isoFile" type="file" accept=".iso,application/x-iso9660-image" required ${upload ? "disabled" : ""}><small>The file streams directly to Proxmox; Nimbus does not keep a second copy.</small></div>
+          <div class="field"><label for="isoPolicy">Destination</label><select id="isoPolicy" name="policyId" required ${upload ? "disabled" : ""}>${policies.map((policy) => `<option value="${escapeHtml(policy.id)}">${escapeHtml(policy.displayName)} · ${escapeHtml(formatBytes(policy.remainingBytes))} free</option>`).join("")}</select><small>Maximum per file: ${escapeHtml(formatBytes(Math.max(...policies.map((policy) => policy.maxUploadBytes))))}</small></div>
+          <button class="button primary" type="submit" ${upload ? "disabled" : ""}>${upload ? "Uploading…" : "Upload ISO"}</button>
+        </form>`
+      : `<div class="notice warning"><span>!</span><span>An administrator must enable an ISO-capable Proxmox storage before uploads are available.</span></div>`)
+    : "";
+  const uploadProgress = upload ? `<div class="iso-upload-progress" aria-live="polite"><div><span><strong>${escapeHtml(upload.name)}</strong><small>${upload.status === "finishing" ? "Proxmox is finalizing the upload…" : `${upload.progress}% · ${escapeHtml(formatBytes(upload.loaded))} of ${escapeHtml(formatBytes(upload.total))}`}</small></span><b>${upload.progress}%</b></div><div class="usage-bar"><span id="isoUploadProgressBar" style="width:${pct(upload.progress)}"></span></div></div>` : "";
+  const mountedMarkup = mounted
+    ? `<div class="mounted-media"><span class="media-icon">◎</span><span><small>Mounted in ${escapeHtml(mounted.driveSlot)}</small><strong>${escapeHtml(mounted.originalName || mounted.fileName)}</strong><em>Mounted ${escapeHtml(formatRelative(mounted.mountedAt))}</em></span>${can(resource, "iso_mount") ? `<button class="button secondary small" data-eject-iso>Eject</button>` : ""}</div>`
+    : `<div class="mounted-media empty"><span class="media-icon">○</span><span><small>Virtual CD/DVD drive</small><strong>No ISO mounted</strong><em>Select a ready image from the library below.</em></span></div>`;
+  const library = images.length
+    ? `<div class="iso-library">${images.map((image) => {
+      const isMounted = mounted?.isoImageId === image.id;
+      const busy = ["uploading", "processing", "deleting"].includes(image.status);
+      const canRemove = image.status === "error" ? can(resource, "iso_upload") : can(resource, "iso_delete") && image.allowDelete;
+      return `<article class="iso-library-item"><span class="media-icon">◉</span><span class="iso-copy"><strong>${escapeHtml(image.originalName)}</strong><small>${escapeHtml(formatBytes(image.sizeBytes))} · ${escapeHtml(image.storageId)} · ${escapeHtml(formatDate(image.createdAt))}</small></span><span class="iso-state ${escapeHtml(image.status)}">${busy ? `<i class="button-spinner"></i>` : ""}${escapeHtml(image.status)}</span><div class="row-buttons">${can(resource, "iso_mount") && image.status === "ready" && !isMounted ? `<button class="row-button" data-mount-iso="${escapeHtml(image.id)}" ${mounted ? "disabled" : ""}>Mount</button>` : ""}${isMounted ? `<span class="pill success">Mounted</span>` : ""}${canRemove && !isMounted && !busy ? `<button class="row-button danger" data-delete-iso="${escapeHtml(image.id)}" ${image.status === "error" ? "data-dismiss-iso" : ""}>${image.status === "error" ? "Dismiss" : "Delete"}</button>` : ""}</div></article>`;
+    }).join("")}</div>`
+    : `<div class="detail-empty compact"><span>◉</span><strong>No ISO images yet</strong><small>Upload installation media to this customer-owned library.</small></div>`;
+  return `<section class="panel installation-media-panel">
+    <header class="panel-header"><div><h2>Installation media</h2><p>Private ISO library for this customer and cluster.</p></div><span class="pill ${processing ? "warning" : ""}">${processing ? "Processing" : `${images.length} images`}</span></header>
+    <div class="installation-media-body">${mountedMarkup}${uploadMarkup}${uploadProgress}${library}</div>
+  </section>`;
+}
+
+function renderInstanceDetail(resourceId) {
+  const resource = (state.dashboard?.resources || []).find((item) => item.id === resourceId)
+    || state.admin?.resources?.find((item) => item.id === resourceId);
+  if (!resource) {
+    els.viewRoot.innerHTML = emptyState("!", "Instance unavailable", "This resource is not assigned to your account.");
+    return;
+  }
+  if (state.instance.resourceId !== resourceId) {
+    state.instance = { resourceId, details: null, history: null, timeframe: "day", loading: true, refreshing: false, historyLoading: false, media: null, mediaLoading: false, upload: null, error: null };
+    els.viewRoot.innerHTML = detailSkeleton();
+    queueMicrotask(() => loadInstanceDetails(resourceId));
+    return;
+  }
+  if (state.instance.loading && !state.instance.details) {
+    els.viewRoot.innerHTML = detailSkeleton();
+    return;
+  }
+  if (state.instance.error && !state.instance.details) {
+    els.viewRoot.innerHTML = `<section class="panel">${emptyState("!", "Instance details unavailable", friendlyError(state.instance.error))}<div class="detail-retry"><button class="button primary" data-retry-instance="${escapeHtml(resourceId)}">Try again</button></div></section>`;
+    return;
+  }
+
+  const details = state.instance.details || {};
+  const network = details.network || {};
+  const tasks = resourceTasks(resourceId);
+  const pending = activeTask(resourceId);
+  const memoryPercent = percent(resource.memoryUsed, resource.memory);
+  const storagePercent = percent(resource.storageUsed, resource.storage);
+  const primaryIp = network.primaryIp || resource.ip;
+  const networkLatest = state.instance.history?.points?.at(-1) || {};
+  els.viewRoot.innerHTML = `<div class="instance-detail">
+    <a class="detail-back" href="#instances">← All instances</a>
+    <section class="instance-hero-card">
+      <div class="instance-hero-main">
+        ${resourceIdentity(resource)}
+        <div class="instance-hero-status">${statusMarkup(resource)}${state.instance.refreshing ? `<span class="refreshing-label"><span class="button-spinner"></span>Refreshing</span>` : ""}</div>
+      </div>
+      <div class="instance-hero-actions">${detailActionButtons(resource)}</div>
+      ${pending ? `<div class="task-progress-banner"><span class="button-spinner" aria-hidden="true"></span><span><strong>${escapeHtml(actionLabel(pending.action))} this instance</strong><small>Nimbus is following the Proxmox task automatically. Other power actions are paused until it finishes.</small></span><span>${escapeHtml(formatRelative(pending.createdAt))}</span></div>` : ""}
+    </section>
+
+    <section class="instance-metric-grid">
+      <article><span class="detail-metric-icon cpu">⌁</span><span><small>CPU usage</small><strong>${Math.round(resource.cpu)}%</strong><em>${resource.vcpu} vCPU</em></span><div class="detail-meter"><i style="width:${pct(resource.cpu)}"></i></div></article>
+      <article><span class="detail-metric-icon memory">◫</span><span><small>Memory</small><strong>${resource.memoryUsed} GB</strong><em>of ${resource.memory} GB</em></span><div class="detail-meter memory"><i style="width:${pct(memoryPercent)}"></i></div></article>
+      <article><span class="detail-metric-icon storage">▰</span><span><small>Storage</small><strong>${resource.storageUsed} GB</strong><em>of ${resource.storage} GB</em></span><div class="detail-meter storage"><i style="width:${pct(storagePercent)}"></i></div></article>
+      <article><span class="detail-metric-icon uptime">◷</span><span><small>Uptime</small><strong>${escapeHtml(formatUptime(resource.uptime))}</strong><em>${resource.status === "running" ? "Currently online" : escapeHtml(resource.status)}</em></span></article>
+    </section>
+
+    <section class="instance-detail-grid primary">
+      <article class="panel usage-history-panel">${historyPanelMarkup(state.instance.history, state.instance.timeframe, state.instance.historyLoading)}</article>
+      <article class="panel">
+        <header class="panel-header"><div><h2>Instance information</h2><p>Safe, allowlisted configuration.</p></div><span class="pill">${escapeHtml(resource.type.toUpperCase())} ${resource.vmid}</span></header>
+        ${configurationMarkup(details.config, resource)}
+      </article>
+    </section>
+
+    <section class="instance-detail-grid secondary">
+      <article class="panel">
+        <header class="panel-header"><div><h2>Network</h2><p>${primaryIp ? `Primary address: ${escapeHtml(primaryIp)}` : "Guest-reported addresses."}</p></div>${primaryIp ? `<button class="copy-button" type="button" data-copy="${escapeHtml(primaryIp)}">Copy IP</button>` : ""}</header>
+        ${networkDetailsMarkup(network, resource)}
+        ${state.instance.history?.available ? `<div class="network-rate-strip"><span><small>Latest inbound</small><strong>${escapeHtml(formatRate(networkLatest.netIn))}</strong></span><span><small>Latest outbound</small><strong>${escapeHtml(formatRate(networkLatest.netOut))}</strong></span></div>` : ""}
+      </article>
+      <article class="panel">
+        <header class="panel-header"><div><h2>Recent tasks</h2><p>Live status from Proxmox.</p></div><span class="pill ${pending ? "warning" : "success"}">${pending ? "Running" : "Up to date"}</span></header>
+        ${instanceTasksMarkup(tasks)}
+      </article>
+    </section>
+    ${installationMediaMarkup(resource)}
+  </div>`;
+  requestAnimationFrame(drawInstanceChart);
+}
+
+async function loadInstanceDetails(resourceId, { quiet = false } = {}) {
+  const resource = (state.dashboard?.resources || []).find((item) => item.id === resourceId)
+    || state.admin?.resources?.find((item) => item.id === resourceId);
+  if (!resource) return;
+  if (quiet) state.instance.refreshing = true;
+  else state.instance.loading = true;
+  state.instance.mediaLoading = resource.type === "qemu" && Boolean(resource.customerId) && can(resource, "iso_view");
+  state.instance.error = null;
+  try {
+    const historyRequest = can(resource, "view_usage")
+      ? apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/history?timeframe=${encodeURIComponent(state.instance.timeframe)}`)
+          .then((result) => result.history)
+          .catch((error) => ({ available: false, reason: error.code || "history_unavailable", points: [] }))
+      : Promise.resolve({ available: false, reason: "permission_not_enabled", points: [] });
+    const mediaRequest = resource.type === "qemu" && resource.customerId && can(resource, "iso_view")
+      ? apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/media`)
+          .catch((error) => ({ error }))
+      : Promise.resolve(null);
+    const [details, history, media] = await Promise.all([
+      apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}`),
+      historyRequest,
+      mediaRequest,
+    ]);
+    if (state.instance.resourceId !== resourceId) return;
+    state.instance.details = details;
+    state.instance.history = history;
+    state.instance.media = media;
+    state.instance.error = null;
+    if (details.tasks?.length) {
+      for (const task of details.tasks) mergeTask(task);
+    }
+  } catch (error) {
+    if (state.instance.resourceId === resourceId) state.instance.error = error;
+  } finally {
+    if (state.instance.resourceId === resourceId) {
+      state.instance.loading = false;
+      state.instance.refreshing = false;
+      state.instance.mediaLoading = false;
+      if (state.currentView === "instance") renderInstanceDetail(resourceId);
+      scheduleTaskPolling();
+    }
+  }
+}
+
+async function loadInstanceMedia({ quiet = false } = {}) {
+  const resourceId = state.instance.resourceId;
+  const resource = state.dashboard?.resources.find((item) => item.id === resourceId)
+    || state.admin?.resources?.find((item) => item.id === resourceId);
+  if (!resource || resource.type !== "qemu" || !resource.customerId || !can(resource, "iso_view")) return;
+  if (!quiet) {
+    state.instance.mediaLoading = true;
+    renderInstanceDetail(resourceId);
+  }
+  try {
+    state.instance.media = await apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/media`);
+  } catch (error) {
+    state.instance.media = { error };
+  } finally {
+    state.instance.mediaLoading = false;
+    if (state.currentView === "instance" && state.instance.resourceId === resourceId) renderInstanceDetail(resourceId);
+  }
+}
+
+function scheduleMediaPolling() {
+  if (mediaPollTimer || state.instance.upload || state.currentView !== "instance") return;
+  mediaPollTimer = setTimeout(async () => {
+    mediaPollTimer = null;
+    if (state.currentView !== "instance") return;
+    await loadInstanceMedia({ quiet: true });
+    const pending = state.instance.media?.images?.some((image) => ["uploading", "processing", "deleting"].includes(image.status));
+    if (pending) scheduleMediaPolling();
+  }, document.visibilityState === "visible" ? 2500 : 7000);
+}
+
+async function loadInstanceHistory(timeframe) {
+  const resourceId = state.instance.resourceId;
+  const resource = state.dashboard?.resources.find((item) => item.id === resourceId);
+  if (!resource || !can(resource, "view_usage") || state.instance.historyLoading) return;
+  state.instance.timeframe = timeframe;
+  state.instance.historyLoading = true;
+  renderInstanceDetail(resourceId);
+  try {
+    const result = await apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/history?timeframe=${encodeURIComponent(timeframe)}`);
+    if (state.instance.resourceId === resourceId && state.instance.timeframe === timeframe) state.instance.history = result.history;
+  } catch (error) {
+    if (state.instance.resourceId === resourceId) state.instance.history = { available: false, reason: error.code || "history_unavailable", points: [] };
+  } finally {
+    if (state.instance.resourceId === resourceId) {
+      state.instance.historyLoading = false;
+      renderInstanceDetail(resourceId);
+    }
+  }
+}
+
+function drawInstanceChart() {
+  const canvas = document.getElementById("instanceUsageChart");
+  const points = state.instance.history?.points || [];
+  if (!canvas || points.length < 2) return;
+  const rect = canvas.getBoundingClientRect();
+  const ratio = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.max(1, Math.round(rect.width * ratio));
+  canvas.height = Math.round(220 * ratio);
+  const context = canvas.getContext("2d");
+  context.scale(ratio, ratio);
+  const width = rect.width;
+  const height = 220;
+  const padding = { top: 12, right: 8, bottom: 10, left: 30 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  context.clearRect(0, 0, width, height);
+  context.lineWidth = 1;
+  context.font = "10px Inter, sans-serif";
+  context.textAlign = "right";
+  context.textBaseline = "middle";
+  for (const value of [0, 25, 50, 75, 100]) {
+    const y = padding.top + chartHeight - chartHeight * value / 100;
+    context.strokeStyle = "#e8ebf2";
+    context.beginPath();
+    context.moveTo(padding.left, y);
+    context.lineTo(width - padding.right, y);
+    context.stroke();
+    context.fillStyle = "#969eb0";
+    context.fillText(`${value}%`, padding.left - 6, y);
+  }
+  const drawLine = (key, color) => {
+    context.strokeStyle = color;
+    context.lineWidth = 2.5;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    context.beginPath();
+    points.forEach((point, index) => {
+      const x = padding.left + chartWidth * index / (points.length - 1);
+      const value = Math.max(0, Math.min(100, Number(point[key]) || 0));
+      const y = padding.top + chartHeight - chartHeight * value / 100;
+      if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+    });
+    context.stroke();
+  };
+  drawLine("cpu", "#5d68ec");
+  drawLine("memory", "#36aa82");
+}
+
 function renderNetwork() {
   const resources = filteredResources();
   els.viewRoot.innerHTML = resources.length ? `<section class="network-grid">${resources.map((resource) => `<article class="network-card"><div class="card-title">${resourceIdentity(resource)}${statusMarkup(resource)}</div><ul class="network-addresses"><li><small>Primary address</small><span>${escapeHtml(resource.ip || "Unavailable")}</span></li><li><small>Cluster / node</small><span>${escapeHtml(resource.clusterId)} / ${escapeHtml(resource.node)}</span></li><li><small>Guest identity</small><span>${resource.type.toUpperCase()} ${resource.vmid}</span></li></ul></article>`).join("")}</section>` : emptyState("⌘", "No network information", "Assigned resources will appear here.");
@@ -235,7 +658,7 @@ function renderSettings() {
 }
 
 function adminTabs() {
-  const tabs = [["inventory", "Inventory"], ["customers", "Customers"], ["clusters", "Clusters"], ["users", "Users"], ["audit", "Audit log"]];
+  const tabs = [["inventory", "Inventory"], ["customers", "Customers"], ["clusters", "Clusters"], ["media", "ISO storage"], ["users", "Users"], ["audit", "Audit log"]];
   return `<section class="panel admin-tab-shell"><div class="admin-tabs" role="tablist">${tabs.map(([id, label]) => `<button class="admin-tab ${state.adminTab === id ? "active" : ""}" data-admin-tab="${id}">${label}</button>`).join("")}</div></section>`;
 }
 
@@ -254,6 +677,37 @@ function renderAdminClusters() {
   return `<section class="layout-grid"><form class="panel form-panel" id="createClusterForm" data-admin-create="cluster"><h2>Add Proxmox cluster</h2><p>Nimbus stores one central API token encrypted at rest.</p><div class="form-grid"><div class="field"><label for="clusterId">Cluster ID</label><input id="clusterId" name="id" required pattern="[a-z0-9][a-z0-9_-]{1,63}" placeholder="production-eu"></div><div class="field"><label for="clusterName">Display name</label><input id="clusterName" name="name" required></div><div class="field full"><label for="clusterUrl">API URL</label><input id="clusterUrl" name="apiUrl" type="url" required placeholder="https://pve.example.com:8006"></div><div class="field"><label for="clusterTokenId">Token ID</label><input id="clusterTokenId" name="tokenId" required placeholder="nimbus@pve!panel"></div><div class="field"><label for="clusterTokenSecret">Token secret</label><input id="clusterTokenSecret" name="tokenSecret" type="password" required autocomplete="new-password"></div></div><div class="form-actions"><button class="button primary" type="submit">Add cluster</button><p class="form-message" role="status" aria-live="polite"></p></div></form><article class="panel policy-card"><header class="panel-header"><div><h2>Least privilege</h2><p>Recommended service-account access.</p></div></header><div class="permission-code">VM.Audit · VM.PowerMgmt<br>VM.Console · VM.Snapshot<br>VM.Config.* (selected only)</div><div class="notice warning"><span>!</span><span>Grant only the operations enabled in your Nimbus assignment policies. Never grant Administrator.</span></div></article></section><section class="cluster-grid">${clusters.map((cluster) => `<article class="cluster-card"><div class="cluster-head"><span class="cluster-icon">◇</span><span><strong>${escapeHtml(cluster.name)}</strong><small>${escapeHtml(cluster.apiUrl)}</small></span>${cluster.status === "active" ? `<span class="pill success">Healthy</span>` : `<span class="pill warning">${escapeHtml(cluster.status)}</span>`}</div><div class="cluster-facts"><span><small>Resources</small><strong>${cluster.resourceCount}</strong></span><span><small>Nodes</small><strong>${cluster.nodeCount}</strong></span><span><small>Last sync</small><strong>${cluster.lastSyncAt ? formatDate(cluster.lastSyncAt) : "Never"}</strong></span></div><div class="cluster-actions"><button class="button secondary small" data-edit-cluster="${escapeHtml(cluster.id)}">Edit</button><button class="button secondary small" data-test-cluster="${escapeHtml(cluster.id)}">Test</button><button class="button secondary small" data-sync-cluster="${escapeHtml(cluster.id)}">Sync now</button></div></article>`).join("")}</section>`;
 }
 
+function renderAdminMedia() {
+  const clusters = state.admin.clusters.filter((cluster) => cluster.status !== "disabled");
+  if (!state.isoClusterId || !clusters.some((cluster) => cluster.id === state.isoClusterId)) state.isoClusterId = clusters[0]?.id || null;
+  const candidates = state.isoCandidates[state.isoClusterId] || [];
+  const policies = state.admin.isoPolicies || [];
+  const clusterOptions = clusters.map((cluster) => `<option value="${escapeHtml(cluster.id)}" ${cluster.id === state.isoClusterId ? "selected" : ""}>${escapeHtml(cluster.name)}</option>`).join("");
+  const storageOptions = candidates.length
+    ? candidates.map((candidate) => `<option value="${escapeHtml(candidate.storageId)}">${escapeHtml(candidate.storageId)} · ${candidate.shared ? "shared" : "node-local"} · ${escapeHtml(formatBytes(candidate.availableBytes))} free</option>`).join("")
+    : `<option value="">Discover storage first</option>`;
+  const form = clusters.length
+    ? `<form class="panel form-panel iso-policy-form" id="createIsoPolicyForm" data-admin-create="iso-policy">
+        <h2>Enable ISO uploads</h2><p>Choose an existing Proxmox storage that advertises ISO content.</p>
+        <div class="form-grid">
+          <div class="field"><label for="isoPolicyCluster">Cluster</label><select id="isoPolicyCluster" name="clusterId" data-iso-cluster>${clusterOptions}</select></div>
+          <div class="field"><label>Storage discovery</label><button class="button secondary" type="button" data-discover-iso="${escapeHtml(state.isoClusterId)}">Discover ISO storage</button><small>Nimbus asks Proxmox which storage is active on each node.</small></div>
+          <div class="field"><label for="isoPolicyStorage">Proxmox storage</label><select id="isoPolicyStorage" name="storageId" required ${candidates.length ? "" : "disabled"}>${storageOptions}</select></div>
+          <div class="field"><label for="isoPolicyName">Customer-facing name</label><input id="isoPolicyName" name="displayName" required maxlength="100" value="Installation media"></div>
+          <div class="field"><label for="isoMaxUpload">Maximum file size (GB)</label><input id="isoMaxUpload" name="maxUploadGb" type="number" min="1" step="1" value="8" required></div>
+          <div class="field"><label for="isoQuota">Quota per customer (GB)</label><input id="isoQuota" name="quotaGb" type="number" min="1" step="1" value="25" required></div>
+          <label class="policy-checkbox full"><input name="allowDelete" type="checkbox"><span><strong>Allow customers to delete their ISO files</strong><small>Optional. Proxmox requires the broader Datastore.Allocate privilege for deletion.</small></span></label>
+        </div>
+        <div class="form-actions"><button class="button primary" type="submit" ${candidates.length ? "" : "disabled"}>Enable storage</button><p class="form-message" role="status"></p></div>
+      </form>`
+    : `<section class="panel">${emptyState("◇", "Add a Proxmox cluster first", "ISO policies are attached to an existing cluster and storage.")}</section>`;
+  const guidance = `<article class="panel policy-card"><header class="panel-header"><div><h2>Service-account access</h2><p>Keep deletion disabled unless it is needed.</p></div></header><div class="permission-code">Datastore.Audit<br>Datastore.AllocateTemplate<br>VM.Config.CDROM<br><span>Optional: Datastore.Allocate</span></div><div class="notice"><span>✓</span><span>Uploads stream from the browser through Nimbus to Proxmox. Nimbus stores ownership metadata, not a duplicate ISO file.</span></div></article>`;
+  const policyList = policies.length
+    ? `<section class="iso-policy-grid">${policies.map((policy) => `<article class="cluster-card iso-policy-card"><div class="cluster-head"><span class="cluster-icon">◉</span><span><strong>${escapeHtml(policy.displayName)}</strong><small>${escapeHtml(policy.clusterName)} · ${escapeHtml(policy.storageId)}</small></span><span class="pill ${policy.status === "active" ? "success" : "warning"}">${escapeHtml(policy.status)}</span></div><div class="cluster-facts"><span><small>Per file</small><strong>${escapeHtml(formatBytes(policy.maxUploadBytes))}</strong></span><span><small>Per customer</small><strong>${escapeHtml(formatBytes(policy.customerQuotaBytes))}</strong></span><span><small>Images</small><strong>${policy.imageCount}</strong></span></div><div class="policy-delete-state ${policy.allowDelete ? "enabled" : ""}"><span>${policy.allowDelete ? "Customer deletion enabled" : "Customer deletion disabled"}</span></div><div class="cluster-actions"><button class="button secondary small" data-edit-iso-policy="${escapeHtml(policy.id)}">Edit</button><button class="button secondary small" data-delete-iso-policy="${escapeHtml(policy.id)}">Delete policy</button></div></article>`).join("")}</section>`
+    : `<section class="panel">${emptyState("◉", "No ISO storage enabled", "Discover ISO-capable Proxmox storage and create the first policy above.")}</section>`;
+  return `<section class="layout-grid">${form}${guidance}</section>${policyList}`;
+}
+
 function customerOptions(selected = "") {
   return `<option value="">No customer</option>${state.admin.customers.map((customer) => `<option value="${escapeHtml(customer.id)}" ${customer.id === selected ? "selected" : ""}>${escapeHtml(customer.name)}</option>`).join("")}`;
 }
@@ -269,7 +723,7 @@ function renderAdminAudit() {
 }
 
 function renderAdmin() {
-  const renderers = { inventory: renderAdminInventory, customers: renderAdminCustomers, clusters: renderAdminClusters, users: renderAdminUsers, audit: renderAdminAudit };
+  const renderers = { inventory: renderAdminInventory, customers: renderAdminCustomers, clusters: renderAdminClusters, media: renderAdminMedia, users: renderAdminUsers, audit: renderAdminAudit };
   els.viewRoot.innerHTML = `${adminTabs()}<div class="admin-section">${renderers[state.adminTab]()}</div>`;
 }
 
@@ -277,20 +731,35 @@ const renderers = { overview: renderOverview, instances: renderInstances, networ
 
 function route() {
   if (!state.user || !state.dashboard) return;
-  let view = location.hash.replace(/^#/, "") || "overview";
+  const rawRoute = location.hash.replace(/^#/, "") || "overview";
+  const instanceMatch = rawRoute.match(/^instance\/(.+)$/);
+  let resourceId = null;
+  if (instanceMatch) {
+    try { resourceId = decodeURIComponent(instanceMatch[1]); } catch { resourceId = null; }
+  }
+  let view = resourceId ? "instance" : rawRoute;
   if (!views[view]) view = "overview";
   if (view === "admin" && state.user.role !== "admin") view = "overview";
   state.currentView = view;
-  const [title, description] = views[view];
+  if (view !== "instance" && mediaPollTimer) {
+    clearTimeout(mediaPollTimer);
+    mediaPollTimer = null;
+  }
+  const resource = resourceId
+    ? (state.dashboard.resources || []).find((item) => item.id === resourceId) || state.admin?.resources?.find((item) => item.id === resourceId)
+    : null;
+  const [defaultTitle, description] = views[view];
+  const title = resource ? (resource.displayName || resource.name) : defaultTitle;
   els.pageTitle.textContent = title;
   els.pageDescription.textContent = description;
-  els.currentSection.textContent = title;
+  els.currentSection.textContent = view === "instance" ? "Instance details" : title;
   els.todayLabel.textContent = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(new Date());
-  document.querySelectorAll(".nav-item").forEach((link) => link.classList.toggle("active", link.dataset.view === view));
+  document.querySelectorAll(".nav-item").forEach((link) => link.classList.toggle("active", link.dataset.view === (view === "instance" ? "instances" : view)));
   if (view === "admin" && !state.admin) {
     els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading control center</div>`;
     loadAdmin().then(renderAdmin).catch((error) => showToast("error", "Could not load", friendlyError(error)));
-  } else renderers[view]();
+  } else if (view === "instance") renderInstanceDetail(resourceId);
+  else renderers[view]();
   closeSidebar();
 }
 
@@ -342,20 +811,28 @@ function openClusterEditor(clusterId) {
   els.editDialog.showModal();
 }
 
+function openIsoPolicyEditor(policyId) {
+  const policy = state.admin.isoPolicies.find((item) => item.id === policyId);
+  if (!policy) return;
+  els.editForm.dataset.kind = "iso-policy";
+  els.editForm.dataset.id = policy.id;
+  els.editDialogTitle.textContent = "Edit ISO storage policy";
+  els.editDialogBody.innerHTML = `<div class="form-grid">
+    <div class="field full"><label>Proxmox destination</label><input disabled value="${escapeHtml(policy.clusterName)} · ${escapeHtml(policy.storageId)}"></div>
+    <div class="field"><label for="editIsoPolicyName">Customer-facing name</label><input id="editIsoPolicyName" name="displayName" required maxlength="100" value="${escapeHtml(policy.displayName)}"></div>
+    <div class="field"><label for="editIsoPolicyStatus">Status</label><select id="editIsoPolicyStatus" name="status"><option value="active" ${policy.status === "active" ? "selected" : ""}>Active</option><option value="disabled" ${policy.status === "disabled" ? "selected" : ""}>Disabled</option></select></div>
+    <div class="field"><label for="editIsoMaxUpload">Maximum file size (GB)</label><input id="editIsoMaxUpload" name="maxUploadGb" type="number" min="1" step="1" required value="${Math.round(policy.maxUploadBytes / 1024 ** 3)}"></div>
+    <div class="field"><label for="editIsoQuota">Quota per customer (GB)</label><input id="editIsoQuota" name="quotaGb" type="number" min="1" step="1" required value="${Math.round(policy.customerQuotaBytes / 1024 ** 3)}"></div>
+    <label class="policy-checkbox full"><input name="allowDelete" type="checkbox" ${policy.allowDelete ? "checked" : ""}><span><strong>Allow customer deletion</strong><small>Requires Datastore.Allocate on this storage in Proxmox.</small></span></label>
+  </div><div class="notice warning"><span>!</span><span>Disabling the policy blocks new uploads, mounts, and deletions but preserves every ownership record.</span></div>`;
+  els.editDialogError.textContent = "";
+  els.editDialog.showModal();
+}
+
 const DEFAULT_UI_PERMISSIONS = new Set(["view_status", "start", "stop", "shutdown", "reboot", "suspend", "resume", "console", "view_config", "view_usage"]);
 
-async function showDetails(resourceId) {
-  const resource = (state.dashboard.resources || []).find((item) => item.id === resourceId) || state.admin?.resources.find((item) => item.id === resourceId);
-  if (!resource) return;
-  els.instanceDialogTitle.textContent = resource.displayName || resource.name;
-  els.instanceDialogBody.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading resource</div>`;
-  els.instanceDialog.showModal();
-  try {
-    const details = await apiFetch(`/api/v1/resources/${encodeURIComponent(resource.id)}`);
-    els.instanceDialogBody.innerHTML = `<div class="detail-sections"><section class="detail-hero">${resourceIdentity(resource)}${statusMarkup(resource)}</section><section class="detail-section"><h3>Resource</h3><dl class="detail-list"><div><dt>Cluster</dt><dd>${escapeHtml(resource.clusterName)}</dd></div><div><dt>Node</dt><dd>${escapeHtml(resource.node)}</dd></div><div><dt>Identity</dt><dd>${resource.type.toUpperCase()} ${resource.vmid}</dd></div><div><dt>Primary IP</dt><dd>${escapeHtml(details.network?.primaryIp || resource.ip || "Unavailable")}</dd></div><div><dt>vCPU</dt><dd>${resource.vcpu}</dd></div><div><dt>Memory</dt><dd>${resource.memory} GB</dd></div></dl></section>${Object.keys(details.config || {}).length ? `<section class="detail-section"><h3>Allowlisted configuration</h3><dl class="detail-list">${Object.entries(details.config).map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl></section>` : ""}<section class="detail-section"><h3>Allowed operations</h3><div class="permission-badges">${(resource.permissions || []).map((permission) => `<span>${escapeHtml(permissions.find(([id]) => id === permission)?.[1] || permission)}</span>`).join("")}</div></section></div>`;
-  } catch (error) {
-    els.instanceDialogBody.innerHTML = emptyState("!", "Details unavailable", friendlyError(error));
-  }
+function showDetails(resourceId) {
+  location.hash = `#instance/${encodeURIComponent(resourceId)}`;
 }
 
 function confirmAction(resourceId, action) {
@@ -374,10 +851,148 @@ function confirmAction(resourceId, action) {
 async function runAction(resourceId, action) {
   try {
     const result = await apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/actions`, { method: "POST", headers: { "Idempotency-Key": `${state.user.id}-${resourceId}-${action}-${Date.now()}` }, body: { action } });
-    showToast("success", `${action[0].toUpperCase()}${action.slice(1)} requested`, result.completed ? "The resource status was updated." : "Proxmox accepted the task.");
-    await loadDashboard();
+    if (result.task) mergeTask(result.task);
+    showToast("success", result.completed ? "Action complete" : `${actionLabel(action)} started`, result.completed ? "The resource status was updated." : "Nimbus will follow the Proxmox task automatically.");
+    if (result.completed) await loadDashboard();
     route();
-  } catch (error) { showToast("error", "Action blocked", friendlyError(error)); }
+    scheduleTaskPolling();
+  } catch (error) {
+    if (error.payload?.task) {
+      mergeTask(error.payload.task);
+      scheduleTaskPolling();
+      route();
+    }
+    showToast("error", "Action blocked", friendlyError(error));
+  }
+}
+
+async function uploadIso(resourceId, file, policyId) {
+  state.instance.upload = { name: file.name, progress: 0, loaded: 0, total: file.size, status: "uploading" };
+  renderInstanceDetail(resourceId);
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/v1/resources/${encodeURIComponent(resourceId)}/media/upload?policyId=${encodeURIComponent(policyId)}`);
+      xhr.responseType = "json";
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("Accept", "application/json");
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.setRequestHeader("X-CSRF-Token", state.csrfToken);
+      xhr.setRequestHeader("X-Nimbus-Filename", encodeURIComponent(file.name));
+      xhr.setRequestHeader("X-Nimbus-Size", String(file.size));
+      xhr.upload.onprogress = (event) => {
+        if (!state.instance.upload) return;
+        const total = event.lengthComputable ? event.total : file.size;
+        const progress = total ? Math.min(99, Math.round(event.loaded / total * 100)) : 0;
+        Object.assign(state.instance.upload, { progress, loaded: event.loaded, total });
+        const bar = document.getElementById("isoUploadProgressBar");
+        if (bar) bar.style.width = `${progress}%`;
+        const copy = document.querySelector(".iso-upload-progress small");
+        const value = document.querySelector(".iso-upload-progress b");
+        if (copy) copy.textContent = `${progress}% · ${formatBytes(event.loaded)} of ${formatBytes(total)}`;
+        if (value) value.textContent = `${progress}%`;
+      };
+      xhr.upload.onload = () => {
+        if (!state.instance.upload) return;
+        Object.assign(state.instance.upload, { progress: 100, loaded: file.size, status: "finishing" });
+        renderInstanceDetail(resourceId);
+      };
+      xhr.onerror = () => reject(Object.assign(new Error("The network connection interrupted the ISO upload."), { code: "iso_upload_interrupted" }));
+      xhr.onabort = () => reject(Object.assign(new Error("The ISO upload was cancelled."), { code: "iso_upload_cancelled" }));
+      xhr.onload = () => {
+        let payload = xhr.response;
+        if (!payload && xhr.responseText) {
+          try { payload = JSON.parse(xhr.responseText); } catch { payload = {}; }
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(payload || {});
+        else reject(Object.assign(new Error(payload?.message || payload?.error || `Upload failed (${xhr.status})`), { code: payload?.error, status: xhr.status, payload }));
+      };
+      xhr.send(file);
+    });
+    showToast("success", result.image?.status === "processing" ? "ISO received" : "ISO uploaded", result.image?.status === "processing" ? "Proxmox is finalizing the image. Nimbus will follow its task." : "The image is ready to mount.");
+  } catch (error) {
+    showToast("error", "ISO upload failed", friendlyError(error));
+  } finally {
+    state.instance.upload = null;
+    await loadInstanceMedia({ quiet: true });
+  }
+}
+
+async function mountIso(resourceId, isoImageId) {
+  try {
+    await apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/media/mount`, { method: "POST", body: { isoImageId } });
+    await loadInstanceMedia({ quiet: true });
+    showToast("success", "ISO mounted", "The virtual CD/DVD drive is ready.");
+  } catch (error) { showToast("error", "Could not mount ISO", friendlyError(error)); }
+}
+
+async function ejectIso(resourceId) {
+  try {
+    await apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/media/eject`, { method: "POST", body: {} });
+    await loadInstanceMedia({ quiet: true });
+    showToast("success", "ISO ejected", "The virtual CD/DVD drive is now empty.");
+  } catch (error) { showToast("error", "Could not eject ISO", friendlyError(error)); }
+}
+
+async function deleteIso(resourceId, isoImageId, { dismiss = false } = {}) {
+  try {
+    await apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/media/${encodeURIComponent(isoImageId)}`, { method: "DELETE", body: {} });
+    await loadInstanceMedia({ quiet: true });
+    showToast("success", dismiss ? "Failed upload dismissed" : "ISO deletion started", dismiss ? "The failed local upload record was removed." : "Nimbus removed the ownership record or is following the Proxmox deletion task.");
+  } catch (error) { showToast("error", "Could not delete ISO", friendlyError(error)); }
+}
+
+function mergeTask(task) {
+  if (!task?.id) return;
+  if (state.dashboard) {
+    const tasks = state.dashboard.tasks || (state.dashboard.tasks = []);
+    const index = tasks.findIndex((item) => item.id === task.id);
+    if (index >= 0) tasks[index] = task; else tasks.unshift(task);
+  }
+  if (state.instance.details) {
+    const tasks = state.instance.details.tasks || (state.instance.details.tasks = []);
+    const index = tasks.findIndex((item) => item.id === task.id);
+    if (index >= 0) tasks[index] = task; else tasks.unshift(task);
+  }
+}
+
+function scheduleTaskPolling() {
+  if (taskPollTimer || taskPolling || !state.user) return;
+  const pending = (state.dashboard?.tasks || []).some((task) => !task.completed);
+  if (!pending) return;
+  taskPollTimer = setTimeout(() => {
+    taskPollTimer = null;
+    pollActiveTasks();
+  }, document.visibilityState === "visible" ? 1500 : 5000);
+}
+
+async function pollActiveTasks() {
+  if (taskPolling || !state.user) return;
+  const pending = (state.dashboard?.tasks || []).filter((task) => !task.completed).slice(0, 6);
+  if (!pending.length) return;
+  taskPolling = true;
+  try {
+    const results = await Promise.all(pending.map(async (task) => {
+      try { return await apiFetch(`/api/v1/tasks/${encodeURIComponent(task.id)}`); }
+      catch { return null; }
+    }));
+    let completedAny = false;
+    for (const result of results.filter(Boolean)) {
+      mergeTask(result.task);
+      if (result.completed) {
+        completedAny = true;
+        if (!announcedTaskIds.has(result.task.id)) {
+          announcedTaskIds.add(result.task.id);
+          showToast(result.task.success ? "success" : "error", result.task.success ? "Action completed" : "Action failed", result.task.success ? "Proxmox completed the requested operation." : result.task.message);
+        }
+      }
+    }
+    if (completedAny) await loadDashboard();
+    route();
+  } finally {
+    taskPolling = false;
+    scheduleTaskPolling();
+  }
 }
 
 async function openConsole(resourceId) {
@@ -397,7 +1012,8 @@ async function refresh({ quiet = false } = {}) {
   try {
     await loadDashboard();
     if (state.currentView === "admin") await loadAdmin();
-    route();
+    if (state.currentView === "instance" && state.instance.resourceId) await loadInstanceDetails(state.instance.resourceId, { quiet: true });
+    else route();
     if (!quiet) showToast("success", "Refreshed", "Latest panel data loaded.");
   } catch (error) { if (!quiet) showToast("error", "Refresh failed", friendlyError(error)); }
   finally { state.loading = false; els.refreshButton.disabled = false; }
@@ -474,6 +1090,14 @@ els.editForm.addEventListener("submit", async (event) => {
       if (!payload.tokenId) delete payload.tokenId;
       if (!payload.tokenSecret) delete payload.tokenSecret;
       await apiFetch(`/api/admin/clusters/${encodeURIComponent(id)}`, { method: "PATCH", body: payload });
+    } else if (kind === "iso-policy") {
+      const payload = formPayload(form);
+      payload.maxUploadBytes = Math.round(Number(payload.maxUploadGb) * 1024 ** 3);
+      payload.customerQuotaBytes = Math.round(Number(payload.quotaGb) * 1024 ** 3);
+      payload.allowDelete = new FormData(form).has("allowDelete");
+      delete payload.maxUploadGb;
+      delete payload.quotaGb;
+      await apiFetch(`/api/admin/iso-policies/${encodeURIComponent(id)}`, { method: "PATCH", body: payload });
     } else return;
     els.editDialog.close();
     await refresh({ quiet: true });
@@ -484,6 +1108,31 @@ els.editForm.addEventListener("submit", async (event) => {
 els.viewRoot.addEventListener("click", async (event) => {
   const target = event.target.closest("button, a");
   if (!target) return;
+  if (target.dataset.copy !== undefined) {
+    try {
+      await navigator.clipboard.writeText(target.dataset.copy);
+      showToast("success", "Copied", `${target.dataset.copy} is on your clipboard.`);
+    } catch {
+      showToast("error", "Could not copy", "Select and copy the value manually.");
+    }
+    return;
+  }
+  if (target.dataset.retryInstance) {
+    state.instance.error = null;
+    state.instance.loading = true;
+    renderInstanceDetail(target.dataset.retryInstance);
+    loadInstanceDetails(target.dataset.retryInstance);
+    return;
+  }
+  if (target.dataset.refreshMedia !== undefined) { await loadInstanceMedia(); return; }
+  if (target.dataset.mountIso) { await mountIso(state.instance.resourceId, target.dataset.mountIso); return; }
+  if (target.dataset.ejectIso !== undefined) { await ejectIso(state.instance.resourceId); return; }
+  if (target.dataset.deleteIso) {
+    const dismiss = target.dataset.dismissIso !== undefined;
+    if (!dismiss && !confirm("Delete this ISO from Proxmox storage? This cannot be undone.")) return;
+    await deleteIso(state.instance.resourceId, target.dataset.deleteIso, { dismiss });
+    return;
+  }
   if (target.dataset.action) { confirmAction(target.dataset.resource, target.dataset.action); return; }
   if (target.dataset.details) { showDetails(target.dataset.details); return; }
   if (target.dataset.console) { openConsole(target.dataset.console); return; }
@@ -491,6 +1140,30 @@ els.viewRoot.addEventListener("click", async (event) => {
   if (target.dataset.editCustomer) { openCustomerEditor(target.dataset.editCustomer); return; }
   if (target.dataset.editUser) { openUserEditor(target.dataset.editUser); return; }
   if (target.dataset.editCluster) { openClusterEditor(target.dataset.editCluster); return; }
+  if (target.dataset.editIsoPolicy) { openIsoPolicyEditor(target.dataset.editIsoPolicy); return; }
+  if (target.dataset.discoverIso) {
+    const clusterId = target.dataset.discoverIso;
+    target.disabled = true;
+    try {
+      const result = await apiFetch(`/api/admin/clusters/${encodeURIComponent(clusterId)}/iso-storage-candidates`);
+      state.isoCandidates[clusterId] = result.candidates || [];
+      renderAdmin();
+      showToast(result.candidates?.length ? "success" : "error", result.candidates?.length ? "ISO storage discovered" : "No ISO storage found", result.candidates?.length ? `${result.candidates.length} storage destination${result.candidates.length === 1 ? "" : "s"} available.` : "Enable ISO content on a Proxmox storage and verify Datastore.Audit.");
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Discovery failed", friendlyError(error));
+    }
+    return;
+  }
+  if (target.dataset.deleteIsoPolicy) {
+    if (!confirm("Delete this ISO storage policy? Policies with customer ISO records can only be disabled.")) return;
+    try {
+      await apiFetch(`/api/admin/iso-policies/${encodeURIComponent(target.dataset.deleteIsoPolicy)}`, { method: "DELETE", body: {} });
+      await refresh({ quiet: true });
+      showToast("success", "ISO policy deleted", "The local policy was removed. Proxmox storage was not changed.");
+    } catch (error) { showToast("error", "Could not delete policy", friendlyError(error)); }
+    return;
+  }
   if (target.dataset.deleteCustomer) {
     if (!confirm("Delete this customer? Its users and assignments will be removed, but Proxmox resources will not be deleted.")) return;
     try { await apiFetch(`/api/admin/customers/${encodeURIComponent(target.dataset.deleteCustomer)}`, { method: "DELETE", body: {} }); await refresh({ quiet: true }); showToast("success", "Customer deleted", "Local users and assignments were removed; Proxmox guests were untouched."); }
@@ -529,6 +1202,15 @@ els.viewRoot.addEventListener("click", async (event) => {
   }
 });
 
+els.viewRoot.addEventListener("change", (event) => {
+  const target = event.target;
+  if (target.matches("[data-history-timeframe]")) loadInstanceHistory(target.value);
+  if (target.matches("[data-iso-cluster]")) {
+    state.isoClusterId = target.value;
+    renderAdmin();
+  }
+});
+
 els.viewRoot.addEventListener("invalid", (event) => {
   const form = event.target.closest("form");
   if (!form) return;
@@ -544,6 +1226,17 @@ els.viewRoot.addEventListener("invalid", (event) => {
 els.viewRoot.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
+  if (form.id === "isoUploadForm") {
+    const file = form.elements.isoFile?.files?.[0];
+    const policyId = form.elements.policyId?.value;
+    if (!file || !policyId) { form.reportValidity(); return; }
+    if (!file.name.toLowerCase().endsWith(".iso")) {
+      showToast("error", "Choose an ISO image", "The selected filename must end in .iso.");
+      return;
+    }
+    await uploadIso(state.instance.resourceId, file, policyId);
+    return;
+  }
   const createKind = form.dataset.adminCreate
     || (form.elements.apiUrl && form.elements.tokenId && form.elements.tokenSecret ? "cluster" : null)
     || (form.elements.email && form.elements.role ? "user" : null)
@@ -566,6 +1259,14 @@ els.viewRoot.addEventListener("submit", async (event) => {
       const payload = formPayload(form);
       if (payload.role === "admin") payload.customerId = null;
       await apiFetch("/api/admin/users", { method: "POST", body: payload });
+    } else if (createKind === "iso-policy" || form.id === "createIsoPolicyForm") {
+      const payload = formPayload(form);
+      payload.maxUploadBytes = Math.round(Number(payload.maxUploadGb) * 1024 ** 3);
+      payload.customerQuotaBytes = Math.round(Number(payload.quotaGb) * 1024 ** 3);
+      payload.allowDelete = new FormData(form).has("allowDelete");
+      delete payload.maxUploadGb;
+      delete payload.quotaGb;
+      await apiFetch("/api/admin/iso-policies", { method: "POST", body: payload });
     } else if (form.id === "profileForm") {
       const result = await apiFetch("/api/v1/profile", { method: "PATCH", body: formPayload(form) });
       state.user = result.user; applyUser(); showToast("success", "Profile updated", "Your display name has been saved."); return;
@@ -591,5 +1292,11 @@ document.addEventListener("keydown", (event) => {
 setInterval(() => {
   if (document.visibilityState === "visible" && state.user && Date.now() - state.lastUpdatedAt > 45_000 && state.currentView !== "admin") refresh({ quiet: true });
 }, 15_000);
+
+window.addEventListener("resize", () => {
+  clearTimeout(drawInstanceChart.resizeTimer);
+  drawInstanceChart.resizeTimer = setTimeout(drawInstanceChart, 120);
+});
+document.addEventListener("visibilitychange", scheduleTaskPolling);
 
 loadSession();

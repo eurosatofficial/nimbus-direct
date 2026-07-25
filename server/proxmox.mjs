@@ -5,6 +5,8 @@
  * used for tenancy.
  */
 
+import { createHash, randomBytes } from "node:crypto";
+
 export class ProxmoxError extends Error {
   constructor(message, { code = "proxmox_request_failed", status = 502, upstreamStatus = null } = {}) {
     super(message);
@@ -27,6 +29,12 @@ function round(value, precision = 1) {
 
 function parseStorageList(value) {
   return [...new Set(String(value || "").split(",").map((entry) => entry.trim()).filter(Boolean))];
+}
+
+function safeIsoFilename(value) {
+  const name = String(value || "").replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 180);
+  if (!name.toLowerCase().endsWith(".iso")) throw new ProxmoxError("ISO filename must end in .iso", { code: "invalid_iso_filename", status: 400 });
+  return name;
 }
 
 async function mapLimit(items, limit, mapper) {
@@ -131,6 +139,8 @@ export class ProxmoxClient {
         },
       });
     } catch (error) {
+      if (error instanceof ProxmoxError) throw error;
+      if (error?.cause instanceof ProxmoxError) throw error.cause;
       if (error?.name === "TimeoutError" || error?.name === "AbortError" || error?.code === "UND_ERR_CONNECT_TIMEOUT") {
         throw new ProxmoxError("Proxmox did not respond before the timeout", { code: "proxmox_timeout", status: 504 });
       }
@@ -281,6 +291,138 @@ export class ProxmoxClient {
         includesMemory: Boolean(snapshot.vmstate),
       })),
     };
+  }
+
+  async listIsoStorageCandidates() {
+    const nodes = await this.request("/nodes");
+    const nodeNames = (Array.isArray(nodes) ? nodes : []).filter((node) => node?.node).map((node) => node.node);
+    const responses = await mapLimit(nodeNames, 4, async (node) => {
+      try {
+        const storages = await this.request(`/nodes/${encodeURIComponent(node)}/storage?content=iso&enabled=1`);
+        return (Array.isArray(storages) ? storages : []).filter((storage) => {
+          const content = String(storage.content || "").split(",").map((entry) => entry.trim());
+          return storage.storage && (!storage.content || content.includes("iso")) && storage.active !== 0 && storage.enabled !== 0;
+        }).map((storage) => ({ node, ...storage }));
+      } catch {
+        return [];
+      }
+    });
+    const grouped = new Map();
+    for (const storage of responses.flat()) {
+      const current = grouped.get(storage.storage) || {
+        storageId: storage.storage,
+        type: storage.type || storage.plugintype || "file",
+        shared: Boolean(storage.shared),
+        nodes: [],
+        totalBytes: 0,
+        availableBytes: 0,
+      };
+      current.shared ||= Boolean(storage.shared);
+      current.nodes.push(storage.node);
+      current.totalBytes = Math.max(current.totalBytes, finite(storage.total));
+      current.availableBytes = Math.max(current.availableBytes, finite(storage.avail));
+      grouped.set(storage.storage, current);
+    }
+    return [...grouped.values()].sort((left, right) => left.storageId.localeCompare(right.storageId));
+  }
+
+  async requireIsoStorage(node, storageId) {
+    const storages = await this.request(`/nodes/${encodeURIComponent(node)}/storage?content=iso&enabled=1`);
+    const storage = (Array.isArray(storages) ? storages : []).find((entry) => entry.storage === storageId);
+    const content = String(storage?.content || "").split(",").map((entry) => entry.trim());
+    if (!storage || (storage.content && !content.includes("iso")) || storage.active === 0 || storage.enabled === 0) {
+      throw new ProxmoxError("The selected ISO storage is not active on this node", { code: "iso_storage_unavailable", status: 409 });
+    }
+    return {
+      storageId,
+      node,
+      type: storage.type || storage.plugintype || "file",
+      shared: Boolean(storage.shared),
+      totalBytes: finite(storage.total),
+      availableBytes: finite(storage.avail),
+    };
+  }
+
+  async uploadIso({ node, storageId, fileName, source, expectedBytes, signal }) {
+    const normalizedName = safeIsoFilename(fileName);
+    const boundary = `----NimbusDirect${randomBytes(18).toString("hex")}`;
+    const prefix = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="content"\r\n\r\niso\r\n`
+      + `--${boundary}\r\nContent-Disposition: form-data; name="filename"; filename="${normalizedName}"\r\n`
+      + "Content-Type: application/octet-stream\r\n\r\n",
+      "utf8",
+    );
+    const suffix = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+    const hash = createHash("sha256");
+    let receivedBytes = 0;
+    const multipart = (async function* streamMultipart() {
+      yield prefix;
+      for await (const chunk of source) {
+        receivedBytes += chunk.length;
+        if (receivedBytes > expectedBytes) {
+          throw new ProxmoxError("The upload exceeded its declared size", { code: "iso_upload_size_mismatch", status: 400 });
+        }
+        hash.update(chunk);
+        yield chunk;
+      }
+      if (receivedBytes !== expectedBytes) {
+        throw new ProxmoxError("The upload did not match its declared size", { code: "iso_upload_size_mismatch", status: 400 });
+      }
+      yield suffix;
+    })();
+    const result = await this.request(`/nodes/${encodeURIComponent(node)}/storage/${encodeURIComponent(storageId)}/upload`, {
+      method: "POST",
+      body: multipart,
+      duplex: "half",
+      signal,
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Content-Length": String(prefix.length + expectedBytes + suffix.length),
+      },
+    });
+    return { result, bytes: receivedBytes, sha256: hash.digest("hex"), fileName: normalizedName };
+  }
+
+  async getQemuCdroms(vm) {
+    if (vm.type !== "qemu") throw new ProxmoxError("ISO media is available only for QEMU virtual machines", { code: "iso_qemu_only", status: 400 });
+    const config = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config?current=1`);
+    return Object.entries(config || {}).filter(([key, value]) =>
+      /^(ide|sata|scsi)\d+$/.test(key) && String(value).split(",").includes("media=cdrom"))
+      .map(([slot, value]) => {
+        const volumeId = String(value).split(",")[0];
+        return { slot, volumeId: volumeId === "none" ? null : volumeId };
+      });
+  }
+
+  async mountIso(vm, volumeId) {
+    if (vm.type !== "qemu") throw new ProxmoxError("ISO media is available only for QEMU virtual machines", { code: "iso_qemu_only", status: 400 });
+    const config = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config?current=1`);
+    const cdroms = Object.entries(config || {}).filter(([key, value]) =>
+      /^(ide|sata|scsi)\d+$/.test(key) && String(value).split(",").includes("media=cdrom"));
+    const occupied = cdroms.find(([, value]) => String(value).split(",")[0] !== "none");
+    if (occupied) throw new ProxmoxError("A CD/DVD image is already mounted. Eject it first.", { code: "cdrom_in_use", status: 409 });
+    const existingEmpty = cdroms.find(([, value]) => String(value).split(",")[0] === "none")?.[0];
+    const candidates = ["ide2", "sata5", "sata4", "ide3"];
+    const slot = existingEmpty || candidates.find((candidate) => config?.[candidate] === undefined);
+    if (!slot) throw new ProxmoxError("No free virtual CD/DVD slot is available", { code: "cdrom_slot_unavailable", status: 409 });
+    const body = new URLSearchParams({ [slot]: `${volumeId},media=cdrom` });
+    await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config`, { method: "PUT", body });
+    return { slot, volumeId };
+  }
+
+  async ejectIso(vm, { slot, volumeId }) {
+    if (vm.type !== "qemu") throw new ProxmoxError("ISO media is available only for QEMU virtual machines", { code: "iso_qemu_only", status: 400 });
+    if (!/^(ide|sata|scsi)\d+$/.test(String(slot))) throw new ProxmoxError("The recorded CD/DVD slot is invalid", { code: "cdrom_slot_invalid", status: 409 });
+    const config = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config?current=1`);
+    const currentVolume = String(config?.[slot] || "").split(",")[0];
+    if (currentVolume !== volumeId) throw new ProxmoxError("The VM CD/DVD configuration changed outside Nimbus", { code: "cdrom_state_changed", status: 409 });
+    const body = new URLSearchParams({ [slot]: "none,media=cdrom" });
+    await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config`, { method: "PUT", body });
+    return { slot, ejected: true };
+  }
+
+  async deleteIso({ node, storageId, volumeId }) {
+    return this.request(`/nodes/${encodeURIComponent(node)}/storage/${encodeURIComponent(storageId)}/content/${encodeURIComponent(volumeId)}`, { method: "DELETE" });
   }
 
   async getBackups(instances, storageValue) {

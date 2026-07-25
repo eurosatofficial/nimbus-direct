@@ -14,7 +14,7 @@ import {
 export const ASSIGNMENT_PERMISSIONS = [
   "view_status", "start", "stop", "shutdown", "reboot", "reset", "suspend", "resume",
   "console", "view_config", "view_usage", "snapshot_create", "snapshot_restore", "snapshot_delete",
-  "config_change",
+  "config_change", "iso_view", "iso_upload", "iso_mount", "iso_delete",
 ];
 
 export const DEFAULT_PERMISSIONS = [
@@ -113,6 +113,79 @@ function publicResource(row) {
   };
 }
 
+function publicTask(row) {
+  if (!row) return null;
+  const completed = Boolean(row.completed_at) || row.status === "stopped";
+  const success = completed ? row.exit_status === "OK" : null;
+  return {
+    id: row.id,
+    resourceId: row.resource_id,
+    node: row.node,
+    action: row.action,
+    status: row.status,
+    state: completed ? (success ? "success" : "failed") : "running",
+    completed,
+    success,
+    message: completed
+      ? (success ? "Completed successfully." : "Proxmox reported that the task failed.")
+      : "Proxmox is processing this action.",
+    createdAt: row.created_at,
+    completedAt: row.completed_at || null,
+    lastCheckedAt: row.last_checked_at || null,
+  };
+}
+
+function publicIsoPolicy(row) {
+  return row && {
+    id: row.id,
+    clusterId: row.cluster_id,
+    clusterName: row.cluster_name || row.cluster_id,
+    storageId: row.storage_id,
+    displayName: row.display_name,
+    status: row.status,
+    maxUploadBytes: Number(row.max_upload_bytes),
+    customerQuotaBytes: Number(row.customer_quota_bytes),
+    allowDelete: Boolean(row.allow_delete),
+    imageCount: Number(row.image_count || 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function publicIsoImage(row) {
+  return row && {
+    id: row.id,
+    customerId: row.customer_id || null,
+    clusterId: row.cluster_id,
+    storagePolicyId: row.storage_policy_id || null,
+    storageId: row.storage_id,
+    node: row.node,
+    fileName: row.file_name,
+    originalName: row.original_name,
+    sizeBytes: Number(row.size_bytes || 0),
+    sha256: row.sha256 || null,
+    status: row.status,
+    error: row.status === "error" ? "Proxmox could not finish this ISO operation." : null,
+    allowDelete: Boolean(row.allow_delete),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function publicIsoMount(row) {
+  return row && {
+    id: row.id,
+    isoImageId: row.iso_image_id,
+    resourceId: row.resource_id,
+    driveSlot: row.drive_slot,
+    status: row.status,
+    fileName: row.file_name || null,
+    originalName: row.original_name || null,
+    mountedAt: row.mounted_at,
+    ejectedAt: row.ejected_at || null,
+  };
+}
+
 function normalizeId(value, label) {
   const id = String(value || "").trim().toLowerCase();
   if (!/^[a-z0-9][a-z0-9_-]{1,63}$/.test(id)) throw problem(`${label} ID must be 2-64 lowercase characters`);
@@ -122,6 +195,18 @@ function normalizeId(value, label) {
 function normalizePermissions(values) {
   const requested = new Set(Array.isArray(values) ? values : DEFAULT_PERMISSIONS);
   return ASSIGNMENT_PERMISSIONS.filter((permission) => requested.has(permission));
+}
+
+function normalizeStorageId(value) {
+  const storageId = String(value || "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(storageId)) throw problem("Storage ID is invalid", "invalid_storage_id");
+  return storageId;
+}
+
+function normalizeByteLimit(value, label) {
+  const bytes = Number(value);
+  if (!Number.isSafeInteger(bytes) || bytes < 1024 * 1024) throw problem(`${label} must be at least 1 MB`);
+  return bytes;
 }
 
 function customerSelect(where = "") {
@@ -153,6 +238,17 @@ function resourceSelect(where = "") {
     LEFT JOIN assignment_permissions ap ON ap.assignment_id=a.id AND ap.allowed=1
     ${where}
     GROUP BY r.id`;
+}
+
+function isoPolicySelect(where = "") {
+  return `SELECT p.*,c.name AS cluster_name,
+    (SELECT COUNT(*) FROM iso_images i WHERE i.storage_policy_id=p.id AND i.status!='deleted') AS image_count
+    FROM iso_storage_policies p JOIN proxmox_clusters c ON c.id=p.cluster_id ${where}`;
+}
+
+function isoImageSelect(where = "") {
+  return `SELECT i.*,p.allow_delete FROM iso_images i
+    LEFT JOIN iso_storage_policies p ON p.id=i.storage_policy_id ${where}`;
 }
 
 export async function openStore(dataDir, { appSecret = "" } = {}) {
@@ -294,6 +390,52 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       created_at INTEGER NOT NULL
     ) STRICT;
 
+    CREATE TABLE IF NOT EXISTS iso_storage_policies (
+      id TEXT PRIMARY KEY,
+      cluster_id TEXT NOT NULL REFERENCES proxmox_clusters(id) ON DELETE CASCADE,
+      storage_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
+      max_upload_bytes INTEGER NOT NULL,
+      customer_quota_bytes INTEGER NOT NULL,
+      allow_delete INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(cluster_id,storage_id)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS iso_images (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT REFERENCES customers(id) ON DELETE SET NULL,
+      cluster_id TEXT NOT NULL REFERENCES proxmox_clusters(id) ON DELETE CASCADE,
+      storage_policy_id TEXT REFERENCES iso_storage_policies(id) ON DELETE SET NULL,
+      storage_id TEXT NOT NULL,
+      node TEXT NOT NULL,
+      volume_id TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      sha256 TEXT,
+      status TEXT NOT NULL CHECK(status IN ('uploading','processing','ready','error','deleting','deleted')),
+      operation_upid TEXT,
+      error_code TEXT,
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS iso_mounts (
+      id TEXT PRIMARY KEY,
+      iso_image_id TEXT NOT NULL REFERENCES iso_images(id) ON DELETE CASCADE,
+      resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+      drive_slot TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('active','ejected')),
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      mounted_at INTEGER NOT NULL,
+      ejected_at INTEGER,
+      created_at INTEGER NOT NULL
+    ) STRICT;
+
     CREATE TABLE IF NOT EXISTS console_sessions (
       id_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -311,6 +453,12 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     CREATE INDEX IF NOT EXISTS assignments_customer_idx ON customer_resource_assignments(customer_id,status);
     CREATE INDEX IF NOT EXISTS audit_customer_created_idx ON audit_logs(customer_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_logs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS tasks_customer_created_idx ON api_tasks(customer_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS tasks_resource_created_idx ON api_tasks(resource_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS iso_images_customer_created_idx ON iso_images(customer_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS iso_images_policy_status_idx ON iso_images(storage_policy_id,status);
+    CREATE INDEX IF NOT EXISTS iso_mounts_resource_status_idx ON iso_mounts(resource_id,status);
+    CREATE INDEX IF NOT EXISTS iso_mounts_image_status_idx ON iso_mounts(iso_image_id,status);
     CREATE UNIQUE INDEX IF NOT EXISTS tasks_idempotency_idx ON api_tasks(user_id,idempotency_key) WHERE idempotency_key IS NOT NULL;
   `);
 
@@ -361,6 +509,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       return publicCustomer(getCustomerRow.get(id));
     },
     deleteCustomer(id) {
+      const images = database.prepare("SELECT COUNT(*) AS count FROM iso_images WHERE customer_id=? AND status!='deleted'").get(id).count;
+      if (images) throw problem("Delete the customer's ISO images before deleting the customer account", "customer_iso_images_exist", 409);
       const result = database.prepare("DELETE FROM customers WHERE id=?").run(id);
       if (!result.changes) throw problem("Customer does not exist", "customer_not_found", 404);
     },
@@ -530,6 +680,9 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (!getCustomerRow.get(customerId)) throw problem("Customer does not exist", "customer_not_found", 404);
       if (!getResourceRow.get(resourceId)) throw problem("Resource does not exist", "resource_not_found", 404);
       const existing = database.prepare("SELECT * FROM customer_resource_assignments WHERE resource_id=?").get(resourceId);
+      if (existing?.customer_id !== customerId && database.prepare("SELECT 1 FROM iso_mounts WHERE resource_id=? AND status='active' LIMIT 1").get(resourceId)) {
+        throw problem("Eject the mounted customer ISO before reassigning this resource", "resource_iso_mounted", 409);
+      }
       const now = Date.now();
       const assignmentId = existing?.id || randomToken(18);
       database.exec("BEGIN IMMEDIATE");
@@ -555,6 +708,9 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       return this.getResource(resourceId);
     },
     unassignResource(resourceId) {
+      if (database.prepare("SELECT 1 FROM iso_mounts WHERE resource_id=? AND status='active' LIMIT 1").get(resourceId)) {
+        throw problem("Eject the mounted customer ISO before removing this assignment", "resource_iso_mounted", 409);
+      }
       const result = database.prepare("UPDATE customer_resource_assignments SET status='unassigned',updated_at=? WHERE resource_id=? AND status='active'")
         .run(Date.now(), resourceId);
       if (!result.changes) throw problem("Assignment does not exist", "assignment_not_found", 404);
@@ -564,6 +720,132 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const row = database.prepare(`${resourceSelect(`WHERE r.id=? AND a.customer_id=? AND a.status='active'
         AND EXISTS (SELECT 1 FROM assignment_permissions p WHERE p.assignment_id=a.id AND p.permission=? AND p.allowed=1)`)}`).get(resourceId, customerId, permission);
       return publicResource(row);
+    },
+
+    createIsoPolicy({ clusterId, storageId, displayName, maxUploadBytes, customerQuotaBytes, allowDelete = false, status = "active" }) {
+      if (!getClusterRow.get(clusterId)) throw problem("Cluster does not exist", "cluster_not_found", 404);
+      const normalizedStorageId = normalizeStorageId(storageId);
+      const name = String(displayName || normalizedStorageId).trim();
+      if (!name || name.length > 100) throw problem("ISO storage display name must contain 1-100 characters");
+      if (!["active", "disabled"].includes(status)) throw problem("ISO storage policy status is invalid");
+      if (database.prepare("SELECT 1 FROM iso_storage_policies WHERE cluster_id=? AND storage_id=?").get(clusterId, normalizedStorageId)) {
+        throw problem("That Proxmox storage already has an ISO policy", "iso_policy_exists", 409);
+      }
+      const maxBytes = normalizeByteLimit(maxUploadBytes, "Maximum upload size");
+      const quotaBytes = normalizeByteLimit(customerQuotaBytes, "Customer quota");
+      if (quotaBytes < maxBytes) throw problem("Customer quota cannot be smaller than the per-file upload limit");
+      const id = randomToken(18);
+      const now = Date.now();
+      database.prepare(`INSERT INTO iso_storage_policies
+        (id,cluster_id,storage_id,display_name,status,max_upload_bytes,customer_quota_bytes,allow_delete,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, clusterId, normalizedStorageId, name, status, maxBytes, quotaBytes, allowDelete ? 1 : 0, now, now);
+      return publicIsoPolicy(database.prepare(isoPolicySelect("WHERE p.id=?")).get(id));
+    },
+    getIsoPolicy: (id) => publicIsoPolicy(database.prepare(isoPolicySelect("WHERE p.id=?")).get(id)),
+    listIsoPolicies({ clusterId = null, activeOnly = false } = {}) {
+      const clauses = [];
+      const params = [];
+      if (clusterId) { clauses.push("p.cluster_id=?"); params.push(clusterId); }
+      if (activeOnly) clauses.push("p.status='active'");
+      const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+      return database.prepare(`${isoPolicySelect(where)} ORDER BY c.name,p.display_name`).all(...params).map(publicIsoPolicy);
+    },
+    updateIsoPolicy(id, input) {
+      const row = database.prepare("SELECT * FROM iso_storage_policies WHERE id=?").get(id);
+      if (!row) throw problem("ISO storage policy does not exist", "iso_policy_not_found", 404);
+      const displayName = input.displayName === undefined ? row.display_name : String(input.displayName).trim();
+      const status = input.status ?? row.status;
+      const maxUploadBytes = input.maxUploadBytes === undefined ? row.max_upload_bytes : normalizeByteLimit(input.maxUploadBytes, "Maximum upload size");
+      const customerQuotaBytes = input.customerQuotaBytes === undefined ? row.customer_quota_bytes : normalizeByteLimit(input.customerQuotaBytes, "Customer quota");
+      const allowDelete = input.allowDelete === undefined ? row.allow_delete : (input.allowDelete ? 1 : 0);
+      if (!displayName || displayName.length > 100 || !["active", "disabled"].includes(status)) throw problem("Invalid ISO storage policy update");
+      if (customerQuotaBytes < maxUploadBytes) throw problem("Customer quota cannot be smaller than the per-file upload limit");
+      database.prepare("UPDATE iso_storage_policies SET display_name=?,status=?,max_upload_bytes=?,customer_quota_bytes=?,allow_delete=?,updated_at=? WHERE id=?")
+        .run(displayName, status, maxUploadBytes, customerQuotaBytes, allowDelete, Date.now(), id);
+      return publicIsoPolicy(database.prepare(isoPolicySelect("WHERE p.id=?")).get(id));
+    },
+    deleteIsoPolicy(id) {
+      const policy = database.prepare("SELECT * FROM iso_storage_policies WHERE id=?").get(id);
+      if (!policy) throw problem("ISO storage policy does not exist", "iso_policy_not_found", 404);
+      const images = database.prepare("SELECT COUNT(*) AS count FROM iso_images WHERE storage_policy_id=? AND status!='deleted'").get(id).count;
+      if (images) throw problem("Disable this policy instead; customer ISO records still use it", "iso_policy_in_use", 409);
+      database.prepare("DELETE FROM iso_storage_policies WHERE id=?").run(id);
+    },
+    getIsoUsage(customerId, storagePolicyId) {
+      return Number(database.prepare(`SELECT COALESCE(SUM(size_bytes),0) AS bytes FROM iso_images
+        WHERE customer_id=? AND storage_policy_id=? AND status IN ('uploading','processing','ready','deleting')`)
+        .get(customerId, storagePolicyId).bytes || 0);
+    },
+    createIsoImage({ customerId, clusterId, storagePolicyId, storageId, node, volumeId, fileName, originalName, sizeBytes, createdBy }) {
+      if (!getCustomerRow.get(customerId)) throw problem("Customer does not exist", "customer_not_found", 404);
+      const policy = database.prepare("SELECT * FROM iso_storage_policies WHERE id=? AND status='active'").get(storagePolicyId);
+      if (!policy || policy.cluster_id !== clusterId || policy.storage_id !== storageId) throw problem("ISO storage policy is unavailable", "iso_policy_not_found", 404);
+      const id = randomToken(18);
+      const now = Date.now();
+      database.prepare(`INSERT INTO iso_images
+        (id,customer_id,cluster_id,storage_policy_id,storage_id,node,volume_id,file_name,original_name,size_bytes,status,created_by,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,'uploading',?,?,?)`)
+        .run(id, customerId, clusterId, storagePolicyId, storageId, node, volumeId, fileName, originalName, Number(sizeBytes), createdBy, now, now);
+      return publicIsoImage(database.prepare(isoImageSelect("WHERE i.id=?")).get(id));
+    },
+    getIsoImageRow(id, user = null) {
+      if (!user || user.role === "admin") return database.prepare(isoImageSelect("WHERE i.id=?")).get(id);
+      return database.prepare(isoImageSelect("WHERE i.id=? AND i.customer_id=?")).get(id, user.customerId);
+    },
+    getIsoImage(id, user = null) { return publicIsoImage(this.getIsoImageRow(id, user)); },
+    listIsoImages(user, { clusterId = null, includeDeleted = false } = {}) {
+      const clauses = [];
+      const params = [];
+      if (user.role !== "admin") { clauses.push("i.customer_id=?"); params.push(user.customerId); }
+      if (clusterId) { clauses.push("i.cluster_id=?"); params.push(clusterId); }
+      if (!includeDeleted) clauses.push("i.status!='deleted'");
+      const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+      return database.prepare(`${isoImageSelect(where)} ORDER BY i.created_at DESC`).all(...params).map(publicIsoImage);
+    },
+    updateIsoImage(id, { status, sha256, operationUpid, errorCode, sizeBytes } = {}) {
+      const row = database.prepare("SELECT * FROM iso_images WHERE id=?").get(id);
+      if (!row) throw problem("ISO image does not exist", "iso_not_found", 404);
+      const nextStatus = status ?? row.status;
+      if (!["uploading", "processing", "ready", "error", "deleting", "deleted"].includes(nextStatus)) throw problem("ISO image status is invalid");
+      database.prepare(`UPDATE iso_images SET status=?,sha256=?,operation_upid=?,error_code=?,size_bytes=?,updated_at=? WHERE id=?`)
+        .run(nextStatus, sha256 === undefined ? row.sha256 : sha256, operationUpid === undefined ? row.operation_upid : operationUpid,
+          errorCode === undefined ? row.error_code : errorCode, sizeBytes === undefined ? row.size_bytes : Number(sizeBytes), Date.now(), id);
+      return publicIsoImage(database.prepare(isoImageSelect("WHERE i.id=?")).get(id));
+    },
+    createIsoMount({ isoImageId, resourceId, driveSlot, createdBy }) {
+      const image = database.prepare("SELECT * FROM iso_images WHERE id=? AND status='ready'").get(isoImageId);
+      if (!image) throw problem("ISO image is not ready", "iso_not_ready", 409);
+      const now = Date.now();
+      const id = randomToken(18);
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare("UPDATE iso_mounts SET status='ejected',ejected_at=? WHERE resource_id=? AND status='active'").run(now, resourceId);
+        database.prepare(`INSERT INTO iso_mounts
+          (id,iso_image_id,resource_id,drive_slot,status,created_by,mounted_at,created_at)
+          VALUES (?,?,?,?,'active',?,?,?)`).run(id, isoImageId, resourceId, driveSlot, createdBy, now, now);
+        database.exec("COMMIT");
+      } catch (error) { database.exec("ROLLBACK"); throw error; }
+      return publicIsoMount(database.prepare(`SELECT m.*,i.file_name,i.original_name FROM iso_mounts m
+        JOIN iso_images i ON i.id=m.iso_image_id WHERE m.id=?`).get(id));
+    },
+    getActiveIsoMountForResource(resourceId) {
+      return database.prepare(`SELECT m.*,i.customer_id,i.cluster_id,i.storage_id,i.volume_id,i.file_name,i.original_name
+        FROM iso_mounts m JOIN iso_images i ON i.id=m.iso_image_id
+        WHERE m.resource_id=? AND m.status='active' ORDER BY m.mounted_at DESC LIMIT 1`).get(resourceId);
+    },
+    listIsoMountsForResource(resourceId) {
+      return database.prepare(`SELECT m.*,i.file_name,i.original_name FROM iso_mounts m
+        JOIN iso_images i ON i.id=m.iso_image_id WHERE m.resource_id=? ORDER BY m.mounted_at DESC`)
+        .all(resourceId).map(publicIsoMount);
+    },
+    hasActiveIsoMount(isoImageId) {
+      return Boolean(database.prepare("SELECT 1 FROM iso_mounts WHERE iso_image_id=? AND status='active' LIMIT 1").get(isoImageId));
+    },
+    ejectIsoMount(id) {
+      database.prepare("UPDATE iso_mounts SET status='ejected',ejected_at=? WHERE id=? AND status='active'").run(Date.now(), id);
+      return publicIsoMount(database.prepare(`SELECT m.*,i.file_name,i.original_name FROM iso_mounts m
+        JOIN iso_images i ON i.id=m.iso_image_id WHERE m.id=?`).get(id));
     },
 
     createSession({ userId, ttlMs }) {
@@ -614,12 +896,35 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
         (id,customer_id,user_id,cluster_id,node,upid,resource_id,action,status,idempotency_key,created_at)
         VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`)
         .run(id, customerId, userId, clusterId, node, upid, resourceId, action, idempotencyKey, Date.now());
-      return { id, clusterId, node, resourceId, action, status: "pending" };
+      return publicTask(database.prepare("SELECT * FROM api_tasks WHERE id=?").get(id));
     },
     getTask(id, user) {
       if (user.role === "admin") return database.prepare("SELECT * FROM api_tasks WHERE id=?").get(id);
       return database.prepare("SELECT * FROM api_tasks WHERE id=? AND customer_id=?").get(id, user.customerId);
     },
+    listTasks(user, { resourceId = null, limit = 20 } = {}) {
+      const safeLimit = Math.min(50, Math.max(1, Number(limit) || 20));
+      const clauses = [];
+      const params = [];
+      if (user.role !== "admin") {
+        clauses.push("customer_id=?");
+        params.push(user.customerId);
+      }
+      if (resourceId) {
+        clauses.push("resource_id=?");
+        params.push(resourceId);
+      }
+      const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+      return database.prepare(`SELECT * FROM api_tasks ${where} ORDER BY created_at DESC LIMIT ?`)
+        .all(...params, safeLimit)
+        .map(publicTask);
+    },
+    getActiveTask(resourceId, { maxAgeMs = 30 * 60 * 1000 } = {}) {
+      return database.prepare(`SELECT * FROM api_tasks
+        WHERE resource_id=? AND completed_at IS NULL AND status!='stopped' AND created_at>=?
+        ORDER BY created_at DESC LIMIT 1`).get(resourceId, Date.now() - maxAgeMs);
+    },
+    publicTask,
     getTaskByIdempotency(userId, key) {
       return key ? database.prepare("SELECT * FROM api_tasks WHERE user_id=? AND idempotency_key=?").get(userId, key) : null;
     },

@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,7 @@ const proxmox = new ProxmoxRegistry({
 });
 const loginLimiter = new RateLimiter({ limit: 8, windowMs: 15 * 60 * 1000 });
 const actionLimiter = new RateLimiter({ limit: 30, windowMs: 60 * 1000 });
+const uploadLimiter = new RateLimiter({ limit: 5, windowMs: 60 * 60 * 1000 });
 const root = fileURLToPath(new URL("./public", import.meta.url));
 const noVncRoot = fileURLToPath(new URL("./node_modules/@novnc/novnc", import.meta.url));
 const headers = securityHeaders();
@@ -49,6 +50,16 @@ if (config.allowDemoData && !store.listClusters().length) {
       store.assignResource({ customerId: customer.id, resourceId: resource.id, permissions: DEFAULT_PERMISSIONS });
     }
   }
+}
+if (config.allowDemoData && store.listClusters().some((cluster) => cluster.id === "demo-eu") && !store.listIsoPolicies({ clusterId: "demo-eu" }).length) {
+  store.createIsoPolicy({
+    clusterId: "demo-eu",
+    storageId: "local",
+    displayName: "Demo installation media",
+    maxUploadBytes: Math.min(config.isoMaxUploadBytes, 8 * 1024 ** 3),
+    customerQuotaBytes: 25 * 1024 ** 3,
+    allowDelete: true,
+  });
 }
 
 function log(level, message, detail = {}) {
@@ -139,6 +150,74 @@ function isDemo(resource) {
   return config.allowDemoData && resource.clusterId === "demo-eu";
 }
 
+function requireQemu(resource) {
+  if (resource.type !== "qemu") {
+    throw Object.assign(new Error("Installation media is available only for QEMU virtual machines"), { status: 400, code: "iso_qemu_only" });
+  }
+}
+
+function isoCustomer(resource, user) {
+  const customerId = resource.customerId || user.customerId;
+  if (!customerId) {
+    throw Object.assign(new Error("Assign this VM to a customer before managing customer installation media"), { status: 409, code: "iso_customer_required" });
+  }
+  return { id: customerId, scope: { role: "customer", customerId } };
+}
+
+function isoUploadMetadata(request) {
+  const encodedName = String(request.headers["x-nimbus-filename"] || "");
+  let originalName;
+  try { originalName = decodeURIComponent(encodedName).trim(); }
+  catch { throw Object.assign(new Error("The ISO filename is invalid"), { status: 400, code: "invalid_iso_filename" }); }
+  if (!originalName || originalName.length > 255 || !originalName.toLowerCase().endsWith(".iso")) {
+    throw Object.assign(new Error("Choose a .iso file with a filename of at most 255 characters"), { status: 400, code: "invalid_iso_filename" });
+  }
+  const sizeBytes = Number(request.headers["x-nimbus-size"]);
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
+    throw Object.assign(new Error("The ISO upload size is missing or invalid"), { status: 400, code: "invalid_iso_size" });
+  }
+  if (sizeBytes > config.isoMaxUploadBytes) {
+    throw Object.assign(new Error("The ISO is larger than the panel upload limit"), { status: 413, code: "iso_too_large" });
+  }
+  const cleanStem = originalName.slice(0, -4).normalize("NFKD").replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 110) || "installation-media";
+  const fileName = `${cleanStem}-${randomUUID().slice(0, 12)}.iso`;
+  return { originalName, fileName, sizeBytes };
+}
+
+async function consumeDemoUpload(source, expectedBytes) {
+  const hash = createHash("sha256");
+  let receivedBytes = 0;
+  for await (const chunk of source) {
+    receivedBytes += chunk.length;
+    if (receivedBytes > expectedBytes) {
+      throw Object.assign(new Error("The upload exceeded its declared size"), { status: 400, code: "iso_upload_size_mismatch" });
+    }
+    hash.update(chunk);
+  }
+  if (receivedBytes !== expectedBytes) {
+    throw Object.assign(new Error("The upload did not match its declared size"), { status: 400, code: "iso_upload_size_mismatch" });
+  }
+  return { bytes: receivedBytes, sha256: hash.digest("hex"), result: null };
+}
+
+async function refreshIsoOperation(row) {
+  if (!row || !["processing", "deleting"].includes(row.status) || !row.operation_upid) return row ? store.getIsoImage(row.id) : null;
+  const remote = await proxmox.forCluster(row.cluster_id).getTaskStatus(row.node, row.operation_upid);
+  if (remote?.status !== "stopped") return store.getIsoImage(row.id);
+  if (remote.exitstatus === "OK") {
+    return store.updateIsoImage(row.id, {
+      status: row.status === "deleting" ? "deleted" : "ready",
+      operationUpid: null,
+      errorCode: null,
+    });
+  }
+  return store.updateIsoImage(row.id, {
+    status: "error",
+    operationUpid: null,
+    errorCode: String(remote?.exitstatus || "proxmox_task_failed").slice(0, 120),
+  });
+}
+
 function summarize(resources) {
   const running = resources.filter((resource) => resource.status === "running");
   return {
@@ -149,6 +228,60 @@ function summarize(resources) {
     memoryTotal: resources.reduce((sum, resource) => sum + resource.memory, 0),
     clusters: new Set(resources.map((resource) => resource.clusterId)).size,
   };
+}
+
+function expectedStatusForAction(action) {
+  if (["stop", "shutdown"].includes(action)) return "stopped";
+  if (action === "suspend") return "suspended";
+  if (["start", "resume", "reboot", "reset"].includes(action)) return "running";
+  return null;
+}
+
+function demoInstanceHistory(resource, timeframe = "day") {
+  const durations = { hour: 60 * 60 * 1000, day: 24 * 60 * 60 * 1000, week: 7 * 24 * 60 * 60 * 1000, month: 30 * 24 * 60 * 60 * 1000, year: 365 * 24 * 60 * 60 * 1000 };
+  const duration = durations[timeframe];
+  if (!duration) throw Object.assign(new Error("Unsupported history timeframe"), { status: 400, code: "invalid_timeframe" });
+  const now = Date.now();
+  const points = Array.from({ length: 48 }, (_, index) => {
+    const phase = index / 5 + Number(resource.vmid % 7);
+    return {
+      timestamp: now - duration + Math.round(duration * index / 47),
+      cpu: Math.max(1, Math.min(96, Math.round(resource.cpu * .72 + Math.sin(phase) * 12 + 10))),
+      memory: Math.max(1, Math.min(99, Math.round((resource.memory ? resource.memoryUsed / resource.memory * 100 : 0) + Math.cos(phase / 2) * 5))),
+      netIn: Math.max(0, Math.round(450_000 + Math.sin(phase * .8) * 320_000)),
+      netOut: Math.max(0, Math.round(260_000 + Math.cos(phase * .7) * 190_000)),
+    };
+  });
+  return { timeframe, points, available: true, partial: false, sampledInstances: 1, totalInstances: 1 };
+}
+
+async function refreshStoredTask(task) {
+  if (task.completed_at || task.status === "stopped") {
+    return { task, completed: true, transitioned: false };
+  }
+  const remote = await proxmox.forCluster(task.cluster_id).getTaskStatus(task.node, task.upid);
+  const completed = remote.status === "stopped";
+  const updated = store.updateTask(task.id, {
+    status: remote.status || "running",
+    exitStatus: remote.exitstatus || null,
+    completedAt: completed ? Date.now() : null,
+  });
+  if (completed && updated.exit_status === "OK") {
+    const nextStatus = expectedStatusForAction(updated.action);
+    if (nextStatus && store.getResource(updated.resource_id)) store.setResourceStatus(updated.resource_id, nextStatus);
+  }
+  return { task: updated, completed, transitioned: completed && !task.completed_at };
+}
+
+function recordTaskCompletion(task) {
+  store.writeAudit({
+    customerId: task.customer_id,
+    userId: null,
+    actorRole: "system",
+    action: `resource.${task.action}.${task.exit_status === "OK" ? "completed" : "failed"}`,
+    resourceId: task.resource_id,
+    detail: { taskId: task.id },
+  });
 }
 
 async function syncCluster(clusterId) {
@@ -214,7 +347,8 @@ async function routeAdmin(request, response, pathname) {
   if (pathname === "/api/admin/state" && request.method === "GET") {
     sendJson(response, 200, {
       clusters: store.listClusters(), customers: store.listCustomers(), users: store.listUsers(),
-      resources: store.listResources(), audit: store.listAudit(null, { all: true, limit: 50 }),
+      resources: store.listResources(), isoPolicies: store.listIsoPolicies(),
+      audit: store.listAudit(null, { all: true, limit: 50 }),
     });
     return true;
   }
@@ -232,6 +366,18 @@ async function routeAdmin(request, response, pathname) {
     const cluster = store.createCluster(await readBody(request));
     audit(request, session, "admin.cluster.created", { detail: { clusterId: cluster.id } });
     sendJson(response, 201, { cluster }); return true;
+  }
+  if (pathname === "/api/admin/iso-policies" && request.method === "POST") {
+    const input = await readBody(request);
+    const candidates = config.allowDemoData && input.clusterId === "demo-eu"
+      ? [{ storageId: "local", nodes: ["pve-ber-01", "pve-ber-02", "pve-ber-03"] }]
+      : await proxmox.forCluster(input.clusterId).listIsoStorageCandidates();
+    if (!candidates.some((candidate) => candidate.storageId === input.storageId)) {
+      sendJson(response, 409, { error: "iso_storage_unavailable", message: "That storage is not enabled for ISO images on this cluster." }); return true;
+    }
+    const policy = store.createIsoPolicy(input);
+    audit(request, session, "admin.iso_policy.created", { detail: { policyId: policy.id, clusterId: policy.clusterId, storageId: policy.storageId } });
+    sendJson(response, 201, { policy }); return true;
   }
   if (pathname === "/api/admin/assignments" && request.method === "POST") {
     const input = await readBody(request);
@@ -270,6 +416,14 @@ async function routeAdmin(request, response, pathname) {
     audit(request, session, "admin.user.password_reset", { detail: { targetUserId: decodeURIComponent(match[1]) } });
     sendJson(response, 204, null); return true;
   }
+  match = pathname.match(/^\/api\/admin\/clusters\/([^/]+)\/iso-storage-candidates$/);
+  if (match && request.method === "GET") {
+    const clusterId = decodeURIComponent(match[1]);
+    const candidates = config.allowDemoData && clusterId === "demo-eu"
+      ? [{ storageId: "local", type: "dir", shared: true, nodes: ["pve-ber-01", "pve-ber-02", "pve-ber-03"], totalBytes: 536870912000, availableBytes: 322122547200 }]
+      : await proxmox.forCluster(clusterId).listIsoStorageCandidates();
+    sendJson(response, 200, { candidates }); return true;
+  }
   match = pathname.match(/^\/api\/admin\/clusters\/([^/]+)$/);
   if (match && request.method === "PATCH") {
     const cluster = store.updateCluster(decodeURIComponent(match[1]), await readBody(request));
@@ -285,6 +439,18 @@ async function routeAdmin(request, response, pathname) {
       : (config.allowDemoData && clusterId === "demo-eu" ? { version: "9.0", nodes: [{ name: "pve-ber-01", status: "online" }] } : await proxmox.forCluster(clusterId).testConnection());
     audit(request, session, `admin.cluster.${operation}ed`, { detail: { clusterId } });
     sendJson(response, 200, operation === "sync" ? { resources: result.length } : { result }); return true;
+  }
+  match = pathname.match(/^\/api\/admin\/iso-policies\/([^/]+)$/);
+  if (match && request.method === "PATCH") {
+    const policy = store.updateIsoPolicy(decodeURIComponent(match[1]), await readBody(request));
+    audit(request, session, "admin.iso_policy.updated", { detail: { policyId: policy.id, status: policy.status } });
+    sendJson(response, 200, { policy }); return true;
+  }
+  if (match && request.method === "DELETE") {
+    const policyId = decodeURIComponent(match[1]);
+    store.deleteIsoPolicy(policyId);
+    audit(request, session, "admin.iso_policy.deleted", { detail: { policyId } });
+    sendJson(response, 204, null); return true;
   }
   match = pathname.match(/^\/api\/admin\/resources\/(.+)\/assignment$/);
   if (match && request.method === "PATCH") {
@@ -317,7 +483,8 @@ async function routeCustomer(request, response, pathname) {
     sendJson(response, 200, {
       mode: config.allowDemoData ? "demo" : "live", user, summary: summarize(resources), resources,
       activity: store.listAudit(user.customerId, { limit: 10 }),
-      capabilities: { directAssignments: true, proxmoxPools: false, consoleTickets: true },
+      tasks: store.listTasks(user, { limit: 12 }),
+      capabilities: { directAssignments: true, proxmoxPools: false, consoleTickets: true, customerIsoMedia: true },
     });
     return true;
   }
@@ -339,6 +506,237 @@ async function routeCustomer(request, response, pathname) {
     return true;
   }
 
+  match = pathname.match(/^\/api\/v1\/resources\/(.+)\/media$/);
+  if (match && request.method === "GET") {
+    const resourceId = decodeURIComponent(match[1]);
+    const resource = requireResource(response, user, resourceId, "iso_view");
+    if (!resource) return true;
+    requireQemu(resource);
+    const owner = isoCustomer(resource, user);
+    const pending = store.listIsoImages(owner.scope, { clusterId: resource.clusterId })
+      .filter((image) => ["processing", "deleting"].includes(image.status));
+    if (!isDemo(resource) && pending.length) {
+      await Promise.allSettled(pending.map(async (image) => {
+        const row = store.getIsoImageRow(image.id, owner.scope);
+        try { await refreshIsoOperation(row); }
+        catch (error) { log("error", "iso_task_refresh_delayed", { imageId: image.id, error: error.code || error.message }); }
+      }));
+    }
+    const policies = store.listIsoPolicies({ clusterId: resource.clusterId, activeOnly: true }).map((policy) => {
+      const usedBytes = store.getIsoUsage(owner.id, policy.id);
+      return { ...policy, usedBytes, remainingBytes: Math.max(0, policy.customerQuotaBytes - usedBytes) };
+    });
+    let mountedRow = store.getActiveIsoMountForResource(resourceId);
+    if (mountedRow && mountedRow.customer_id !== owner.id) mountedRow = null;
+    if (mountedRow && !isDemo(resource)) {
+      try {
+        const cdroms = await clientFor(resource).getQemuCdroms(resource);
+        if (!cdroms.some((drive) => drive.slot === mountedRow.drive_slot && drive.volumeId === mountedRow.volume_id)) {
+          store.ejectIsoMount(mountedRow.id);
+          mountedRow = null;
+        }
+      } catch (error) {
+        log("error", "iso_mount_state_refresh_delayed", { resourceId, error: error.code || error.message });
+      }
+    }
+    const mounted = mountedRow ? {
+      id: mountedRow.id,
+      isoImageId: mountedRow.iso_image_id,
+      resourceId: mountedRow.resource_id,
+      driveSlot: mountedRow.drive_slot,
+      status: mountedRow.status,
+      fileName: mountedRow.file_name,
+      originalName: mountedRow.original_name,
+      mountedAt: mountedRow.mounted_at,
+    } : null;
+    sendJson(response, 200, {
+      policies,
+      images: store.listIsoImages(owner.scope, { clusterId: resource.clusterId }),
+      mounted,
+    });
+    return true;
+  }
+
+  match = pathname.match(/^\/api\/v1\/resources\/(.+)\/media\/upload$/);
+  if (match && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    if (!String(request.headers["content-type"] || "").toLowerCase().startsWith("application/octet-stream")) {
+      sendJson(response, 415, { error: "invalid_content_type", message: "ISO uploads must use application/octet-stream." }); return true;
+    }
+    const limit = uploadLimiter.consume(user.id);
+    if (!limit.allowed) { sendJson(response, 429, { error: "too_many_uploads" }, { "retry-after": String(limit.retryAfter) }); return true; }
+    const resourceId = decodeURIComponent(match[1]);
+    const resource = requireResource(response, user, resourceId, "iso_upload");
+    if (!resource) return true;
+    requireQemu(resource);
+    const owner = isoCustomer(resource, user);
+    const upload = isoUploadMetadata(request);
+    if (request.headers["content-length"] && Number(request.headers["content-length"]) !== upload.sizeBytes) {
+      sendJson(response, 400, { error: "iso_upload_size_mismatch", message: "The upload size did not match the selected file." }); return true;
+    }
+    const search = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams;
+    const policy = store.getIsoPolicy(search.get("policyId"));
+    if (!policy || policy.status !== "active" || policy.clusterId !== resource.clusterId) {
+      sendJson(response, 404, { error: "iso_policy_not_found" }); return true;
+    }
+    if (upload.sizeBytes > policy.maxUploadBytes) {
+      sendJson(response, 413, { error: "iso_too_large", message: "The ISO is larger than this storage policy allows." }); return true;
+    }
+    if (!isDemo(resource)) await clientFor(resource).requireIsoStorage(resource.node, policy.storageId);
+    const usedBytes = store.getIsoUsage(owner.id, policy.id);
+    if (usedBytes + upload.sizeBytes > policy.customerQuotaBytes) {
+      sendJson(response, 409, { error: "iso_quota_exceeded", message: "This upload would exceed the customer ISO quota." }); return true;
+    }
+    const volumeId = `${policy.storageId}:iso/${upload.fileName}`;
+    const image = store.createIsoImage({
+      customerId: owner.id,
+      clusterId: resource.clusterId,
+      storagePolicyId: policy.id,
+      storageId: policy.storageId,
+      node: resource.node,
+      volumeId,
+      fileName: upload.fileName,
+      originalName: upload.originalName,
+      sizeBytes: upload.sizeBytes,
+      createdBy: user.id,
+    });
+    try {
+      const result = isDemo(resource)
+        ? await consumeDemoUpload(request, upload.sizeBytes)
+        : await clientFor(resource).uploadIso({
+          node: resource.node,
+          storageId: policy.storageId,
+          fileName: upload.fileName,
+          source: request,
+          expectedBytes: upload.sizeBytes,
+          signal: AbortSignal.timeout(config.isoUploadTimeoutMs),
+        });
+      const upid = typeof result.result === "string" && result.result.startsWith("UPID:") ? result.result : null;
+      const updated = store.updateIsoImage(image.id, {
+        status: upid ? "processing" : "ready",
+        sha256: result.sha256,
+        sizeBytes: result.bytes,
+        operationUpid: upid,
+        errorCode: null,
+      });
+      audit(request, session, "resource.iso.uploaded", {
+        customerId: owner.id,
+        resourceId,
+        detail: { imageId: image.id, storageId: policy.storageId, fileName: upload.originalName, sizeBytes: upload.sizeBytes },
+      });
+      sendJson(response, upid ? 202 : 201, { image: updated }); return true;
+    } catch (error) {
+      store.updateIsoImage(image.id, { status: "error", operationUpid: null, errorCode: error.code || "iso_upload_failed" });
+      audit(request, session, "resource.iso.upload_failed", {
+        customerId: owner.id,
+        resourceId,
+        detail: { imageId: image.id, storageId: policy.storageId, error: error.code || "iso_upload_failed" },
+      });
+      throw error;
+    }
+  }
+
+  match = pathname.match(/^\/api\/v1\/resources\/(.+)\/media\/mount$/);
+  if (match && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    const resourceId = decodeURIComponent(match[1]);
+    const resource = requireResource(response, user, resourceId, "iso_mount");
+    if (!resource) return true;
+    requireQemu(resource);
+    const owner = isoCustomer(resource, user);
+    if (store.getActiveIsoMountForResource(resourceId)) {
+      sendJson(response, 409, { error: "cdrom_in_use", message: "Eject the currently mounted ISO first." }); return true;
+    }
+    const { isoImageId } = await readBody(request);
+    const imageRow = store.getIsoImageRow(String(isoImageId || ""), owner.scope);
+    if (!imageRow) { sendJson(response, 404, { error: "iso_not_found" }); return true; }
+    if (imageRow.status !== "ready" || imageRow.cluster_id !== resource.clusterId) {
+      sendJson(response, 409, { error: "iso_not_ready" }); return true;
+    }
+    const policy = store.getIsoPolicy(imageRow.storage_policy_id);
+    if (!policy || policy.status !== "active") { sendJson(response, 409, { error: "iso_policy_disabled" }); return true; }
+    let mounted;
+    if (isDemo(resource)) {
+      mounted = { slot: "ide2", volumeId: imageRow.volume_id };
+    } else {
+      const storage = await clientFor(resource).requireIsoStorage(resource.node, imageRow.storage_id);
+      if (!storage.shared && imageRow.node !== resource.node) {
+        sendJson(response, 409, { error: "iso_not_on_node", message: "This ISO was uploaded to node-local storage on another node." }); return true;
+      }
+      mounted = await clientFor(resource).mountIso(resource, imageRow.volume_id);
+    }
+    const mount = store.createIsoMount({ isoImageId: imageRow.id, resourceId, driveSlot: mounted.slot, createdBy: user.id });
+    audit(request, session, "resource.iso.mounted", {
+      customerId: owner.id,
+      resourceId,
+      detail: { imageId: imageRow.id, driveSlot: mounted.slot },
+    });
+    sendJson(response, 201, { mount }); return true;
+  }
+
+  match = pathname.match(/^\/api\/v1\/resources\/(.+)\/media\/eject$/);
+  if (match && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    const resourceId = decodeURIComponent(match[1]);
+    const resource = requireResource(response, user, resourceId, "iso_mount");
+    if (!resource) return true;
+    requireQemu(resource);
+    const owner = isoCustomer(resource, user);
+    const mounted = store.getActiveIsoMountForResource(resourceId);
+    if (!mounted || mounted.customer_id !== owner.id) { sendJson(response, 404, { error: "iso_mount_not_found" }); return true; }
+    if (!isDemo(resource)) {
+      await clientFor(resource).ejectIso(resource, { slot: mounted.drive_slot, volumeId: mounted.volume_id });
+    }
+    const mount = store.ejectIsoMount(mounted.id);
+    audit(request, session, "resource.iso.ejected", {
+      customerId: owner.id,
+      resourceId,
+      detail: { imageId: mounted.iso_image_id, driveSlot: mounted.drive_slot },
+    });
+    sendJson(response, 200, { mount }); return true;
+  }
+
+  match = pathname.match(/^\/api\/v1\/resources\/(.+)\/media\/([^/]+)$/);
+  if (match && request.method === "DELETE") {
+    if (!requireCsrf(request, response, session)) return true;
+    const resourceId = decodeURIComponent(match[1]);
+    const deleteAuthorized = resourceFor(user, resourceId, "iso_delete");
+    const uploadAuthorized = resourceFor(user, resourceId, "iso_upload");
+    const resource = deleteAuthorized || uploadAuthorized;
+    if (!resource) { sendJson(response, 404, { error: "resource_not_found" }); return true; }
+    requireQemu(resource);
+    const owner = isoCustomer(resource, user);
+    const imageRow = store.getIsoImageRow(decodeURIComponent(match[2]), owner.scope);
+    if (!imageRow) { sendJson(response, 404, { error: "iso_not_found" }); return true; }
+    if (imageRow.status !== "error" && !deleteAuthorized) { sendJson(response, 404, { error: "resource_not_found" }); return true; }
+    const policy = store.getIsoPolicy(imageRow.storage_policy_id);
+    if (imageRow.status !== "error" && !policy?.allowDelete) { sendJson(response, 403, { error: "iso_delete_disabled" }); return true; }
+    if (store.hasActiveIsoMount(imageRow.id)) { sendJson(response, 409, { error: "iso_mounted" }); return true; }
+    if (["uploading", "processing", "deleting"].includes(imageRow.status)) {
+      sendJson(response, 409, { error: "iso_operation_in_progress" }); return true;
+    }
+    let upid = null;
+    if (imageRow.status !== "error" && !isDemo(resource)) {
+      const result = await clientFor(resource).deleteIso({
+        node: imageRow.node,
+        storageId: imageRow.storage_id,
+        volumeId: imageRow.volume_id,
+      });
+      upid = typeof result === "string" && result.startsWith("UPID:") ? result : null;
+    }
+    const image = store.updateIsoImage(imageRow.id, {
+      status: upid ? "deleting" : "deleted",
+      operationUpid: upid,
+      errorCode: null,
+    });
+    audit(request, session, "resource.iso.deleted", {
+      customerId: owner.id,
+      resourceId,
+      detail: { imageId: imageRow.id, storageId: imageRow.storage_id },
+    });
+    sendJson(response, upid ? 202 : 200, { image }); return true;
+  }
+
   match = pathname.match(/^\/api\/v1\/resources\/(.+)\/actions$/);
   if (match && request.method === "POST") {
     if (!requireCsrf(request, response, session)) return true;
@@ -354,7 +752,21 @@ async function routeCustomer(request, response, pathname) {
     if (!resource) return true;
     const idempotencyKey = String(request.headers["idempotency-key"] || "").slice(0, 120) || null;
     const existing = store.getTaskByIdempotency(user.id, idempotencyKey);
-    if (existing) { sendJson(response, 202, { task: existing, duplicate: true }); return true; }
+    if (existing) { sendJson(response, 202, { task: store.publicTask(existing), duplicate: true }); return true; }
+    const active = store.getActiveTask(resourceId);
+    if (active) {
+      let activeResult = { task: active, completed: false };
+      try {
+        activeResult = await refreshStoredTask(active);
+        if (activeResult.transitioned) recordTaskCompletion(activeResult.task);
+      } catch (error) {
+        log("error", "task_refresh_delayed", { taskId: active.id, resourceId, error: error.code || error.message });
+      }
+      if (!activeResult.completed) {
+        sendJson(response, 409, { error: "resource_task_in_progress", task: store.publicTask(activeResult.task) });
+        return true;
+      }
+    }
     audit(request, session, `resource.${permission}.requested`, { customerId: resource.customerId || user.customerId, resourceId, detail: { clusterId: resource.clusterId, node: resource.node, vmid: resource.vmid } });
     if (isDemo(resource)) {
       const nextStatus = ["stop", "shutdown"].includes(permission) ? "stopped" : permission === "suspend" ? "suspended" : "running";
@@ -421,28 +833,62 @@ async function routeCustomer(request, response, pathname) {
     sendJson(response, 202, { accepted: true }); return true;
   }
 
+  match = pathname.match(/^\/api\/v1\/resources\/(.+)\/history$/);
+  if (match && request.method === "GET") {
+    const resourceId = decodeURIComponent(match[1]);
+    const resource = requireResource(response, user, resourceId, "view_usage");
+    if (!resource) return true;
+    const timeframe = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams.get("timeframe") || "day";
+    const history = isDemo(resource)
+      ? demoInstanceHistory(resource, timeframe)
+      : await clientFor(resource).getHistory([resource], timeframe);
+    sendJson(response, 200, { history }); return true;
+  }
+
   match = pathname.match(/^\/api\/v1\/resources\/(.+)$/);
   if (match && request.method === "GET") {
     const resourceId = decodeURIComponent(match[1]);
     const resource = requireResource(response, user, resourceId, "view_status");
     if (!resource) return true;
     if (isDemo(resource)) {
-      sendJson(response, 200, { instance: resource, config: { cores: resource.vcpu, memory: resource.memory * 1024, onboot: 1 }, network: { status: "available", primaryIp: resource.ip, addresses: resource.ip ? [{ address: resource.ip, family: "ipv4", interface: "eth0" }] : [] }, snapshots: [{ name: "before-upgrade", description: "Known good state", createdAt: Date.now() - 86400000 * 4 }] });
+      sendJson(response, 200, {
+        instance: resource,
+        config: { cores: resource.vcpu, memory: resource.memory * 1024, onboot: 1 },
+        network: { status: "available", primaryIp: resource.ip, addresses: resource.ip ? [{ address: resource.ip, family: "ipv4", interface: "eth0" }] : [] },
+        snapshots: [{ name: "before-upgrade", description: "Known good state", createdAt: Date.now() - 86400000 * 4 }],
+        tasks: store.listTasks(user, { resourceId, limit: 12 }),
+      });
       return true;
     }
     const details = await clientFor(resource).getInstanceDetails(resource);
     if (!resource.permissions.includes("view_config") && user.role !== "admin") details.config = {};
+    details.tasks = store.listTasks(user, { resourceId, limit: 12 });
     sendJson(response, 200, details); return true;
+  }
+
+  if (pathname === "/api/v1/tasks" && request.method === "GET") {
+    const search = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams;
+    const resourceId = search.get("resourceId");
+    if (resourceId && !resourceFor(user, resourceId, "view_status")) {
+      sendJson(response, 404, { error: "resource_not_found" }); return true;
+    }
+    sendJson(response, 200, { tasks: store.listTasks(user, { resourceId, limit: search.get("limit") || 20 }) });
+    return true;
   }
 
   match = pathname.match(/^\/api\/v1\/tasks\/([^/]+)$/);
   if (match && request.method === "GET") {
     const task = store.getTask(decodeURIComponent(match[1]), user);
     if (!task) { sendJson(response, 404, { error: "task_not_found" }); return true; }
-    const remote = await proxmox.forCluster(task.cluster_id).getTaskStatus(task.node, task.upid);
-    const completed = remote.status === "stopped";
-    const updated = store.updateTask(task.id, { status: remote.status, exitStatus: remote.exitstatus || null, completedAt: completed ? Date.now() : null });
-    sendJson(response, 200, { task: updated, completed }); return true;
+    try {
+      const result = await refreshStoredTask(task);
+      if (result.transitioned) recordTaskCompletion(result.task);
+      sendJson(response, 200, { task: store.publicTask(result.task), completed: result.completed });
+    } catch (error) {
+      log("error", "task_poll_failed", { taskId: task.id, error: error.code || error.message });
+      sendJson(response, 200, { task: store.publicTask(task), completed: false, pollingDelayed: true });
+    }
+    return true;
   }
 
   if (pathname === "/api/v1/profile" && request.method === "PATCH") {

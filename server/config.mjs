@@ -40,6 +40,8 @@ export function readConfig() {
     sessionTtlMs: integer(process.env.SESSION_TTL_HOURS, 12) * 60 * 60 * 1000,
     proxmoxTimeoutMs: integer(process.env.PROXMOX_REQUEST_TIMEOUT_MS, 12_000),
     syncIntervalMs: integer(process.env.RESOURCE_SYNC_SECONDS, 60) * 1000,
+    isoMaxUploadBytes: integer(process.env.ISO_MAX_UPLOAD_MB, 8192) * 1024 * 1024,
+    isoUploadTimeoutMs: integer(process.env.ISO_UPLOAD_TIMEOUT_MINUTES, 120) * 60 * 1000,
     allowDemoData: boolean(process.env.ALLOW_DEMO_DATA, false),
     bootstrap: {
       email: process.env.BOOTSTRAP_ADMIN_EMAIL,

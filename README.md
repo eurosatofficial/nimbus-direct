@@ -10,13 +10,15 @@ Nimbus Direct is a modern, self-hosted customer control panel for Proxmox VE. Ad
 - Customer dashboard scoped to active local assignments.
 - Start, stop, shutdown, reboot, reset, suspend, and resume permission model.
 - Server-side ownership and permission validation before every Proxmox call.
-- QEMU/LXC status, CPU, RAM, storage, IP, uptime, details, and task model.
+- Full QEMU/LXC detail workspace with status-aware controls, CPU/RAM/storage, uptime, safe configuration, network addresses, and Proxmox RRD history.
+- Live customer-safe Proxmox task progress, completion feedback, duplicate-action prevention, and recent per-resource tasks.
+- Customer-owned QEMU ISO libraries with direct-to-Proxmox streaming upload, per-customer quotas, mount/eject controls, optional deletion, and server-side ownership validation.
 - Snapshot, selected configuration, and short-lived console-ticket service methods.
 - Encrypted Proxmox token storage with AES-256-GCM.
 - Scrypt passwords, opaque sessions, CSRF/origin checks, rate limits, security headers, and audit records.
 - Background resource synchronization that preserves assignments during Proxmox failures.
 - Docker deployment with a read-only, unprivileged container.
-- Interactive demo mode and 18 automated isolation/security/integration tests.
+- Interactive demo mode and 22 automated isolation/security/integration tests.
 
 The complete design—including schema, authorization sequence, API endpoints, least-privilege guidance, and phased MVP plan—is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -87,7 +89,7 @@ VM.GuestAgent.Audit
 
 Apply the custom role to `/vms` when Nimbus should discover and manage all guests, or to explicit `/vms/{vmid}` paths for a smaller allowlist. Apply the intended role to both the backing user and the privilege-separated token so the token remains the intersection of both ACLs.
 
-Do not grant `Administrator`, `Sys.Modify`, user management, host-shell access, datastore allocation, or unrelated configuration permissions.
+Do not grant `Administrator`, `Sys.Modify`, user management, host-shell access, or unrelated configuration permissions. Storage privileges are not needed unless the ISO feature is enabled as described below.
 
 ### 3. Initialize and start
 
@@ -130,6 +132,41 @@ Nimbus encrypts the token secret before writing it to SQLite. Test the connectio
 
 The assignment is effective immediately. Reassignment and removal update Nimbus only; Proxmox pools are untouched.
 
+### 6. Enable customer ISO media (optional)
+
+ISO media is available for QEMU virtual machines only. In Proxmox, enable `iso` content on the intended file-based storage. Add these narrowly scoped privileges to the Nimbus service account:
+
+```text
+# On the managed VM paths:
+VM.Config.CDROM
+
+# On /storage/{storage-id}:
+Datastore.Audit Datastore.AllocateTemplate
+```
+
+`Datastore.AllocateTemplate` permits ISO upload. Keep customer deletion disabled unless it is genuinely required. Proxmox currently requires the broader `Datastore.Allocate` privilege to delete an ISO volume; that privilege can also affect other storage content. If deletion is enabled, grant it only on the specific ISO storage.
+
+Then:
+
+1. Open **Control center → ISO storage**.
+2. Select a cluster and choose **Discover ISO storage**.
+3. Enable a discovered storage and set the per-file maximum and per-customer quota.
+4. Open **Control center → Inventory → Policy** for a QEMU VM.
+5. Enable **View installation media**, **Upload ISO images**, and **Mount and eject ISO images**. Enable deletion only when the storage policy and Proxmox ACL intentionally allow it.
+
+Customers will see **Installation media** on the VM detail page. Uploaded bytes stream through Nimbus directly into the official Proxmox upload endpoint; the Nimbus data volume stores ownership, quota, task, and audit metadata but not a second ISO file.
+
+For Nginx, disable request buffering on the Nimbus proxy and size the body/timeouts for your configured maximum, for example:
+
+```nginx
+client_max_body_size 9g;
+proxy_request_buffering off;
+proxy_read_timeout 2h;
+proxy_send_timeout 2h;
+```
+
+If another proxy or Cloudflare sits in front of Nimbus, its request-size and timeout limits must also allow the configured ISO size. Use a protected direct/internal Nimbus route for large uploads if that proxy cannot accept them.
+
 ## Internal Proxmox addresses and private CAs
 
 Keep the TLS certificate hostname in the cluster API URL. To resolve it to an internal address only inside the container, configure the variables at the end of `.env.example` and use:
@@ -144,7 +181,7 @@ Mount only the public CA certificate. Never copy a private CA key into Nimbus an
 
 SQLite data is stored in the `nimbus-data` volume. Stop Nimbus before copying it, or use a SQLite-aware backup process. Back up both the database and `APP_SECRET`, store them separately, and test restoration.
 
-The numbered baseline schema is in `migrations/001_initial.sql`; runtime startup applies the equivalent idempotent schema. Take a database backup before installing future migrations.
+The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql` and ISO ownership/policy tables in `migrations/003_iso_media.sql`. Runtime startup creates the equivalent schema idempotently, so this release does not require a manual migration command. Take a database backup before every update.
 
 ## Operations
 
@@ -153,7 +190,8 @@ The numbered baseline schema is in `migrations/001_initial.sql`; runtime startup
 - JSON logs are written to stdout/stderr.
 - Inventory synchronization defaults to 60 seconds (`RESOURCE_SYNC_SECONDS`).
 - Missing guests are marked stale; their customer assignments are preserved.
-- Proxmox tasks are stored using their UPID and polled through customer-scoped task records.
+- Proxmox tasks are stored using their UPID, but browser APIs return only normalized customer-safe task records. The instance page polls active tasks automatically and pauses overlapping power requests.
+- ISO upload ceilings are controlled by `ISO_MAX_UPLOAD_MB` and `ISO_UPLOAD_TIMEOUT_MINUTES`; storage policies can impose lower limits and customer quotas.
 
 ## Console security
 
@@ -165,6 +203,6 @@ The panel pins the official noVNC 1.7 client. A console launch creates an encryp
 npm run check
 ```
 
-The suite verifies credential encryption, direct customer/resource/permission authorization, cross-customer denial, tampered-resource denial, assignment preservation across synchronization, token handling, password/session security, Proxmox request mapping, and customer-scoped task/audit access.
+The suite verifies credential encryption, direct customer/resource/permission authorization, cross-customer denial, tampered-resource denial, assignment preservation across synchronization, token handling, password/session security, Proxmox request mapping, customer-scoped task/audit access, ISO ownership/quota isolation, streamed multipart upload, and guarded CD-ROM mount/eject behavior.
 
 Before serving external customers, complete the Phase 2 hardening work in the architecture document, run a penetration test, validate least-privilege ACLs on your exact Proxmox release, and perform backup/restore drills.

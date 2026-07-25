@@ -217,3 +217,86 @@ test("power actions use server-derived resource coordinates and return Proxmox t
   assert.deepEqual(await client.getTaskStatus("pve", upid), { status: "stopped", exitstatus: "OK" });
   await assert.rejects(() => client.performAction(vm, "destroy"), (error) => error.code === "invalid_action");
 });
+
+test("ISO storage discovery groups node availability without exposing credentials", async () => {
+  const client = mockClient({
+    "/nodes": jsonResponse([{ node: "pve-a" }, { node: "pve-b" }]),
+    "/nodes/pve-a/storage?content=iso&enabled=1": jsonResponse([
+      { storage: "local", type: "dir", content: "iso,vztmpl", shared: 0, total: 1000, avail: 400, active: 1, enabled: 1 },
+      { storage: "backup", type: "pbs", content: "backup", active: 1, enabled: 1 },
+    ]),
+    "/nodes/pve-b/storage?content=iso&enabled=1": jsonResponse([
+      { storage: "local", type: "dir", content: "iso", shared: 1, total: 1200, avail: 500, active: 1, enabled: 1 },
+    ]),
+  });
+  assert.deepEqual(await client.listIsoStorageCandidates(), [{
+    storageId: "local",
+    type: "dir",
+    shared: true,
+    nodes: ["pve-a", "pve-b"],
+    totalBytes: 1200,
+    availableBytes: 500,
+  }]);
+});
+
+test("ISO upload streams multipart data with an exact length and SHA-256", async () => {
+  const calls = [];
+  let multipartBody;
+  const client = mockClient({
+    "/nodes/pve-a/storage/local/upload": async ({ options }) => {
+      const chunks = [];
+      for await (const chunk of options.body) chunks.push(Buffer.from(chunk));
+      multipartBody = Buffer.concat(chunks);
+      return jsonResponse("UPID:pve-a:upload:1");
+    },
+  }, calls);
+  const sourceBytes = Buffer.from("small fake ISO payload");
+  const source = (async function* () { yield sourceBytes.subarray(0, 6); yield sourceBytes.subarray(6); })();
+  const result = await client.uploadIso({
+    node: "pve-a",
+    storageId: "local",
+    fileName: "debian-test.iso",
+    source,
+    expectedBytes: sourceBytes.length,
+  });
+  assert.equal(result.result, "UPID:pve-a:upload:1");
+  assert.equal(result.bytes, sourceBytes.length);
+  assert.equal(result.sha256, "4c527a8574bfda9551d218703468cf47233dbb6a85c0644c3c1ea533edbead55");
+  assert.equal(Number(calls[0].options.headers["Content-Length"]), multipartBody.length);
+  assert.equal(multipartBody.includes(sourceBytes), true);
+  assert.equal(multipartBody.toString("utf8").includes("name=\"content\"\r\n\r\niso"), true);
+  assert.equal(multipartBody.toString("utf8").includes("test-secret"), false);
+});
+
+test("QEMU ISO mount and eject use a free CD-ROM slot and verify recorded state", async () => {
+  const calls = [];
+  let mounted = false;
+  const client = mockClient({
+    "/nodes/pve-a/qemu/101/config?current=1": () => jsonResponse(mounted
+      ? { ide2: "local:iso/debian.iso,media=cdrom" }
+      : { ide2: "none,media=cdrom", scsi0: "local-lvm:vm-101-disk-0" }),
+    "/nodes/pve-a/qemu/101/config": ({ options }) => {
+      const body = String(options.body);
+      if (body.includes("local%3Aiso%2Fdebian.iso")) mounted = true;
+      if (body.includes("none%2Cmedia%3Dcdrom")) mounted = false;
+      return jsonResponse(null);
+    },
+    "/nodes/pve-a/storage/local/content/local%3Aiso%2Fdebian.iso": jsonResponse("UPID:pve-a:delete:1"),
+  }, calls);
+  const vm = { node: "pve-a", type: "qemu", vmid: 101 };
+  assert.deepEqual(await client.mountIso(vm, "local:iso/debian.iso"), { slot: "ide2", volumeId: "local:iso/debian.iso" });
+  assert.equal(mounted, true);
+  assert.deepEqual(await client.ejectIso(vm, { slot: "ide2", volumeId: "local:iso/debian.iso" }), { slot: "ide2", ejected: true });
+  assert.equal(mounted, false);
+  assert.equal(await client.deleteIso({ node: "pve-a", storageId: "local", volumeId: "local:iso/debian.iso" }), "UPID:pve-a:delete:1");
+  assert.equal(calls.at(-1).options.method, "DELETE");
+
+  const occupied = mockClient({
+    "/nodes/pve-a/qemu/101/config?current=1": jsonResponse({ ide2: "local:iso/other.iso,media=cdrom" }),
+  });
+  await assert.rejects(() => occupied.mountIso(vm, "local:iso/debian.iso"), (error) => error.code === "cdrom_in_use");
+  await assert.rejects(
+    () => client.mountIso({ ...vm, type: "lxc" }, "local:iso/debian.iso"),
+    (error) => error.code === "iso_qemu_only",
+  );
+});
