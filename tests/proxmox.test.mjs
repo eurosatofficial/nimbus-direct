@@ -166,6 +166,37 @@ test("instance details expose only allowlisted config and real snapshots", async
   assert.equal(details.snapshots[0].includesMemory, true);
 });
 
+test("snapshot operations validate names, normalize inventory, and return Proxmox tasks", async () => {
+  const calls = [];
+  const vm = { id: "qemu-100", type: "qemu", vmid: 100, node: "pve", status: "running" };
+  const client = mockClient({
+    "/nodes/pve/qemu/100/snapshot": ({ options }) => options.method === "POST"
+      ? jsonResponse("UPID:pve:snapshot:create")
+      : jsonResponse([
+          { name: "current" },
+          { name: "older", description: "Older point", snaptime: 100 },
+          { name: "newer", description: "Newer point", snaptime: 200, vmstate: 1 },
+        ]),
+    "/nodes/pve/qemu/100/snapshot/newer/rollback": jsonResponse("UPID:pve:snapshot:restore"),
+    "/nodes/pve/qemu/100/snapshot/older": jsonResponse("UPID:pve:snapshot:delete"),
+  }, calls);
+
+  const snapshots = await client.listSnapshots(vm);
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.name), ["newer", "older"]);
+  assert.equal(snapshots[0].includesMemory, true);
+  assert.equal(await client.createSnapshot(vm, { name: "release-1", description: "Before release", includeMemory: true }), "UPID:pve:snapshot:create");
+  const createBody = calls.find((call) => call.options.method === "POST" && call.key.endsWith("/snapshot")).options.body;
+  assert.equal(createBody.get("snapname"), "release-1");
+  assert.equal(createBody.get("vmstate"), "1");
+  assert.equal(await client.restoreSnapshot(vm, "newer"), "UPID:pve:snapshot:restore");
+  assert.equal(await client.deleteSnapshot(vm, "older"), "UPID:pve:snapshot:delete");
+  await assert.rejects(() => client.createSnapshot(vm, { name: "../invalid" }), (error) => error.code === "invalid_snapshot_name");
+  await assert.rejects(
+    () => client.createSnapshot({ ...vm, type: "lxc" }, { name: "lxc-memory", includeMemory: true }),
+    (error) => error.code === "snapshot_memory_qemu_only",
+  );
+});
+
 test("backup inventory is tenant-filtered and distinguishes denied access from empty data", async () => {
   const instances = [
     { id: "qemu-100", vmid: 100, name: "web" },
@@ -299,4 +330,72 @@ test("QEMU ISO mount and eject use a free CD-ROM slot and verify recorded state"
     () => client.mountIso({ ...vm, type: "lxc" }, "local:iso/debian.iso"),
     (error) => error.code === "iso_qemu_only",
   );
+});
+
+test("one-time ISO boot prepends only the verified CD-ROM and safely restores the exact prior order", async () => {
+  const calls = [];
+  let boot = "order=scsi0;net0";
+  const client = mockClient({
+    "/nodes/pve-a/qemu/101/config": ({ options }) => {
+      if (!options.method || options.method === "GET") {
+        return jsonResponse({
+          ide2: "local:iso/debian.iso,media=cdrom",
+          scsi0: "local-lvm:vm-101-disk-0",
+          net0: "virtio=00:11:22:33:44:55",
+          boot,
+        });
+      }
+      const body = new URLSearchParams(String(options.body));
+      if (body.has("boot")) boot = body.get("boot");
+      if (body.get("delete") === "boot") boot = null;
+      return jsonResponse(null);
+    },
+  }, calls);
+  const vm = { node: "pve-a", type: "qemu", vmid: 101 };
+  const prepared = await client.prepareIsoBootOnce(vm, { slot: "ide2", volumeId: "local:iso/debian.iso" });
+  assert.deepEqual(prepared, {
+    slot: "ide2",
+    originalBoot: "order=scsi0;net0",
+    armedBoot: "order=ide2;scsi0;net0",
+  });
+  await client.applyIsoBootOnce(vm, prepared.armedBoot);
+  assert.equal(boot, "order=ide2;scsi0;net0");
+  assert.deepEqual(await client.restoreIsoBootOnce(vm, prepared), { restored: true, alreadyRestored: false });
+  assert.equal(boot, "order=scsi0;net0");
+  assert.equal(calls.filter((call) => call.options.method === "PUT").length, 2);
+
+  boot = "order=virtio0";
+  await assert.rejects(
+    () => client.restoreIsoBootOnce(vm, prepared),
+    (error) => error.code === "boot_order_changed" && error.status === 409,
+  );
+  await assert.rejects(
+    () => client.prepareIsoBootOnce(vm, { slot: "ide2", volumeId: "local:iso/other.iso" }),
+    (error) => error.code === "cdrom_state_changed",
+  );
+});
+
+test("one-time ISO boot can restore an originally unset boot property", async () => {
+  let boot;
+  const client = mockClient({
+    "/nodes/pve-a/qemu/101/config": ({ options }) => {
+      if (!options.method || options.method === "GET") {
+        return jsonResponse({
+          ide2: "local:iso/debian.iso,media=cdrom",
+          scsi0: "local-lvm:vm-101-disk-0",
+          boot,
+        });
+      }
+      const body = new URLSearchParams(String(options.body));
+      if (body.has("boot")) boot = body.get("boot");
+      if (body.get("delete") === "boot") boot = undefined;
+      return jsonResponse(null);
+    },
+  });
+  const vm = { node: "pve-a", type: "qemu", vmid: 101 };
+  const prepared = await client.armIsoBootOnce(vm, { slot: "ide2", volumeId: "local:iso/debian.iso" });
+  assert.equal(prepared.originalBoot, null);
+  assert.equal(boot, "order=ide2;scsi0");
+  await client.restoreIsoBootOnce(vm, prepared);
+  assert.equal(boot, undefined);
 });

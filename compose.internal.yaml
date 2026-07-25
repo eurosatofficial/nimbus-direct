@@ -2,7 +2,7 @@
 # retaining the certificate hostname entered for the cluster in Nimbus Direct.
 #
 # Usage:
-#   docker compose -f compose.yaml -f compose.internal.yaml up -d --build
+#   docker compose -f compose.yaml -f compose.internal.yaml up -d --build --force-recreate panel
 services:
   panel:
     environment:

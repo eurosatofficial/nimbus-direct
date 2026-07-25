@@ -21,17 +21,20 @@ Customer browser                    Administrator browser
                     authorization service
                     assignment + permission lookup
                               |
-                 +------------+-------------+
-                 |                          |
-          SQLite control DB          Proxmox service layer
-          - users                    - API token auth
-          - customers                - response allowlists
-          - assignments              - task normalization
-          - permissions              - console tickets
-          - ISO ownership            - streamed ISO upload
-          - ISO policies/quotas      - CD-ROM mount/eject
-          - audit/tasks                    |
-                 |                   HTTPS :8006
+                 +------------+-------------+----------------+
+                 |                          |                |
+          SQLite control DB          Proxmox service layer  Email service
+          - users                    - API token auth        - SMTP TLS
+          - customers                - response allowlists  - retry queue
+          - assignments/limits       - task normalization   - templates
+          - permissions              - console tickets            |
+          - ISO ownership            - streamed ISO upload      TLS SMTP
+          - ISO/boot state           - guarded boot restore
+          - SMTP/queued mail               |
+          - alerts/notifications     HTTPS :8006
+          - MFA/recovery codes
+          - account-link hashes
+          - audit/tasks
                  |                          |
           background sync        Proxmox VE cluster(s)
                                   (no Nimbus node agent)
@@ -43,21 +46,32 @@ The server is the only component that knows the Proxmox service-account credenti
 
 Core tables:
 
-- `users`: login identity, password hash, role, status, optional customer membership.
+- `users`: login identity, password hash, password-onboarding state, role, status, optional customer membership.
+- `user_mfa`: AES-256-GCM encrypted TOTP secret, enrollment/confirmation state, and one-way recovery-code hashes.
 - `customers`: customer account and support/plan metadata.
 - `proxmox_clusters`: cluster name, HTTPS API URL, health, and sync state.
 - `proxmox_credentials`: token ID and AES-256-GCM encrypted token secret.
 - `proxmox_nodes`: synchronized node inventory.
 - `resources`: synchronized QEMU/LXC coordinates and runtime metadata.
-- `customer_resource_assignments`: exactly one current customer per resource, optional customer-facing name, and status.
+- `customer_resource_assignments`: exactly one current customer per resource, optional customer-facing name, snapshot limit, and status.
 - `assignment_permissions`: explicit allowed operations for one assignment.
-- `sessions`: opaque, secret-bound server sessions and CSRF tokens.
+- `sessions`: opaque, secret-bound server sessions, CSRF tokens, source IP, and bounded user-agent metadata.
+- `mfa_login_challenges`: hashed, five-minute, attempt-limited challenges that bridge password verification and session creation.
+- `account_tokens`: `APP_SECRET`-keyed token hash, invitation/password-reset purpose, target user, expiration, single-use/revocation state, creator, and bounded request IP. Raw tokens are never stored in this table.
 - `audit_logs`: actor, customer, action, resource, source IP, detail, and time.
 - `api_tasks`: server-only Proxmox UPID tracking, customer-scoped progress, and idempotency.
 - `console_sessions`: encrypted short-lived console tickets.
 - `iso_storage_policies`: an administrator-enabled Proxmox ISO storage, state, per-file ceiling, per-customer quota, and optional deletion policy.
 - `iso_images`: customer ownership, cluster/storage/node coordinates, internal Proxmox volume ID, safe filename, size/hash, operation state, and server-only task UPID.
 - `iso_mounts`: the ISO image, assigned resource, QEMU CD-ROM slot, and mount/eject lifecycle.
+- `iso_boot_overrides`: the active mount, internally saved original/temporary boot values, restoration state, and lifecycle timestamps. Raw boot values are never returned to browsers.
+- `email_settings`: singleton delivery state, SMTP endpoint/security mode, sender identity, public panel URL, encrypted password, and sanitized connection-test status.
+- `email_jobs`: recipient, subject, category, encrypted pending content, retry state, sanitized error code, and delivery timestamps. Successfully delivered content is erased.
+- `resource_alert_policies`: per-assignment enabled conditions, thresholds, duration, cooldown, and timestamps.
+- `alert_states`: durable healthy/pending/firing state for each assignment and condition, including incident and last-notification timing.
+- `notification_preferences`: independent in-panel/email and event-category choices for one customer login.
+- `notification_events`: customer/resource-scoped action, alert, and recovery events with a unique deduplication key.
+- `notifications`: private per-user delivery/read state and optional queued email reference.
 
 Important keys:
 
@@ -66,13 +80,20 @@ resources UNIQUE(cluster_id, type, vmid)
 customer_resource_assignments UNIQUE(resource_id)
 assignment_permissions PRIMARY KEY(assignment_id, permission)
 iso_storage_policies UNIQUE(cluster_id, storage_id)
+iso_boot_overrides UNIQUE(resource_id) WHERE status is active
+resource_alert_policies PRIMARY KEY(assignment_id)
+alert_states PRIMARY KEY(assignment_id, alert_type)
+notification_events UNIQUE(dedup_key)
+notifications UNIQUE(event_id, user_id)
 ```
 
 The canonical resource ID is `cluster-id:type:vmid`. The node is stored and updated during synchronization because a guest can move. Assignments reference the stable resource row, so a migration between nodes does not transfer or delete customer ownership.
 
 ## 3. Authentication and authorization
 
-Authentication uses scrypt password hashing and opaque HTTP-only sessions. Administrators have platform scope. Customer users must belong to one active customer account.
+Authentication uses scrypt password hashing and opaque HTTP-only sessions. Optional TOTP authentication is compatible with standard authenticator apps. A password-valid account with MFA enabled receives only a short-lived challenge; Nimbus creates the real session only after a current six-digit code or an unused recovery code succeeds. TOTP secrets are encrypted with `APP_SECRET`, while recovery codes are normalized, secret-bound hashed, displayed once, and atomically consumed. Administrators have platform scope. Customer users must belong to one active customer account.
+
+Administrators can create a user in pending-password state and send a 30-minute invitation. Invitations and password resets share a purpose-bound, single-use account-token service. The email contains the raw random token inside an encrypted queued body; SQLite stores only its `APP_SECRET`-keyed hash. Resending invalidates the previous invitation, completion consumes every outstanding account token and revokes every session, and password recovery preserves TOTP configuration. Forgot-password responses are intentionally identical for eligible, unknown, disabled, and pending-invitation addresses. Account-link validation/completion and request generation use independent rate limits.
 
 Authorization is server-side and fail-closed:
 
@@ -107,6 +128,7 @@ The service layer uses the official `/api2/json` endpoints for:
 - `GET /nodes/{node}/storage?content=iso&enabled=1` for administrator storage discovery and node availability checks.
 - `POST /nodes/{node}/storage/{storage}/upload` for streamed multipart ISO upload.
 - `PUT /nodes/{node}/qemu/{vmid}/config` for guarded CD-ROM mount/eject.
+- `GET` and `PUT /nodes/{node}/qemu/{vmid}/config` for server-derived one-time ISO boot and compare-before-restore handling.
 - `DELETE /nodes/{node}/storage/{storage}/content/{volume}` for optional ISO deletion.
 
 Raw upstream bodies never pass through to customers. Nimbus normalizes errors, allowlists configuration fields, and stores only required task identifiers. Task API responses exclude the UPID and expose a small state model: running, successful, or failed.
@@ -115,19 +137,27 @@ Synchronization marks previously discovered resources as stale before applying f
 
 ISO bytes are not buffered into the Nimbus data volume. The incoming request is size-checked and streamed as multipart data to Proxmox while Nimbus calculates SHA-256. Nimbus reserves quota in the local database before the stream begins. Upload/delete task UPIDs remain server-only, and a temporary Proxmox error changes operation state without deleting the ownership record.
 
+One-time ISO boot never accepts a raw boot string, CD-ROM slot, volume ID, node, or VMID from the browser. Nimbus loads the active customer-owned mount, verifies the current Proxmox CD-ROM value, saves the exact prior `boot` property internally, and prepends only the verified slot. Restoration compares the current value with Nimbus's armed value before writing. An outside boot-order change therefore produces an error instead of being overwritten.
+
+Email delivery is a separate service layer and never calls Proxmox. Administrators configure a TLS or STARTTLS SMTP endpoint and the public customer-facing panel URL in the control center. The password is encrypted at rest and omitted from every browser response. Normal messages enter a durable SQLite queue; the worker claims one record at a time, retries temporary network/provider failures with increasing delays, and converts provider errors into a small allowlisted code set. Pending text/HTML bodies—including invitation/reset links—are encrypted and erased after success. Connection and end-to-end message tests are rate-limited and audited.
+
+Alert evaluation runs only after a successful resource synchronization. Each enabled assignment condition progresses through healthy, pending, and firing states. Conditions must remain active for the configured duration; an incident creates one deduplicated alert event and its transition back to normal creates one recovery event. Existing stopped guests are baselined without an alert, recent Nimbus stop/shutdown requests suppress expected offline events, and an API synchronization failure never alters alert state. Reassignment resets policy and incident state.
+
+One customer event can fan out to multiple active users in that customer, but every delivery row and preference row belongs to one user. API reads and read-state mutations always filter by the authenticated user ID. Email delivery is opt-in and uses the same encrypted queue and branded template system as administrator test messages.
+
 ## 5. Administrator assignment workflow
 
 1. Add a Proxmox cluster and encrypted service-account token.
 2. Test the connection and synchronize the guest inventory.
-3. Create a customer account and one or more Nimbus users.
+3. Create a customer account and one or more Nimbus users. Prefer emailed single-use invitations so administrators do not choose customer passwords.
 4. Open **Control center → Inventory**.
 5. Select any QEMU VM or LXC container from any node/cluster.
-6. Choose the customer, optional display name, and allowed operations.
+6. Choose the customer, optional display name, allowed operations, snapshot limit, and optional alert policy.
 7. Save the local assignment.
 
 Reassigning a resource updates the local assignment and permission rows. Removing it changes the assignment state to `unassigned`. Neither operation creates or modifies a Proxmox pool.
 
-An active customer ISO mount blocks reassignment or removal until it is ejected. A customer account with non-deleted ISO ownership records cannot be deleted. These guards prevent media from becoming silently orphaned or crossing a reassignment boundary.
+An active customer ISO mount or unresolved one-time boot override blocks reassignment or removal until it is safely restored/ejected. A customer account with non-deleted ISO ownership records cannot be deleted. These guards prevent media or recovery state from becoming silently orphaned or crossing a reassignment boundary.
 
 ## 6. Customer dashboard
 
@@ -135,30 +165,46 @@ The dashboard returns only resources with an active assignment to the authentica
 
 Each resource opens a full detail workspace with status-aware power controls, normalized Proxmox RRD history, allowlisted configuration, guest-reported network addresses, and recent tasks. Buttons are generated from assignment permissions for usability, but the same permission is checked again on the server.
 
-Power operations use idempotency keys and return either an immediate result or a tracked Proxmox task. Nimbus polls active tasks, writes a system audit event when they finish, updates the expected local status after successful power tasks, and rejects overlapping actions while a recent task is still active.
+Power operations use idempotency keys and return either an immediate result or a tracked Proxmox task. The active browser polls for immediate feedback and the server synchronization cycle independently follows unfinished tasks, so completion state and notifications do not depend on an open page. Nimbus writes a system audit event when tasks finish, updates the expected local status after successful power tasks, and rejects overlapping actions while a recent task is still active.
+
+For assignments with snapshot permissions, Snapshot Center lists normalized Proxmox recovery points and exposes create, restore, and delete independently. The backend enforces the assignment's 1-50 snapshot limit against live Proxmox inventory, validates snapshot names, requires exact-name confirmation for restore/delete, applies the shared action rate limit, tracks the returned UPID, and rejects overlapping resource tasks. Snapshot create/restore fails closed while customer ISO media or a one-time boot override is active.
 
 Console launch creates a short-lived, encrypted, one-time ticket record. The bundled noVNC 1.7 client connects to a same-origin WebSocket gateway; the gateway consumes the local launch token once, completes the authenticated Proxmox `vncwebsocket` upgrade server-side, and then pipes binary frames. The authenticated console page receives the scoped, short-lived VNC ticket in memory because Proxmox requires it as the noVNC password. The long-lived Proxmox API token never reaches the browser.
 
 For QEMU assignments with explicit media permissions, the detail page exposes a customer-private ISO library. The server derives the customer from the active VM assignment, scopes every ISO lookup to that customer and cluster, validates the enabled storage policy/quota, and then uses resource coordinates loaded from the database. Customers cannot supply a node, VMID, storage ID, or Proxmox volume ID. LXC media requests are rejected server-side.
 
+With the separate `iso_boot` assignment permission, a mounted customer-owned ISO can be scheduled first for one Nimbus-tracked start, reboot, or reset. The completed power task triggers restoration of the exact saved boot property. The customer can cancel before boot or restore while ejecting; a failed compare remains visible and fail-closed for administrator review.
+
+The Notification Center returns only deliveries for the authenticated login. Users independently enable in-panel/email delivery and action-success, action-failure, infrastructure-alert, and recovery categories. Backend-created event keys prevent task refreshes or repeated synchronization cycles from duplicating a notification.
+
+Account Settings includes TOTP enrollment, recovery-code replacement, password-and-code-protected disablement, and user-scoped session management. Enabling or disabling MFA revokes every other session. An administrator can reset another user's MFA only after re-entering the administrator password; the reset revokes all target sessions and cannot be used on the currently signed-in administrator. Security changes and recovery-code logins are audited, and queued security notices use the existing encrypted SMTP path when enabled.
+
+The unauthenticated sign-in surface also handles invitations and password recovery. It removes the email token from browser history before sending it in a JSON request, validates the token's hash/purpose/expiry server-side, and never creates a session automatically after completion. Users sign in normally afterward, including the existing MFA step. Administrators can inspect pending/expired onboarding and resend or revoke links without seeing the token.
+
 ## 7. Security model
 
 - TLS is required for every Proxmox API URL.
 - Proxmox token secrets use AES-256-GCM encryption with a key derived from `APP_SECRET`.
-- Passwords use scrypt; sessions are opaque, HTTP-only, SameSite=Strict, and Secure in production.
+- SMTP passwords and queued email bodies use the same authenticated encryption boundary and are never exposed by browser APIs or logs.
+- Passwords use scrypt; TOTP secrets use AES-256-GCM; recovery codes are one-way hashed and single-use.
+- Invitation and password-reset tokens are random, purpose-bound, `APP_SECRET`-keyed hashes at rest, expire after 30 minutes, and are single-use.
+- Sessions are opaque, HTTP-only, SameSite=Strict, and Secure in production; users can review and revoke only their own sessions.
 - State-changing requests require a session-bound CSRF token and same-origin check.
-- Login and power actions have independent rate limits.
+- Password login, MFA verification, invitation delivery, password recovery, account-link validation, security-setting changes, and resource actions have independent rate limits.
+- SMTP connection and delivery tests have a separate administrator/user/IP rate limit.
 - ISO uploads have an independent per-user hourly rate limit, a hard application size ceiling, per-storage file limits, and per-customer quotas.
 - Customer resource authorization is a database join, never a frontend decision.
 - User-supplied VMID, node, type, or cluster coordinates are never forwarded.
 - Configuration reads and writes use explicit field allowlists.
 - Console tickets are encrypted, short-lived, and single-use.
 - API task IDs are customer-scoped and idempotent.
+- Notification delivery and read-state APIs are user-scoped; deduplication is server-generated.
 - Security headers deny framing and unnecessary browser capabilities.
-- Audit logs cover authentication, administration, assignment changes, power requests, configuration, snapshots, console tickets, ISO uploads, mount/eject, deletion, and failed uploads.
+- Audit logs cover authentication, administration, assignment changes, power requests, configuration, snapshots, console tickets, ISO uploads, mount/eject, one-time boot arm/restore/failure, deletion, and failed uploads.
 - Docker runs unprivileged, read-only, without Linux capabilities or privilege escalation.
+- SMTP transport requires certificate-verified TLS or STARTTLS; plaintext SMTP and verification bypasses are not supported.
 
-Recommended token privileges must be adjusted to the enabled feature set. A status/power/console MVP generally needs `VM.Audit`, `VM.PowerMgmt`, and `VM.Console`; add `VM.Snapshot`/`VM.Snapshot.Rollback`, selected `VM.Config.*`, and guest-agent audit privileges only when those features are enabled. ISO upload/mount adds `VM.Config.CDROM` on managed VMs plus `Datastore.Audit` and `Datastore.AllocateTemplate` on the specific ISO storage. Optional deletion currently adds the broader `Datastore.Allocate` privilege and should remain disabled unless required. Do not grant `Administrator`, `Sys.Modify`, user management, or host-shell privileges.
+Recommended token privileges must be adjusted to the enabled feature set. A status/power/console MVP generally needs `VM.Audit`, `VM.PowerMgmt`, and `VM.Console`; add `VM.Snapshot`/`VM.Snapshot.Rollback`, selected `VM.Config.*`, and guest-agent audit privileges only when those features are enabled. ISO upload/mount adds `VM.Config.CDROM` on managed VMs plus `Datastore.Audit` and `Datastore.AllocateTemplate` on the specific ISO storage. One-time boot additionally uses `VM.Config.Options` on the managed VMs. Optional deletion currently adds the broader `Datastore.Allocate` privilege and should remain disabled unless required. Do not grant `Administrator`, `Sys.Modify`, user management, or host-shell privileges.
 
 ## 8. Practical MVP plan
 
@@ -171,14 +217,19 @@ Recommended token privileges must be adjusted to the enabled feature set. A stat
 - Customer-only dashboard and power-action authorization.
 - Status, resource usage, IP metadata, details, audit history, and task model.
 - Full customer instance detail page with usage history, networking, status-aware controls, and live task progress.
-- Snapshot/config services and a short-lived, one-time noVNC console gateway.
-- Customer-owned QEMU ISO upload, quota, mount/eject, optional deletion, and administrator storage policies.
+- Snapshot Center with per-assignment limits, confirmations, tracked tasks, and audit events.
+- Selected configuration services and a short-lived, one-time noVNC console gateway.
+- Customer-owned QEMU ISO upload, quota, mount/eject, guarded one-time boot restoration, optional deletion, and administrator storage policies.
+- Encrypted SMTP configuration, administrator connection/message tests, durable delivery retries, and sanitized delivery history.
+- Per-assignment resource alerts, private notification delivery, customer preferences, action completion events, and branded alert/recovery email.
+- TOTP two-factor authentication, one-use recovery codes, active-session management, administrator-assisted reset, and security email notices.
+- Administrator-issued customer invitations, self-service password recovery, resend/revoke controls, non-enumerating responses, and session-revoking completion.
 - Docker deployment, health/readiness endpoints, and automated security/isolation tests.
 
 ### Phase 2 — production hardening
 
 - Replace in-process rate limiting with Redis when running multiple replicas.
-- Add TOTP/WebAuthn MFA and account recovery policy.
+- Add WebAuthn/passkeys and administrator-enforced account security policy.
 - Add key rotation with credential re-encryption.
 - Add a durable job runner for sync/task polling rather than one process timer.
 - Add pagination and retention policies for large audit/task tables.
@@ -186,9 +237,8 @@ Recommended token privileges must be adjusted to the enabled feature set. A stat
 
 ### Phase 3 — controlled expansion
 
-- Snapshot UI and restore confirmations.
 - Selected configuration editors with quotas and change previews.
-- Notifications, webhooks, maintenance windows, and support impersonation controls.
+- Alert policy templates, maintenance windows, webhooks, and support impersonation controls.
 - PostgreSQL option and HA deployment.
 - External identity providers and organization-level policy templates.
 

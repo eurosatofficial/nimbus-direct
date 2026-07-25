@@ -37,6 +37,26 @@ function safeIsoFilename(value) {
   return name;
 }
 
+function bootOrderDevices(value) {
+  const match = String(value || "").match(/(?:^|,)order=([^,]+)/);
+  if (!match) return [];
+  return match[1].split(";").map((entry) => entry.trim()).filter((entry) => /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(entry));
+}
+
+function bootableQemuDevices(config = {}) {
+  const configured = bootOrderDevices(config.boot);
+  if (configured.length) return configured;
+  const bootDisk = String(config.bootdisk || "");
+  const disks = Object.entries(config)
+    .filter(([key, value]) =>
+      /^(ide|sata|scsi|virtio)\d+$/.test(key)
+      && !String(value).split(",").includes("media=cdrom")
+      && String(value).split(",")[0] !== "none")
+    .map(([key]) => key);
+  const networks = Object.keys(config).filter((key) => /^net\d+$/.test(key));
+  return [...new Set([bootDisk, ...disks, ...networks].filter((entry) => /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(entry)))];
+}
+
 async function mapLimit(items, limit, mapper) {
   const result = new Array(items.length);
   let cursor = 0;
@@ -100,6 +120,27 @@ function summarizeNetwork(interfaces, status = "available") {
 function safeConfig(config = {}) {
   const allowed = ["name", "description", "tags", "onboot", "protection", "cores", "sockets", "memory", "ostype", "arch", "bios", "agent", "startup", "hostname", "unprivileged"];
   return Object.fromEntries(allowed.filter((key) => config[key] !== undefined).map((key) => [key, config[key]]));
+}
+
+function safeSnapshotName(value) {
+  const name = String(value || "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(name)) {
+    throw new ProxmoxError("Snapshot name is invalid", { code: "invalid_snapshot_name", status: 400 });
+  }
+  return name;
+}
+
+function normalizeSnapshots(snapshots) {
+  return (Array.isArray(snapshots) ? snapshots : [])
+    .filter((snapshot) => snapshot?.name && snapshot.name !== "current")
+    .map((snapshot) => ({
+      name: String(snapshot.name),
+      description: String(snapshot.description || "").slice(0, 500),
+      parent: snapshot.parent ? String(snapshot.parent) : null,
+      createdAt: snapshot.snaptime ? Number(snapshot.snaptime) * 1000 : null,
+      includesMemory: Boolean(snapshot.vmstate),
+    }))
+    .sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0));
 }
 
 export class ProxmoxClient {
@@ -277,20 +318,19 @@ export class ProxmoxClient {
     const [config, network, snapshots] = await Promise.all([
       this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/config?current=1`).then(safeConfig),
       this.getNetwork(vm),
-      this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/snapshot`).catch(() => []),
+      this.listSnapshots(vm).catch(() => []),
     ]);
     return {
       instance: vm,
       config,
       network,
-      snapshots: (Array.isArray(snapshots) ? snapshots : []).filter((snapshot) => snapshot.name !== "current").map((snapshot) => ({
-        name: snapshot.name,
-        description: snapshot.description || "",
-        parent: snapshot.parent || null,
-        createdAt: snapshot.snaptime ? snapshot.snaptime * 1000 : null,
-        includesMemory: Boolean(snapshot.vmstate),
-      })),
+      snapshots,
     };
+  }
+
+  async listSnapshots(vm) {
+    const snapshots = await this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/snapshot`);
+    return normalizeSnapshots(snapshots);
   }
 
   async listIsoStorageCandidates() {
@@ -421,6 +461,52 @@ export class ProxmoxClient {
     return { slot, ejected: true };
   }
 
+  async prepareIsoBootOnce(vm, { slot, volumeId }) {
+    if (vm.type !== "qemu") throw new ProxmoxError("ISO boot is available only for QEMU virtual machines", { code: "iso_qemu_only", status: 400 });
+    if (!/^(ide|sata|scsi)\d+$/.test(String(slot))) {
+      throw new ProxmoxError("The recorded CD/DVD slot is invalid", { code: "cdrom_slot_invalid", status: 409 });
+    }
+    const config = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config`);
+    const cdrom = String(config?.[slot] || "").split(",");
+    if (cdrom[0] !== volumeId || !cdrom.includes("media=cdrom")) {
+      throw new ProxmoxError("The mounted ISO changed outside Nimbus", { code: "cdrom_state_changed", status: 409 });
+    }
+    const originalBoot = config?.boot === undefined || config?.boot === null ? null : String(config.boot);
+    const devices = [String(slot), ...bootableQemuDevices(config).filter((device) => device !== slot)];
+    const armedBoot = `order=${devices.join(";")}`;
+    return { slot: String(slot), originalBoot, armedBoot };
+  }
+
+  async applyIsoBootOnce(vm, armedBoot) {
+    if (vm.type !== "qemu") throw new ProxmoxError("ISO boot is available only for QEMU virtual machines", { code: "iso_qemu_only", status: 400 });
+    if (!String(armedBoot || "").startsWith("order=") || String(armedBoot).length > 2048) {
+      throw new ProxmoxError("The generated boot order is invalid", { code: "invalid_boot_order", status: 409 });
+    }
+    const body = new URLSearchParams({ boot: armedBoot });
+    await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config`, { method: "PUT", body });
+  }
+
+  async armIsoBootOnce(vm, mount) {
+    const prepared = await this.prepareIsoBootOnce(vm, mount);
+    await this.applyIsoBootOnce(vm, prepared.armedBoot);
+    return prepared;
+  }
+
+  async restoreIsoBootOnce(vm, { originalBoot = null, armedBoot }) {
+    if (vm.type !== "qemu") throw new ProxmoxError("ISO boot is available only for QEMU virtual machines", { code: "iso_qemu_only", status: 400 });
+    const config = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config`);
+    const currentBoot = config?.boot === undefined || config?.boot === null ? null : String(config.boot);
+    if (currentBoot === originalBoot) return { restored: true, alreadyRestored: true };
+    if (currentBoot !== armedBoot) {
+      throw new ProxmoxError("The VM boot order changed outside Nimbus", { code: "boot_order_changed", status: 409 });
+    }
+    const body = originalBoot === null
+      ? new URLSearchParams({ delete: "boot" })
+      : new URLSearchParams({ boot: originalBoot });
+    await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config`, { method: "PUT", body });
+    return { restored: true, alreadyRestored: false };
+  }
+
   async deleteIso({ node, storageId, volumeId }) {
     return this.request(`/nodes/${encodeURIComponent(node)}/storage/${encodeURIComponent(storageId)}/content/${encodeURIComponent(volumeId)}`, { method: "DELETE" });
   }
@@ -509,20 +595,21 @@ export class ProxmoxClient {
   }
 
   async createSnapshot(vm, { name, description = "", includeMemory = false }) {
-    const snapname = String(name || "").trim();
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(snapname)) {
-      throw new ProxmoxError("Snapshot name is invalid", { code: "invalid_snapshot_name", status: 400 });
+    const snapname = safeSnapshotName(name);
+    if (includeMemory && vm.type !== "qemu") {
+      throw new ProxmoxError("Memory state is available only for QEMU snapshots", { code: "snapshot_memory_qemu_only", status: 400 });
     }
-    const body = new URLSearchParams({ snapname, description: String(description).slice(0, 500), vmstate: includeMemory ? "1" : "0" });
+    const body = new URLSearchParams({ snapname, description: String(description).trim().slice(0, 500) });
+    if (vm.type === "qemu") body.set("vmstate", includeMemory ? "1" : "0");
     return this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/snapshot`, { method: "POST", body });
   }
 
   async restoreSnapshot(vm, name) {
-    return this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/snapshot/${encodeURIComponent(name)}/rollback`, { method: "POST", body: "" });
+    return this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/snapshot/${encodeURIComponent(safeSnapshotName(name))}/rollback`, { method: "POST", body: "" });
   }
 
   async deleteSnapshot(vm, name) {
-    return this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/snapshot/${encodeURIComponent(name)}`, { method: "DELETE" });
+    return this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/snapshot/${encodeURIComponent(safeSnapshotName(name))}`, { method: "DELETE" });
   }
 
   async updateConfig(vm, values) {

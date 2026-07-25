@@ -5,7 +5,7 @@ import { readConfig } from "../server/config.mjs";
 const KEYS = [
   "NODE_ENV", "APP_SECRET", "BOOTSTRAP_CUSTOMER_ID", "BOOTSTRAP_CUSTOMER_NAME",
   "BOOTSTRAP_SUPPORT_EMAIL", "BOOTSTRAP_PLAN_NAME", "PROXMOX_REQUEST_TIMEOUT_MS", "RESOURCE_SYNC_SECONDS",
-  "ISO_MAX_UPLOAD_MB", "ISO_UPLOAD_TIMEOUT_MINUTES",
+  "ISO_MAX_UPLOAD_MB", "ISO_UPLOAD_TIMEOUT_MINUTES", "EMAIL_SMTP_TIMEOUT_SECONDS", "EMAIL_QUEUE_INTERVAL_SECONDS",
 ];
 
 function withEnvironment(values, callback) {
@@ -33,6 +33,8 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     RESOURCE_SYNC_SECONDS: "90",
     ISO_MAX_UPLOAD_MB: "4096",
     ISO_UPLOAD_TIMEOUT_MINUTES: "45",
+    EMAIL_SMTP_TIMEOUT_SECONDS: "12",
+    EMAIL_QUEUE_INTERVAL_SECONDS: "7",
   }, () => {
     const config = readConfig();
     assert.equal(config.bootstrap.customerId, "acme");
@@ -42,6 +44,8 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     assert.equal(config.syncIntervalMs, 90000);
     assert.equal(config.isoMaxUploadBytes, 4096 * 1024 * 1024);
     assert.equal(config.isoUploadTimeoutMs, 45 * 60 * 1000);
+    assert.equal(config.emailSmtpTimeoutMs, 12_000);
+    assert.equal(config.emailQueueIntervalMs, 7_000);
     assert.equal("globalProxmoxTenantId" in config, false);
   });
 });

@@ -4,7 +4,17 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { connect as connectTls } from "node:tls";
+import QRCode from "qrcode";
 import { loadEnv, readConfig } from "./server/config.mjs";
+import {
+  createEmailService,
+  createSmtpTransport,
+  invitationEmailTemplate,
+  passwordResetEmailTemplate,
+  securityEmailTemplate,
+} from "./server/email.mjs";
+import { createTotpEnrollment, generateRecoveryCodes, verifyTotp } from "./server/mfa.mjs";
+import { createNotificationService } from "./server/notifications.mjs";
 import { ProxmoxRegistry } from "./server/proxmox-registry.mjs";
 import { RateLimiter } from "./server/rate-limit.mjs";
 import { bootstrapStore, DEFAULT_PERMISSIONS, openStore } from "./server/store.mjs";
@@ -26,8 +36,16 @@ const proxmox = new ProxmoxRegistry({
   timeoutMs: config.proxmoxTimeoutMs,
 });
 const loginLimiter = new RateLimiter({ limit: 8, windowMs: 15 * 60 * 1000 });
+const mfaLimiter = new RateLimiter({ limit: 8, windowMs: 10 * 60 * 1000 });
+const securityActionLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
+const forgotPasswordLimiter = new RateLimiter({ limit: 5, windowMs: 15 * 60 * 1000 });
+const forgotAccountLimiter = new RateLimiter({ limit: 3, windowMs: 60 * 60 * 1000 });
+const accountTokenLimiter = new RateLimiter({ limit: 12, windowMs: 15 * 60 * 1000 });
+const invitationLimiter = new RateLimiter({ limit: 20, windowMs: 60 * 60 * 1000 });
 const actionLimiter = new RateLimiter({ limit: 30, windowMs: 60 * 1000 });
 const uploadLimiter = new RateLimiter({ limit: 5, windowMs: 60 * 60 * 1000 });
+const emailConnectionTestLimiter = new RateLimiter({ limit: 12, windowMs: 5 * 60 * 1000 });
+const emailMessageTestLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
 const root = fileURLToPath(new URL("./public", import.meta.url));
 const noVncRoot = fileURLToPath(new URL("./node_modules/@novnc/novnc", import.meta.url));
 const headers = securityHeaders();
@@ -40,6 +58,7 @@ const demoResources = [
   { vmid: 301, type: "lxc", name: "cache-edge-01", node: "pve-ber-03", status: "running", vcpu: 2, memory: 4, memoryUsed: 1.7, storage: 32, storageUsed: 12, ip: "10.24.3.44", cpu: 21, uptime: 338441 },
   { vmid: 302, type: "qemu", name: "worker-gpu-01", node: "pve-fra-02", status: "suspended", vcpu: 12, memory: 32, memoryUsed: 18.4, storage: 300, storageUsed: 201, ip: "10.31.2.55", cpu: 0, uptime: 129223 },
 ];
+const demoSnapshots = new Map();
 
 if (config.allowDemoData && !store.listClusters().length) {
   store.createCluster({ id: "demo-eu", name: "Nimbus Demo EU", apiUrl: "https://demo.invalid:8006", tokenId: "demo@pve!panel", tokenSecret: "demo-secret-never-used" });
@@ -65,6 +84,14 @@ if (config.allowDemoData && store.listClusters().some((cluster) => cluster.id ==
 function log(level, message, detail = {}) {
   console[level === "error" ? "error" : "log"](JSON.stringify({ timestamp: new Date().toISOString(), level, message, ...detail }));
 }
+
+const email = createEmailService({
+  store,
+  log,
+  transport: createSmtpTransport({ timeoutMs: config.emailSmtpTimeoutMs }),
+  queueIntervalMs: config.emailQueueIntervalMs,
+});
+const notifications = createNotificationService({ store, email, log });
 
 function sendJson(response, status, payload, extraHeaders = {}) {
   response.writeHead(status, { ...headers, "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extraHeaders });
@@ -131,6 +158,138 @@ function audit(request, session, action, { customerId = session.user.customerId,
   });
 }
 
+function createLoginSession(request, userId) {
+  return store.createSession({
+    userId,
+    ttlMs: config.sessionTtlMs,
+    ipAddress: clientIp(request),
+    userAgent: request.headers["user-agent"],
+  });
+}
+
+function sendAuthenticated(response, session) {
+  sendJson(response, 200, {
+    user: store.getSession(session.token).user,
+    csrfToken: session.csrfToken,
+    expiresAt: session.expiresAt,
+  }, {
+    "set-cookie": sessionCookie(session.token, {
+      secure: config.secureCookies,
+      maxAge: config.sessionTtlMs,
+      name: cookieName,
+    }),
+  });
+}
+
+function verifyMfaCredential(userId, code, { allowRecovery = true } = {}) {
+  const secret = store.getMfaSecret(userId);
+  if (secret && verifyTotp(secret, code)) return { valid: true, recoveryCode: false };
+  if (allowRecovery && store.consumeRecoveryCode(userId, code)) return { valid: true, recoveryCode: true };
+  return { valid: false, recoveryCode: false };
+}
+
+function queueSecurityNotice(user, { title, message, ipAddress = null }) {
+  try {
+    if (!store.getEmailSettings().enabled || !user?.email) return;
+    const content = securityEmailTemplate({
+      displayName: user.display_name || user.displayName,
+      title,
+      message,
+      ipAddress,
+    });
+    store.queueEmail({
+      to: user.email,
+      ...content,
+      category: "account_security",
+      createdBy: user.id,
+      maxAttempts: 4,
+    });
+    void email.processDue();
+  } catch (error) {
+    log("error", "security_notice_queue_failed", { userId: user?.id, error: error.code || error.message });
+  }
+}
+
+function accountEmailSettings() {
+  const settings = store.getEmailSettings();
+  if (!settings.enabled) throw Object.assign(new Error("Email delivery is disabled"), { status: 409, code: "email_disabled" });
+  if (!settings.appUrl) throw Object.assign(new Error("Configure the public panel URL in the Email Center"), {
+    status: 409,
+    code: "account_link_url_missing",
+  });
+  return settings;
+}
+
+function accountActionUrl(appUrl, purpose, token) {
+  const url = new URL(appUrl);
+  url.searchParams.set(purpose === "invitation" ? "invite" : "reset", token);
+  return url.toString();
+}
+
+function queueInvitationEmail(user, accountToken, createdBy) {
+  const settings = accountEmailSettings();
+  const content = invitationEmailTemplate({
+    displayName: user.displayName,
+    customerName: user.customerName,
+    actionUrl: accountActionUrl(settings.appUrl, "invitation", accountToken.token),
+    expiresAt: accountToken.expiresAt,
+  });
+  const job = store.queueEmail({
+    to: user.email,
+    ...content,
+    category: "account_invitation",
+    createdBy,
+    maxAttempts: 4,
+  });
+  void email.processDue();
+  return job;
+}
+
+function queuePasswordResetEmail(user, accountToken) {
+  const settings = accountEmailSettings();
+  const content = passwordResetEmailTemplate({
+    displayName: user.display_name,
+    actionUrl: accountActionUrl(settings.appUrl, "password_reset", accountToken.token),
+    expiresAt: accountToken.expiresAt,
+  });
+  const job = store.queueEmail({
+    to: user.email,
+    ...content,
+    category: "password_reset",
+    createdBy: user.id,
+    maxAttempts: 4,
+  });
+  void email.processDue();
+  return job;
+}
+
+async function waitForUniformResponse(startedAt, minimumMs = 300) {
+  const remaining = minimumMs - (Date.now() - startedAt);
+  if (remaining > 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, remaining));
+}
+
+function maskedEmail(value) {
+  const [local, domain] = String(value || "").split("@");
+  if (!local || !domain) return "";
+  return `${local.slice(0, 1)}${"*".repeat(Math.min(5, Math.max(2, local.length - 1)))}@${domain}`;
+}
+
+function requireSecurityActionRate(request, response, userId) {
+  const limit = securityActionLimiter.consume(`${userId}:${clientIp(request)}`);
+  if (limit.allowed) return true;
+  sendJson(response, 429, { error: "too_many_security_actions" }, { "retry-after": String(limit.retryAfter) });
+  return false;
+}
+
+async function requireCurrentPassword(response, userId, value) {
+  const user = store.getUserForAuth(userId);
+  if (!user || !(await verifyPassword(String(value || ""), user.password_hash))) {
+    sendJson(response, 400, { error: "current_password_invalid" });
+    return null;
+  }
+  return user;
+}
+
 function resourceFor(user, resourceId, permission) {
   if (user.role === "admin") return store.getResource(resourceId);
   return store.authorizeResource(user.customerId, resourceId, permission);
@@ -153,6 +312,50 @@ function isDemo(resource) {
 function requireQemu(resource) {
   if (resource.type !== "qemu") {
     throw Object.assign(new Error("Installation media is available only for QEMU virtual machines"), { status: 400, code: "iso_qemu_only" });
+  }
+}
+
+function snapshotName(value) {
+  const name = String(value || "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(name)) {
+    throw Object.assign(new Error("Use 1-80 letters, numbers, dots, underscores, or hyphens"), { status: 400, code: "invalid_snapshot_name" });
+  }
+  return name;
+}
+
+function canViewSnapshots(resource, user) {
+  return user.role === "admin"
+    || ["snapshot_create", "snapshot_restore", "snapshot_delete"].some((permission) => resource.permissions.includes(permission));
+}
+
+function snapshotPolicy(resource, snapshots) {
+  const limit = Math.max(1, Number(resource.snapshotLimit) || 3);
+  return {
+    limit,
+    count: snapshots.length,
+    remaining: Math.max(0, limit - snapshots.length),
+  };
+}
+
+function demoSnapshotsFor(resource) {
+  if (!demoSnapshots.has(resource.id)) {
+    demoSnapshots.set(resource.id, [{
+      name: "before-upgrade",
+      description: "Known good state",
+      parent: null,
+      createdAt: Date.now() - 86400000 * 4,
+      includesMemory: false,
+    }]);
+  }
+  return demoSnapshots.get(resource.id);
+}
+
+function requireSnapshotMediaClear(resourceId) {
+  if (store.getActiveIsoBootOverrideForResource(resourceId) || store.getActiveIsoMountForResource(resourceId)) {
+    throw Object.assign(new Error("Restore the normal boot order and eject the ISO before changing snapshots"), {
+      status: 409,
+      code: "snapshot_media_conflict",
+    });
   }
 }
 
@@ -218,6 +421,63 @@ async function refreshIsoOperation(row) {
   });
 }
 
+async function restoreIsoBootOverride(resourceId, { finalStatus = "restored" } = {}) {
+  const boot = store.getActiveIsoBootOverrideForResource(resourceId);
+  if (!boot) return null;
+  const resource = store.getResource(resourceId);
+  if (!resource) return null;
+  store.updateIsoBootOverride(boot.id, { status: "restoring", errorCode: null });
+  try {
+    if (!isDemo(resource)) {
+      await clientFor(resource).restoreIsoBootOnce(resource, {
+        originalBoot: boot.original_boot,
+        armedBoot: boot.armed_boot,
+      });
+    }
+    return store.updateIsoBootOverride(boot.id, {
+      status: finalStatus,
+      errorCode: null,
+      restoredAt: Date.now(),
+    });
+  } catch (error) {
+    store.updateIsoBootOverride(boot.id, {
+      status: "error",
+      errorCode: String(error.code || "iso_boot_restore_failed").slice(0, 120),
+    });
+    throw error;
+  }
+}
+
+async function restoreIsoBootAfterPowerTask(task) {
+  if (task.exit_status !== "OK" || !["start", "reboot", "reset"].includes(task.action)) return;
+  const active = store.getActiveIsoBootOverrideForResource(task.resource_id);
+  if (!active) return;
+  if (Number(task.created_at) < Number(active.armed_at || active.created_at)) return;
+  try {
+    const restored = await restoreIsoBootOverride(task.resource_id);
+    if (restored) {
+      store.writeAudit({
+        customerId: task.customer_id,
+        userId: null,
+        actorRole: "system",
+        action: "resource.iso_boot.restored",
+        resourceId: task.resource_id,
+        detail: { bootOverrideId: restored.id, powerTaskId: task.id },
+      });
+    }
+  } catch (error) {
+    store.writeAudit({
+      customerId: task.customer_id,
+      userId: null,
+      actorRole: "system",
+      action: "resource.iso_boot.restore_failed",
+      resourceId: task.resource_id,
+      detail: { bootOverrideId: active.id, powerTaskId: task.id, error: error.code || "iso_boot_restore_failed" },
+    });
+    log("error", "iso_boot_restore_failed", { resourceId: task.resource_id, taskId: task.id, error: error.code || error.message });
+  }
+}
+
 function summarize(resources) {
   const running = resources.filter((resource) => resource.status === "running");
   return {
@@ -257,6 +517,7 @@ function demoInstanceHistory(resource, timeframe = "day") {
 
 async function refreshStoredTask(task) {
   if (task.completed_at || task.status === "stopped") {
+    await restoreIsoBootAfterPowerTask(task);
     return { task, completed: true, transitioned: false };
   }
   const remote = await proxmox.forCluster(task.cluster_id).getTaskStatus(task.node, task.upid);
@@ -270,28 +531,74 @@ async function refreshStoredTask(task) {
     const nextStatus = expectedStatusForAction(updated.action);
     if (nextStatus && store.getResource(updated.resource_id)) store.setResourceStatus(updated.resource_id, nextStatus);
   }
+  if (completed) await restoreIsoBootAfterPowerTask(updated);
   return { task: updated, completed, transitioned: completed && !task.completed_at };
 }
 
-function recordTaskCompletion(task) {
+async function recordTaskCompletion(task) {
+  const snapshotAction = {
+    snapshot_create: task.exit_status === "OK" ? "resource.snapshot.created" : "resource.snapshot.create_failed",
+    snapshot_restore: task.exit_status === "OK" ? "resource.snapshot.restored" : "resource.snapshot.restore_failed",
+    snapshot_delete: task.exit_status === "OK" ? "resource.snapshot.deleted" : "resource.snapshot.delete_failed",
+  }[task.action];
   store.writeAudit({
     customerId: task.customer_id,
     userId: null,
     actorRole: "system",
-    action: `resource.${task.action}.${task.exit_status === "OK" ? "completed" : "failed"}`,
+    action: snapshotAction || `resource.${task.action}.${task.exit_status === "OK" ? "completed" : "failed"}`,
     resourceId: task.resource_id,
     detail: { taskId: task.id },
   });
+  try { await notifications.actionCompleted(task); }
+  catch (error) { log("error", "task_notification_failed", { taskId: task.id, error: error.code || error.message }); }
+}
+
+async function blockingTask(resourceId) {
+  const active = store.getActiveTask(resourceId);
+  if (!active) return null;
+  try {
+    const result = await refreshStoredTask(active);
+    if (result.transitioned) await recordTaskCompletion(result.task);
+    return result.completed ? null : result.task;
+  } catch (error) {
+    log("error", "task_refresh_delayed", { taskId: active.id, resourceId, error: error.code || error.message });
+    return active;
+  }
+}
+
+async function refreshClusterTasks(clusterId) {
+  for (const task of store.listActiveTasksForCluster(clusterId)) {
+    try {
+      const result = await refreshStoredTask(task);
+      if (result.transitioned) await recordTaskCompletion(result.task);
+    } catch (error) {
+      log("error", "background_task_refresh_delayed", {
+        clusterId,
+        taskId: task.id,
+        error: error.code || error.message,
+      });
+    }
+  }
 }
 
 async function syncCluster(clusterId) {
-  if (config.allowDemoData && clusterId === "demo-eu") return store.syncResources(clusterId, demoResources.map((resource) => {
-    const current = store.getResource(`${clusterId}:${resource.type}:${resource.vmid}`);
-    return current ? { ...resource, status: current.status } : resource;
-  }));
+  if (config.allowDemoData && clusterId === "demo-eu") {
+    const synced = store.syncResources(clusterId, demoResources.map((resource) => {
+      const current = store.getResource(`${clusterId}:${resource.type}:${resource.vmid}`);
+      return current ? { ...resource, status: current.status } : resource;
+    }));
+    await refreshClusterTasks(clusterId);
+    try { await notifications.evaluateResourceAlerts({ clusterId }); }
+    catch (error) { log("error", "alert_evaluation_failed", { clusterId, error: error.code || error.message }); }
+    return synced;
+  }
   try {
     const resources = await proxmox.forCluster(clusterId).listVirtualMachines();
-    return store.syncResources(clusterId, resources);
+    const synced = store.syncResources(clusterId, resources);
+    await refreshClusterTasks(clusterId);
+    try { await notifications.evaluateResourceAlerts({ clusterId }); }
+    catch (error) { log("error", "alert_evaluation_failed", { clusterId, error: error.code || error.message }); }
+    return synced;
   } catch (error) {
     store.setClusterSync(clusterId, { error: error.code || "proxmox_sync_failed" });
     throw error;
@@ -317,14 +624,189 @@ async function routeAuth(request, response, pathname) {
     if (!limit.allowed) { sendJson(response, 429, { error: "too_many_attempts" }, { "retry-after": String(limit.retryAfter) }); return true; }
     const { email, password } = await readBody(request);
     const user = store.findUserForLogin(email);
-    if (!user || user.status !== "active" || !(await verifyPassword(String(password || ""), user.password_hash))) {
+    if (!user || user.status !== "active" || !user.password_set
+      || (user.role === "customer" && user.customer_status !== "active")
+      || !(await verifyPassword(String(password || ""), user.password_hash))) {
       sendJson(response, 401, { error: "invalid_credentials" }); return true;
     }
     loginLimiter.clear(ip);
-    const session = store.createSession({ userId: user.id, ttlMs: config.sessionTtlMs });
+    if (user.mfa_enabled) {
+      const challenge = store.createMfaChallenge({ userId: user.id });
+      store.writeAudit({
+        customerId: user.customer_id,
+        userId: user.id,
+        actorRole: user.role,
+        action: "auth.mfa_challenge",
+        ipAddress: ip,
+      });
+      sendJson(response, 202, {
+        mfaRequired: true,
+        challengeToken: challenge.token,
+        expiresAt: challenge.expiresAt,
+      });
+      return true;
+    }
+    const session = createLoginSession(request, user.id);
     store.writeAudit({ customerId: user.customer_id, userId: user.id, actorRole: user.role, action: "auth.login", ipAddress: ip });
-    sendJson(response, 200, { user: store.getSession(session.token).user, csrfToken: session.csrfToken, expiresAt: session.expiresAt }, {
-      "set-cookie": sessionCookie(session.token, { secure: config.secureCookies, maxAge: config.sessionTtlMs, name: cookieName }),
+    sendAuthenticated(response, session);
+    return true;
+  }
+  if (pathname === "/api/auth/mfa" && request.method === "POST") {
+    const ip = clientIp(request);
+    const limit = mfaLimiter.consume(ip);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_mfa_attempts" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const { challengeToken, code } = await readBody(request);
+    const challenge = store.getMfaChallenge(String(challengeToken || ""));
+    const user = challenge ? store.getUserForAuth(challenge.user_id) : null;
+    if (!challenge || !user || user.status !== "active"
+      || (user.role === "customer" && user.customer_status !== "active") || !user.mfa_enabled) {
+      sendJson(response, 401, { error: "invalid_mfa_challenge" });
+      return true;
+    }
+    const verification = verifyMfaCredential(user.id, code);
+    if (!verification.valid) {
+      store.failMfaChallenge(challengeToken);
+      store.writeAudit({
+        customerId: user.customer_id,
+        userId: user.id,
+        actorRole: user.role,
+        action: "auth.mfa_failed",
+        ipAddress: ip,
+      });
+      sendJson(response, 401, { error: "invalid_mfa_code" });
+      return true;
+    }
+    if (!store.consumeMfaChallenge(challengeToken)) {
+      sendJson(response, 401, { error: "invalid_mfa_challenge" });
+      return true;
+    }
+    mfaLimiter.clear(ip);
+    const session = createLoginSession(request, user.id);
+    store.writeAudit({
+      customerId: user.customer_id,
+      userId: user.id,
+      actorRole: user.role,
+      action: "auth.login",
+      detail: { mfa: true, recoveryCode: verification.recoveryCode },
+      ipAddress: ip,
+    });
+    if (verification.recoveryCode) {
+      queueSecurityNotice(user, {
+        title: "A recovery code was used",
+        message: "A one-time recovery code was used to sign in. Review your active sessions and regenerate codes if this was unexpected.",
+        ipAddress: ip,
+      });
+    }
+    sendAuthenticated(response, session);
+    return true;
+  }
+  if (pathname === "/api/auth/password/forgot" && request.method === "POST") {
+    const startedAt = Date.now();
+    const ip = clientIp(request);
+    const ipLimit = forgotPasswordLimiter.consume(ip);
+    const { email: requestedEmail } = await readBody(request);
+    const normalizedEmail = String(requestedEmail || "").trim().toLowerCase();
+    const accountKey = createHash("sha256").update(normalizedEmail).digest("base64url");
+    const accountLimit = forgotAccountLimiter.consume(accountKey);
+    if (ipLimit.allowed && accountLimit.allowed) {
+      const user = store.findUserForLogin(normalizedEmail);
+      const eligible = user
+        && user.status === "active"
+        && user.password_set
+        && (user.role !== "customer" || user.customer_status === "active");
+      if (eligible) {
+        try {
+          accountEmailSettings();
+          const accountToken = store.createAccountToken({
+            userId: user.id,
+            purpose: "password_reset",
+            requestedIp: ip,
+          });
+          const job = queuePasswordResetEmail(user, accountToken);
+          store.writeAudit({
+            customerId: user.customer_id,
+            userId: user.id,
+            actorRole: "system",
+            action: "auth.password_reset_requested",
+            detail: { emailJobId: job.id },
+            ipAddress: ip,
+          });
+        } catch (error) {
+          log("error", "password_reset_request_suppressed", {
+            userId: user.id,
+            error: error.code || error.message,
+          });
+        }
+      }
+    }
+    await waitForUniformResponse(startedAt);
+    sendJson(response, 202, {
+      accepted: true,
+      message: "If the account exists, a password reset link will be sent.",
+    });
+    return true;
+  }
+  if (pathname === "/api/auth/account-token" && request.method === "POST") {
+    const ip = clientIp(request);
+    const limit = accountTokenLimiter.consume(ip);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_account_token_attempts" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const { purpose, token } = await readBody(request);
+    const row = store.getAccountToken(token, purpose);
+    if (!row) { sendJson(response, 400, { error: "account_token_invalid" }); return true; }
+    sendJson(response, 200, {
+      valid: true,
+      purpose,
+      emailHint: maskedEmail(row.email),
+      expiresAt: row.expires_at,
+    });
+    return true;
+  }
+  if (pathname === "/api/auth/account/complete" && request.method === "POST") {
+    const ip = clientIp(request);
+    const limit = accountTokenLimiter.consume(ip);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_account_token_attempts" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const { token, purpose, password, confirmPassword } = await readBody(request);
+    if (!["invitation", "password_reset"].includes(purpose)) {
+      sendJson(response, 400, { error: "account_token_invalid" });
+      return true;
+    }
+    if (password !== confirmPassword) {
+      sendJson(response, 400, { error: "password_confirmation_mismatch" });
+      return true;
+    }
+    const tokenRow = store.getAccountToken(token, purpose);
+    if (!tokenRow) { sendJson(response, 400, { error: "account_token_invalid" }); return true; }
+    const completedUser = await store.consumeAccountToken(token, purpose, String(password || ""));
+    if (!completedUser) { sendJson(response, 400, { error: "account_token_invalid" }); return true; }
+    accountTokenLimiter.clear(ip);
+    const authUser = store.getUserForAuth(completedUser.id);
+    store.writeAudit({
+      customerId: completedUser.customerId,
+      userId: completedUser.id,
+      actorRole: "system",
+      action: purpose === "invitation" ? "auth.invitation_accepted" : "auth.password_reset_completed",
+      ipAddress: ip,
+    });
+    queueSecurityNotice(authUser, {
+      title: purpose === "invitation" ? "Your Nimbus Direct account is active" : "Your password was reset",
+      message: purpose === "invitation"
+        ? "Your invitation was accepted and your private password was created."
+        : "Your Nimbus Direct password was changed and every active session was signed out. Two-factor authentication remains enabled.",
+      ipAddress: ip,
+    });
+    sendJson(response, 200, {
+      completed: true,
+      purpose,
+      message: purpose === "invitation" ? "Your account is ready. Sign in to continue." : "Your password was reset. Sign in again.",
     });
     return true;
   }
@@ -348,8 +830,59 @@ async function routeAdmin(request, response, pathname) {
     sendJson(response, 200, {
       clusters: store.listClusters(), customers: store.listCustomers(), users: store.listUsers(),
       resources: store.listResources(), isoPolicies: store.listIsoPolicies(),
+      emailSettings: store.getEmailSettings(), emailJobs: store.listEmailJobs({ limit: 30 }),
+      notificationEvents: store.listNotificationEvents({ limit: 50 }),
       audit: store.listAudit(null, { all: true, limit: 50 }),
     });
+    return true;
+  }
+  if (pathname === "/api/admin/email/settings" && request.method === "PUT") {
+    const settings = store.saveEmailSettings(await readBody(request), { userId: session.user.id });
+    emailConnectionTestLimiter.clear(`${session.user.id}:${clientIp(request)}`);
+    audit(request, session, "admin.email.settings_updated", {
+      detail: {
+        enabled: settings.enabled,
+        host: settings.host,
+        port: settings.port,
+        security: settings.security,
+        authenticated: Boolean(settings.username),
+      },
+    });
+    sendJson(response, 200, { settings }); return true;
+  }
+  if (pathname === "/api/admin/email/test-connection" && request.method === "POST") {
+    const limit = emailConnectionTestLimiter.consume(`${session.user.id}:${clientIp(request)}`);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_email_connection_tests" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    try {
+      const result = await email.testConnection();
+      audit(request, session, "admin.email.connection_tested", { detail: { success: true } });
+      sendJson(response, 200, { result, settings: store.getEmailSettings() });
+    } catch (error) {
+      audit(request, session, "admin.email.connection_tested", { detail: { success: false, error: error.code || "smtp_connection_failed" } });
+      throw error;
+    }
+    return true;
+  }
+  if (pathname === "/api/admin/email/test-message" && request.method === "POST") {
+    const limit = emailMessageTestLimiter.consume(`${session.user.id}:${clientIp(request)}`);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_test_emails" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const input = await readBody(request);
+    try {
+      const job = await email.sendTest(input.recipient, session.user.id);
+      audit(request, session, "admin.email.test_delivered", { detail: { jobId: job.id, recipient: job.to } });
+      sendJson(response, 200, { job });
+    } catch (error) {
+      audit(request, session, "admin.email.test_failed", {
+        detail: { jobId: error.job?.id || null, error: error.code || "email_delivery_failed" },
+      });
+      throw error;
+    }
     return true;
   }
   if (pathname === "/api/admin/customers" && request.method === "POST") {
@@ -361,6 +894,36 @@ async function routeAdmin(request, response, pathname) {
     const user = await store.createUser(await readBody(request));
     audit(request, session, "admin.user.created", { customerId: user.customerId, detail: { email: user.email, role: user.role } });
     sendJson(response, 201, { user }); return true;
+  }
+  if (pathname === "/api/admin/invitations" && request.method === "POST") {
+    const limit = invitationLimiter.consume(`${session.user.id}:${clientIp(request)}`);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_invitations" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    accountEmailSettings();
+    const input = await readBody(request);
+    if ((input.role || "customer") === "customer" && store.getCustomer(input.customerId)?.status !== "active") {
+      sendJson(response, 409, { error: "customer_disabled" });
+      return true;
+    }
+    const user = await store.createInvitedUser(input);
+    const accountToken = store.createAccountToken({
+      userId: user.id,
+      purpose: "invitation",
+      createdBy: session.user.id,
+      requestedIp: clientIp(request),
+    });
+    const job = queueInvitationEmail(user, accountToken, session.user.id);
+    audit(request, session, "admin.user.invited", {
+      customerId: user.customerId,
+      detail: { targetUserId: user.id, email: user.email, role: user.role, emailJobId: job.id },
+    });
+    sendJson(response, 201, {
+      user: store.listUsers().find((entry) => entry.id === user.id),
+      invitation: { expiresAt: accountToken.expiresAt, emailJobId: job.id },
+    });
+    return true;
   }
   if (pathname === "/api/admin/clusters" && request.method === "POST") {
     const cluster = store.createCluster(await readBody(request));
@@ -382,7 +945,11 @@ async function routeAdmin(request, response, pathname) {
   if (pathname === "/api/admin/assignments" && request.method === "POST") {
     const input = await readBody(request);
     const resource = store.assignResource(input);
-    audit(request, session, "admin.resource.assigned", { customerId: input.customerId, resourceId: input.resourceId, detail: { permissions: resource.permissions } });
+    audit(request, session, "admin.resource.assigned", {
+      customerId: input.customerId,
+      resourceId: input.resourceId,
+      detail: { permissions: resource.permissions, snapshotLimit: resource.snapshotLimit, alertPolicy: resource.alertPolicy },
+    });
     sendJson(response, 201, { resource }); return true;
   }
 
@@ -415,6 +982,73 @@ async function routeAdmin(request, response, pathname) {
     await store.updatePassword(decodeURIComponent(match[1]), (await readBody(request)).password);
     audit(request, session, "admin.user.password_reset", { detail: { targetUserId: decodeURIComponent(match[1]) } });
     sendJson(response, 204, null); return true;
+  }
+  match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/mfa\/reset$/);
+  if (match && request.method === "POST") {
+    if (!requireSecurityActionRate(request, response, session.user.id)) return true;
+    const targetUserId = decodeURIComponent(match[1]);
+    if (targetUserId === session.user.id) {
+      sendJson(response, 409, { error: "mfa_self_reset_forbidden" });
+      return true;
+    }
+    const { currentPassword } = await readBody(request);
+    if (!(await requireCurrentPassword(response, session.user.id, currentPassword))) return true;
+    const target = store.getUserForAuth(targetUserId);
+    if (!target) { sendJson(response, 404, { error: "user_not_found" }); return true; }
+    if (!target.mfa_enabled) { sendJson(response, 409, { error: "mfa_not_enabled" }); return true; }
+    store.disableMfa(targetUserId);
+    const revokedSessions = store.revokeUserSessions(targetUserId);
+    audit(request, session, "admin.user.mfa_reset", {
+      customerId: target.customer_id,
+      detail: { targetUserId, revokedSessions },
+    });
+    queueSecurityNotice(target, {
+      title: "Two-factor authentication reset",
+      message: "An administrator reset two-factor authentication for your account. Your active sessions were signed out.",
+      ipAddress: clientIp(request),
+    });
+    sendJson(response, 200, { reset: true });
+    return true;
+  }
+  match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/invitation\/(resend|revoke)$/);
+  if (match && request.method === "POST") {
+    const targetUserId = decodeURIComponent(match[1]);
+    const operation = match[2];
+    const target = store.getUserForAuth(targetUserId);
+    if (!target) { sendJson(response, 404, { error: "user_not_found" }); return true; }
+    if (target.password_set) { sendJson(response, 409, { error: "invitation_not_pending" }); return true; }
+    if (operation === "revoke") {
+      const revoked = store.revokeAccountTokens(targetUserId, "invitation");
+      audit(request, session, "admin.user.invitation_revoked", {
+        customerId: target.customer_id,
+        detail: { targetUserId, revoked },
+      });
+      sendJson(response, 200, { revoked });
+      return true;
+    }
+    const limit = invitationLimiter.consume(`${session.user.id}:${clientIp(request)}`);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_invitations" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    accountEmailSettings();
+    const accountToken = store.createAccountToken({
+      userId: targetUserId,
+      purpose: "invitation",
+      createdBy: session.user.id,
+      requestedIp: clientIp(request),
+    });
+    const publicTarget = store.listUsers().find((entry) => entry.id === targetUserId);
+    const job = queueInvitationEmail(publicTarget, accountToken, session.user.id);
+    audit(request, session, "admin.user.invitation_resent", {
+      customerId: target.customer_id,
+      detail: { targetUserId, emailJobId: job.id },
+    });
+    sendJson(response, 200, {
+      user: store.listUsers().find((entry) => entry.id === targetUserId),
+      invitation: { expiresAt: accountToken.expiresAt, emailJobId: job.id },
+    });
+    return true;
   }
   match = pathname.match(/^\/api\/admin\/clusters\/([^/]+)\/iso-storage-candidates$/);
   if (match && request.method === "GET") {
@@ -456,7 +1090,11 @@ async function routeAdmin(request, response, pathname) {
   if (match && request.method === "PATCH") {
     const resourceId = decodeURIComponent(match[1]);
     const resource = store.updateAssignment(resourceId, await readBody(request));
-    audit(request, session, "admin.assignment.updated", { customerId: resource.customerId, resourceId });
+    audit(request, session, "admin.assignment.updated", {
+      customerId: resource.customerId,
+      resourceId,
+      detail: { permissions: resource.permissions, snapshotLimit: resource.snapshotLimit, alertPolicy: resource.alertPolicy },
+    });
     sendJson(response, 200, { resource }); return true;
   }
   if (match && request.method === "DELETE") {
@@ -465,6 +1103,13 @@ async function routeAdmin(request, response, pathname) {
     store.unassignResource(resourceId);
     audit(request, session, "admin.resource.unassigned", { customerId: existing?.customerId, resourceId });
     sendJson(response, 204, null); return true;
+  }
+  match = pathname.match(/^\/api\/admin\/email\/jobs\/([^/]+)\/retry$/);
+  if (match && request.method === "POST") {
+    const job = store.retryEmailJob(decodeURIComponent(match[1]));
+    audit(request, session, "admin.email.delivery_retried", { detail: { jobId: job.id } });
+    void email.processDue();
+    sendJson(response, 202, { job }); return true;
   }
 
   sendJson(response, 404, { error: "not_found" });
@@ -484,9 +1129,60 @@ async function routeCustomer(request, response, pathname) {
       mode: config.allowDemoData ? "demo" : "live", user, summary: summarize(resources), resources,
       activity: store.listAudit(user.customerId, { limit: 10 }),
       tasks: store.listTasks(user, { limit: 12 }),
-      capabilities: { directAssignments: true, proxmoxPools: false, consoleTickets: true, customerIsoMedia: true },
+      notifications: store.listNotifications(user.id, { limit: 8 }),
+      notificationPreferences: store.getNotificationPreferences(user.id),
+      emailDeliveryAvailable: store.getEmailSettings().enabled,
+      security: {
+        mfa: store.getMfaStatus(user.id),
+        sessions: store.listSessions(user.id, { currentIdHash: session.idHash }),
+      },
+      capabilities: {
+        directAssignments: true,
+        proxmoxPools: false,
+        consoleTickets: true,
+        customerIsoMedia: true,
+        notificationCenter: true,
+        twoFactorAuthentication: true,
+        customerInvitations: true,
+        passwordRecovery: true,
+      },
     });
     return true;
+  }
+
+  if (pathname === "/api/v1/notifications" && request.method === "GET") {
+    const search = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams;
+    sendJson(response, 200, {
+      notifications: store.listNotifications(user.id, {
+        limit: search.get("limit") || 50,
+        offset: search.get("offset") || 0,
+      }),
+      preferences: store.getNotificationPreferences(user.id),
+      emailDeliveryAvailable: store.getEmailSettings().enabled,
+    });
+    return true;
+  }
+  if (pathname === "/api/v1/notifications/preferences" && request.method === "PATCH") {
+    if (!requireCsrf(request, response, session)) return true;
+    const preferences = store.updateNotificationPreferences(user.id, await readBody(request));
+    audit(request, session, "notifications.preferences_updated", {
+      detail: {
+        inAppEnabled: preferences.inAppEnabled,
+        emailEnabled: preferences.emailEnabled,
+      },
+    });
+    sendJson(response, 200, { preferences }); return true;
+  }
+  if (pathname === "/api/v1/notifications/read-all" && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    const changed = store.markAllNotificationsRead(user.id);
+    sendJson(response, 200, { changed }); return true;
+  }
+  let notificationMatch = pathname.match(/^\/api\/v1\/notifications\/([^/]+)\/read$/);
+  if (notificationMatch && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    store.markNotificationRead(decodeURIComponent(notificationMatch[1]), user.id);
+    sendJson(response, 204, null); return true;
   }
 
   let match = pathname.match(/^\/api\/v1\/console\/session\/([^/]+)$/);
@@ -527,13 +1223,30 @@ async function routeCustomer(request, response, pathname) {
       return { ...policy, usedBytes, remainingBytes: Math.max(0, policy.customerQuotaBytes - usedBytes) };
     });
     let mountedRow = store.getActiveIsoMountForResource(resourceId);
+    let bootRow = store.getActiveIsoBootOverrideForResource(resourceId);
     if (mountedRow && mountedRow.customer_id !== owner.id) mountedRow = null;
     if (mountedRow && !isDemo(resource)) {
       try {
         const cdroms = await clientFor(resource).getQemuCdroms(resource);
         if (!cdroms.some((drive) => drive.slot === mountedRow.drive_slot && drive.volumeId === mountedRow.volume_id)) {
+          if (bootRow) {
+            try {
+              await restoreIsoBootOverride(resourceId, { finalStatus: "cancelled" });
+              store.writeAudit({
+                customerId: owner.id,
+                userId: null,
+                actorRole: "system",
+                action: "resource.iso_boot.cancelled",
+                resourceId,
+                detail: { bootOverrideId: bootRow.id, reason: "cdrom_changed_outside_nimbus" },
+              });
+            } catch (error) {
+              log("error", "iso_boot_restore_delayed", { resourceId, error: error.code || error.message });
+            }
+          }
           store.ejectIsoMount(mountedRow.id);
           mountedRow = null;
+          bootRow = store.getActiveIsoBootOverrideForResource(resourceId);
         }
       } catch (error) {
         log("error", "iso_mount_state_refresh_delayed", { resourceId, error: error.code || error.message });
@@ -553,6 +1266,7 @@ async function routeCustomer(request, response, pathname) {
       policies,
       images: store.listIsoImages(owner.scope, { clusterId: resource.clusterId }),
       mounted,
+      boot: store.publicIsoBootOverride(bootRow) || null,
     });
     return true;
   }
@@ -684,6 +1398,15 @@ async function routeCustomer(request, response, pathname) {
     const owner = isoCustomer(resource, user);
     const mounted = store.getActiveIsoMountForResource(resourceId);
     if (!mounted || mounted.customer_id !== owner.id) { sendJson(response, 404, { error: "iso_mount_not_found" }); return true; }
+    const activeBoot = store.getActiveIsoBootOverrideForResource(resourceId);
+    if (activeBoot) {
+      const restored = await restoreIsoBootOverride(resourceId, { finalStatus: "cancelled" });
+      audit(request, session, "resource.iso_boot.cancelled", {
+        customerId: owner.id,
+        resourceId,
+        detail: { bootOverrideId: restored.id, reason: "iso_ejected" },
+      });
+    }
     if (!isDemo(resource)) {
       await clientFor(resource).ejectIso(resource, { slot: mounted.drive_slot, volumeId: mounted.volume_id });
     }
@@ -694,6 +1417,71 @@ async function routeCustomer(request, response, pathname) {
       detail: { imageId: mounted.iso_image_id, driveSlot: mounted.drive_slot },
     });
     sendJson(response, 200, { mount }); return true;
+  }
+
+  match = pathname.match(/^\/api\/v1\/resources\/(.+)\/media\/boot-once$/);
+  if (match && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    const resourceId = decodeURIComponent(match[1]);
+    const resource = requireResource(response, user, resourceId, "iso_boot");
+    if (!resource) return true;
+    requireQemu(resource);
+    const owner = isoCustomer(resource, user);
+    const mounted = store.getActiveIsoMountForResource(resourceId);
+    if (!mounted || mounted.customer_id !== owner.id) {
+      sendJson(response, 409, { error: "iso_mount_not_found", message: "Mount a customer-owned ISO before scheduling an ISO boot." }); return true;
+    }
+    if (store.getActiveIsoBootOverrideForResource(resourceId)) {
+      sendJson(response, 409, { error: "iso_boot_already_armed" }); return true;
+    }
+    const prepared = isDemo(resource)
+      ? { slot: mounted.drive_slot, originalBoot: "order=scsi0", armedBoot: `order=${mounted.drive_slot};scsi0` }
+      : await clientFor(resource).prepareIsoBootOnce(resource, { slot: mounted.drive_slot, volumeId: mounted.volume_id });
+    const pending = store.createIsoBootOverride({
+      resourceId,
+      isoMountId: mounted.id,
+      driveSlot: prepared.slot,
+      originalBoot: prepared.originalBoot,
+      armedBoot: prepared.armedBoot,
+      createdBy: user.id,
+    });
+    try {
+      if (!isDemo(resource)) await clientFor(resource).applyIsoBootOnce(resource, prepared.armedBoot);
+      const armed = store.updateIsoBootOverride(pending.id, { status: "armed", errorCode: null, armedAt: Date.now() });
+      audit(request, session, "resource.iso_boot.armed", {
+        customerId: owner.id,
+        resourceId,
+        detail: { bootOverrideId: armed.id, isoMountId: mounted.id, driveSlot: mounted.drive_slot },
+      });
+      sendJson(response, 201, { boot: store.publicIsoBootOverride(armed) }); return true;
+    } catch (error) {
+      store.updateIsoBootOverride(pending.id, { status: "error", errorCode: error.code || "iso_boot_arm_failed" });
+      audit(request, session, "resource.iso_boot.arm_failed", {
+        customerId: owner.id,
+        resourceId,
+        detail: { bootOverrideId: pending.id, error: error.code || "iso_boot_arm_failed" },
+      });
+      throw error;
+    }
+  }
+
+  match = pathname.match(/^\/api\/v1\/resources\/(.+)\/media\/boot-once\/cancel$/);
+  if (match && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    const resourceId = decodeURIComponent(match[1]);
+    const resource = requireResource(response, user, resourceId, "iso_boot");
+    if (!resource) return true;
+    requireQemu(resource);
+    const owner = isoCustomer(resource, user);
+    const active = store.getActiveIsoBootOverrideForResource(resourceId);
+    if (!active) { sendJson(response, 404, { error: "iso_boot_not_found" }); return true; }
+    const restored = await restoreIsoBootOverride(resourceId, { finalStatus: "cancelled" });
+    audit(request, session, "resource.iso_boot.cancelled", {
+      customerId: owner.id,
+      resourceId,
+      detail: { bootOverrideId: restored.id, reason: "user_cancelled" },
+    });
+    sendJson(response, 200, { boot: store.publicIsoBootOverride(restored) }); return true;
   }
 
   match = pathname.match(/^\/api\/v1\/resources\/(.+)\/media\/([^/]+)$/);
@@ -753,24 +1541,37 @@ async function routeCustomer(request, response, pathname) {
     const idempotencyKey = String(request.headers["idempotency-key"] || "").slice(0, 120) || null;
     const existing = store.getTaskByIdempotency(user.id, idempotencyKey);
     if (existing) { sendJson(response, 202, { task: store.publicTask(existing), duplicate: true }); return true; }
-    const active = store.getActiveTask(resourceId);
+    const active = await blockingTask(resourceId);
     if (active) {
-      let activeResult = { task: active, completed: false };
-      try {
-        activeResult = await refreshStoredTask(active);
-        if (activeResult.transitioned) recordTaskCompletion(activeResult.task);
-      } catch (error) {
-        log("error", "task_refresh_delayed", { taskId: active.id, resourceId, error: error.code || error.message });
-      }
-      if (!activeResult.completed) {
-        sendJson(response, 409, { error: "resource_task_in_progress", task: store.publicTask(activeResult.task) });
-        return true;
-      }
+      sendJson(response, 409, { error: "resource_task_in_progress", task: store.publicTask(active) });
+      return true;
     }
     audit(request, session, `resource.${permission}.requested`, { customerId: resource.customerId || user.customerId, resourceId, detail: { clusterId: resource.clusterId, node: resource.node, vmid: resource.vmid } });
     if (isDemo(resource)) {
       const nextStatus = ["stop", "shutdown"].includes(permission) ? "stopped" : permission === "suspend" ? "suspended" : "running";
-      sendJson(response, 200, { completed: true, resource: store.setResourceStatus(resourceId, nextStatus) }); return true;
+      const updatedResource = store.setResourceStatus(resourceId, nextStatus);
+      if (["start", "reboot", "reset"].includes(permission)) {
+        const activeBoot = store.getActiveIsoBootOverrideForResource(resourceId);
+        if (activeBoot) {
+          const restored = await restoreIsoBootOverride(resourceId);
+          store.writeAudit({
+            customerId: resource.customerId || user.customerId,
+            userId: null,
+            actorRole: "system",
+            action: "resource.iso_boot.restored",
+            resourceId,
+            detail: { bootOverrideId: restored.id, reason: `demo_${permission}` },
+          });
+        }
+      }
+      await notifications.actionCompleted({
+        id: `demo-${randomUUID()}`,
+        customerId: resource.customerId || user.customerId,
+        resourceId,
+        action: permission,
+        exitStatus: "OK",
+      });
+      sendJson(response, 200, { completed: true, resource: updatedResource }); return true;
     }
     const upid = await clientFor(resource).performAction(resource, permission);
     const task = store.createTask({ customerId: resource.customerId || user.customerId, userId: user.id, clusterId: resource.clusterId, node: resource.node, upid, resourceId, action: permission, idempotencyKey });
@@ -797,28 +1598,130 @@ async function routeCustomer(request, response, pathname) {
   match = pathname.match(/^\/api\/v1\/resources\/(.+)\/snapshots$/);
   if (match && request.method === "POST") {
     if (!requireCsrf(request, response, session)) return true;
+    const rate = actionLimiter.consume(user.id);
+    if (!rate.allowed) { sendJson(response, 429, { error: "too_many_actions" }, { "retry-after": String(rate.retryAfter) }); return true; }
     const resourceId = decodeURIComponent(match[1]);
     const resource = requireResource(response, user, resourceId, "snapshot_create");
     if (!resource) return true;
     const input = await readBody(request);
-    if (!isDemo(resource)) await clientFor(resource).createSnapshot(resource, input);
-    audit(request, session, "resource.snapshot.created", { customerId: resource.customerId || user.customerId, resourceId, detail: { name: input.name } });
-    sendJson(response, 202, { accepted: true }); return true;
+    const name = snapshotName(input.name);
+    const description = String(input.description || "").trim().slice(0, 500);
+    const includeMemory = input.includeMemory === true;
+    if (includeMemory && resource.type !== "qemu") {
+      sendJson(response, 400, { error: "snapshot_memory_qemu_only" }); return true;
+    }
+    if (includeMemory && resource.status !== "running") {
+      sendJson(response, 409, { error: "snapshot_memory_requires_running" }); return true;
+    }
+    requireSnapshotMediaClear(resourceId);
+    const idempotencyKey = String(request.headers["idempotency-key"] || "").slice(0, 120) || null;
+    const existing = store.getTaskByIdempotency(user.id, idempotencyKey);
+    if (existing) { sendJson(response, 202, { completed: false, task: store.publicTask(existing), duplicate: true }); return true; }
+    const active = await blockingTask(resourceId);
+    if (active) {
+      sendJson(response, 409, { error: "resource_task_in_progress", task: store.publicTask(active) });
+      return true;
+    }
+    const snapshots = isDemo(resource) ? demoSnapshotsFor(resource) : await clientFor(resource).listSnapshots(resource);
+    if (snapshots.some((snapshot) => snapshot.name === name)) {
+      sendJson(response, 409, { error: "snapshot_exists" }); return true;
+    }
+    if (snapshots.length >= resource.snapshotLimit) {
+      sendJson(response, 409, { error: "snapshot_limit_reached", limit: resource.snapshotLimit }); return true;
+    }
+    audit(request, session, "resource.snapshot.create_requested", {
+      customerId: resource.customerId || user.customerId,
+      resourceId,
+      detail: { name, includeMemory },
+    });
+    if (isDemo(resource)) {
+      snapshots.unshift({ name, description, parent: snapshots[0]?.name || null, createdAt: Date.now(), includesMemory: includeMemory });
+      audit(request, session, "resource.snapshot.created", { customerId: resource.customerId || user.customerId, resourceId, detail: { name, demo: true } });
+      await notifications.actionCompleted({
+        id: `demo-${randomUUID()}`,
+        customerId: resource.customerId || user.customerId,
+        resourceId,
+        action: "snapshot_create",
+        exitStatus: "OK",
+      });
+      sendJson(response, 200, { completed: true }); return true;
+    }
+    const upid = await clientFor(resource).createSnapshot(resource, { name, description, includeMemory });
+    const task = store.createTask({
+      customerId: resource.customerId || user.customerId,
+      userId: user.id,
+      clusterId: resource.clusterId,
+      node: resource.node,
+      upid,
+      resourceId,
+      action: "snapshot_create",
+      idempotencyKey,
+    });
+    sendJson(response, 202, { completed: false, task }); return true;
   }
   match = pathname.match(/^\/api\/v1\/resources\/(.+)\/snapshots\/([^/]+)\/(restore|delete)$/);
   if (match && request.method === "POST") {
     if (!requireCsrf(request, response, session)) return true;
+    const rate = actionLimiter.consume(user.id);
+    if (!rate.allowed) { sendJson(response, 429, { error: "too_many_actions" }, { "retry-after": String(rate.retryAfter) }); return true; }
     const resourceId = decodeURIComponent(match[1]);
-    const snapshotName = decodeURIComponent(match[2]);
+    const selectedSnapshot = snapshotName(decodeURIComponent(match[2]));
     const operation = match[3];
     const resource = requireResource(response, user, resourceId, operation === "restore" ? "snapshot_restore" : "snapshot_delete");
     if (!resource) return true;
-    if (!isDemo(resource)) {
-      if (operation === "restore") await clientFor(resource).restoreSnapshot(resource, snapshotName);
-      else await clientFor(resource).deleteSnapshot(resource, snapshotName);
+    const input = await readBody(request);
+    if (String(input.confirmName || "") !== selectedSnapshot) {
+      sendJson(response, 400, { error: "snapshot_confirmation_mismatch" }); return true;
     }
-    audit(request, session, `resource.snapshot.${operation}d`, { customerId: resource.customerId || user.customerId, resourceId, detail: { name: snapshotName } });
-    sendJson(response, 202, { accepted: true }); return true;
+    if (operation === "restore") requireSnapshotMediaClear(resourceId);
+    const idempotencyKey = String(request.headers["idempotency-key"] || "").slice(0, 120) || null;
+    const existing = store.getTaskByIdempotency(user.id, idempotencyKey);
+    if (existing) { sendJson(response, 202, { completed: false, task: store.publicTask(existing), duplicate: true }); return true; }
+    const active = await blockingTask(resourceId);
+    if (active) {
+      sendJson(response, 409, { error: "resource_task_in_progress", task: store.publicTask(active) });
+      return true;
+    }
+    const snapshots = isDemo(resource) ? demoSnapshotsFor(resource) : await clientFor(resource).listSnapshots(resource);
+    const snapshotIndex = snapshots.findIndex((snapshot) => snapshot.name === selectedSnapshot);
+    if (snapshotIndex < 0) {
+      sendJson(response, 404, { error: "snapshot_not_found" }); return true;
+    }
+    audit(request, session, `resource.snapshot.${operation}_requested`, {
+      customerId: resource.customerId || user.customerId,
+      resourceId,
+      detail: { name: selectedSnapshot },
+    });
+    if (isDemo(resource)) {
+      if (operation === "delete") snapshots.splice(snapshotIndex, 1);
+      audit(request, session, `resource.snapshot.${operation === "restore" ? "restored" : "deleted"}`, {
+        customerId: resource.customerId || user.customerId,
+        resourceId,
+        detail: { name: selectedSnapshot, demo: true },
+      });
+      await notifications.actionCompleted({
+        id: `demo-${randomUUID()}`,
+        customerId: resource.customerId || user.customerId,
+        resourceId,
+        action: `snapshot_${operation}`,
+        exitStatus: "OK",
+      });
+      sendJson(response, 200, { completed: true }); return true;
+    }
+    const upid = operation === "restore"
+      ? await clientFor(resource).restoreSnapshot(resource, selectedSnapshot)
+      : await clientFor(resource).deleteSnapshot(resource, selectedSnapshot);
+    const task = store.createTask({
+      customerId: resource.customerId || user.customerId,
+      userId: user.id,
+      clusterId: resource.clusterId,
+      node: resource.node,
+      upid,
+      resourceId,
+      action: `snapshot_${operation}`,
+      idempotencyKey,
+    });
+    sendJson(response, 202, { completed: false, task }); return true;
   }
 
   match = pathname.match(/^\/api\/v1\/resources\/(.+)\/config$/);
@@ -851,17 +1754,21 @@ async function routeCustomer(request, response, pathname) {
     const resource = requireResource(response, user, resourceId, "view_status");
     if (!resource) return true;
     if (isDemo(resource)) {
+      const snapshots = canViewSnapshots(resource, user) ? demoSnapshotsFor(resource) : [];
       sendJson(response, 200, {
         instance: resource,
         config: { cores: resource.vcpu, memory: resource.memory * 1024, onboot: 1 },
         network: { status: "available", primaryIp: resource.ip, addresses: resource.ip ? [{ address: resource.ip, family: "ipv4", interface: "eth0" }] : [] },
-        snapshots: [{ name: "before-upgrade", description: "Known good state", createdAt: Date.now() - 86400000 * 4 }],
+        snapshots,
+        snapshotPolicy: snapshotPolicy(resource, snapshots),
         tasks: store.listTasks(user, { resourceId, limit: 12 }),
       });
       return true;
     }
     const details = await clientFor(resource).getInstanceDetails(resource);
     if (!resource.permissions.includes("view_config") && user.role !== "admin") details.config = {};
+    if (!canViewSnapshots(resource, user)) details.snapshots = [];
+    details.snapshotPolicy = snapshotPolicy(resource, details.snapshots);
     details.tasks = store.listTasks(user, { resourceId, limit: 12 });
     sendJson(response, 200, details); return true;
   }
@@ -882,12 +1789,120 @@ async function routeCustomer(request, response, pathname) {
     if (!task) { sendJson(response, 404, { error: "task_not_found" }); return true; }
     try {
       const result = await refreshStoredTask(task);
-      if (result.transitioned) recordTaskCompletion(result.task);
+      if (result.transitioned) await recordTaskCompletion(result.task);
       sendJson(response, 200, { task: store.publicTask(result.task), completed: result.completed });
     } catch (error) {
       log("error", "task_poll_failed", { taskId: task.id, error: error.code || error.message });
       sendJson(response, 200, { task: store.publicTask(task), completed: false, pollingDelayed: true });
     }
+    return true;
+  }
+
+  if (pathname === "/api/v1/security/mfa/setup" && request.method === "POST") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const { currentPassword } = await readBody(request);
+    const authUser = await requireCurrentPassword(response, user.id, currentPassword);
+    if (!authUser) return true;
+    const enrollment = createTotpEnrollment(authUser.email);
+    const setup = store.saveMfaSetup(user.id, enrollment.secret);
+    const qrCode = await QRCode.toDataURL(enrollment.uri, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      width: 240,
+      color: { dark: "#11182aff", light: "#ffffffff" },
+    });
+    audit(request, session, "security.mfa_setup_started");
+    sendJson(response, 200, {
+      enrollment: {
+        secret: enrollment.secret,
+        uri: enrollment.uri,
+        qrCode,
+        expiresAt: setup.expiresAt,
+      },
+    });
+    return true;
+  }
+  if (pathname === "/api/v1/security/mfa/confirm" && request.method === "POST") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const { code } = await readBody(request);
+    const secret = store.getMfaSecret(user.id, { pending: true });
+    if (!secret) { sendJson(response, 409, { error: "mfa_setup_expired" }); return true; }
+    if (!verifyTotp(secret, code)) { sendJson(response, 400, { error: "invalid_mfa_code" }); return true; }
+    const recoveryCodes = generateRecoveryCodes();
+    const mfa = store.enableMfa(user.id, recoveryCodes);
+    const revokedSessions = store.deleteOtherSessions(user.id, session.idHash);
+    const authUser = store.getUserForAuth(user.id);
+    audit(request, session, "security.mfa_enabled", { detail: { revokedSessions } });
+    queueSecurityNotice(authUser, {
+      title: "Two-factor authentication enabled",
+      message: "Authenticator-based two-factor authentication is now protecting your Nimbus Direct account.",
+      ipAddress: clientIp(request),
+    });
+    sendJson(response, 200, { mfa, recoveryCodes });
+    return true;
+  }
+  if (pathname === "/api/v1/security/mfa/disable" && request.method === "POST") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const { currentPassword, code } = await readBody(request);
+    const authUser = await requireCurrentPassword(response, user.id, currentPassword);
+    if (!authUser) return true;
+    const verification = verifyMfaCredential(user.id, code);
+    if (!verification.valid) { sendJson(response, 400, { error: "invalid_mfa_code" }); return true; }
+    const mfa = store.disableMfa(user.id);
+    const revokedSessions = store.deleteOtherSessions(user.id, session.idHash);
+    audit(request, session, "security.mfa_disabled", { detail: { revokedSessions, recoveryCode: verification.recoveryCode } });
+    queueSecurityNotice(authUser, {
+      title: "Two-factor authentication disabled",
+      message: "Two-factor authentication was removed from your Nimbus Direct account.",
+      ipAddress: clientIp(request),
+    });
+    sendJson(response, 200, { mfa });
+    return true;
+  }
+  if (pathname === "/api/v1/security/mfa/recovery-codes" && request.method === "POST") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const { currentPassword, code } = await readBody(request);
+    const authUser = await requireCurrentPassword(response, user.id, currentPassword);
+    if (!authUser) return true;
+    const secret = store.getMfaSecret(user.id);
+    if (!secret) { sendJson(response, 409, { error: "mfa_not_enabled" }); return true; }
+    if (!verifyTotp(secret, code)) { sendJson(response, 400, { error: "invalid_mfa_code" }); return true; }
+    const recoveryCodes = generateRecoveryCodes();
+    const mfa = store.replaceRecoveryCodes(user.id, recoveryCodes);
+    audit(request, session, "security.mfa_recovery_codes_regenerated");
+    queueSecurityNotice(authUser, {
+      title: "New recovery codes generated",
+      message: "Your previous recovery codes are no longer valid. Store the new set somewhere safe.",
+      ipAddress: clientIp(request),
+    });
+    sendJson(response, 200, { mfa, recoveryCodes });
+    return true;
+  }
+  if (pathname === "/api/v1/security/sessions/revoke-others" && request.method === "POST") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const { currentPassword } = await readBody(request);
+    if (!(await requireCurrentPassword(response, user.id, currentPassword))) return true;
+    const revoked = store.deleteOtherSessions(user.id, session.idHash);
+    audit(request, session, "security.sessions_revoked", { detail: { revoked } });
+    sendJson(response, 200, {
+      revoked,
+      sessions: store.listSessions(user.id, { currentIdHash: session.idHash }),
+    });
+    return true;
+  }
+  match = pathname.match(/^\/api\/v1\/security\/sessions\/([^/]+)$/);
+  if (match && request.method === "DELETE") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const idHash = decodeURIComponent(match[1]);
+    const current = idHash === session.idHash;
+    if (!store.deleteUserSession(user.id, idHash)) {
+      sendJson(response, 404, { error: "session_not_found" });
+      return true;
+    }
+    audit(request, session, "security.session_revoked", { detail: { current } });
+    sendJson(response, 204, null, current
+      ? { "set-cookie": sessionCookie("", { secure: config.secureCookies, maxAge: 0, name: cookieName }) }
+      : {});
     return true;
   }
 
@@ -954,7 +1969,11 @@ const server = createServer(async (request, response) => {
     if (request.method === "HEAD") response.end(); else response.end(contents);
   } catch (error) {
     const status = error.status || (error.code === "ENOENT" ? 404 : 500);
-    if (status >= 500) log("error", "request_failed", { requestId, method: request.method, path: request.url, error: error.message, code: error.code });
+    if (status >= 500) {
+      let safePath = "unknown";
+      try { safePath = new URL(request.url, `http://${request.headers.host || "localhost"}`).pathname; } catch { /* omit malformed URLs */ }
+      log("error", "request_failed", { requestId, method: request.method, path: safePath, error: error.message, code: error.code });
+    }
     if (!response.headersSent) sendJson(response, status, { error: error.code || (status === 404 ? "not_found" : "request_failed"), message: status < 500 ? error.message : undefined, requestId });
     else response.end();
   }
@@ -1035,9 +2054,10 @@ server.listen(config.port, config.host, () => {
   log("info", "server_started", { host: config.host, port: config.port, production: config.production, bootstrapped, demo: config.allowDemoData });
 });
 
+email.start();
 const syncTimer = setInterval(syncAllClusters, config.syncIntervalMs);
 syncTimer.unref();
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => server.close(() => { clearInterval(syncTimer); store.close(); process.exit(0); }));
+  process.on(signal, () => server.close(() => { email.stop(); clearInterval(syncTimer); store.close(); process.exit(0); }));
 }

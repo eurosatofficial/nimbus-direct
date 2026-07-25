@@ -42,6 +42,8 @@ export function readConfig() {
     syncIntervalMs: integer(process.env.RESOURCE_SYNC_SECONDS, 60) * 1000,
     isoMaxUploadBytes: integer(process.env.ISO_MAX_UPLOAD_MB, 8192) * 1024 * 1024,
     isoUploadTimeoutMs: integer(process.env.ISO_UPLOAD_TIMEOUT_MINUTES, 120) * 60 * 1000,
+    emailSmtpTimeoutMs: integer(process.env.EMAIL_SMTP_TIMEOUT_SECONDS, 10) * 1000,
+    emailQueueIntervalMs: integer(process.env.EMAIL_QUEUE_INTERVAL_SECONDS, 5) * 1000,
     allowDemoData: boolean(process.env.ALLOW_DEMO_DATA, false),
     bootstrap: {
       email: process.env.BOOTSTRAP_ADMIN_EMAIL,

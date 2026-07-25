@@ -8,7 +8,7 @@
     <title>Nimbus Direct</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20260725-2" />
+    <link rel="stylesheet" href="/styles.css?v=20260725-10" />
   </head>
   <body class="auth-pending">
     <a class="skip-link" href="#pageContent">Skip to content</a>
@@ -22,7 +22,7 @@
         <span class="auth-icon" aria-hidden="true">⌁</span>
         <p class="eyebrow">Secure customer access</p>
         <h1 id="loginTitle">Sign in to your infrastructure</h1>
-        <p>Use the account issued by your infrastructure provider.</p>
+        <p id="authDescription">Use the account issued by your infrastructure provider.</p>
         <form id="loginForm">
           <label for="loginEmail">Email address</label>
           <input id="loginEmail" type="email" name="email" autocomplete="username" required placeholder="you@company.com" />
@@ -30,6 +30,31 @@
           <input id="loginPassword" type="password" name="password" autocomplete="current-password" required minlength="12" />
           <p class="form-message error" id="authError" role="alert"></p>
           <button class="button primary auth-submit" type="submit">Sign in</button>
+          <button class="auth-link" id="forgotPasswordButton" type="button">Forgot your password?</button>
+        </form>
+        <form id="mfaForm" hidden>
+          <label for="mfaLoginCode">Authenticator or recovery code</label>
+          <input id="mfaLoginCode" type="text" name="code" autocomplete="one-time-code" maxlength="16" required placeholder="123456" />
+          <p class="form-message error" id="mfaAuthError" role="alert"></p>
+          <button class="button primary auth-submit" type="submit">Verify and sign in</button>
+          <button class="button quiet auth-back" id="mfaBackButton" type="button">← Use another account</button>
+        </form>
+        <form id="forgotPasswordForm" hidden>
+          <label for="forgotPasswordEmail">Email address</label>
+          <input id="forgotPasswordEmail" type="email" name="email" autocomplete="email" required placeholder="you@company.com" />
+          <p class="form-message" id="forgotPasswordMessage" role="status"></p>
+          <button class="button primary auth-submit" type="submit">Send reset link</button>
+          <button class="button quiet auth-back" id="forgotPasswordBackButton" type="button">← Back to sign in</button>
+        </form>
+        <form id="accountCompletionForm" hidden>
+          <p class="account-flow-recipient" id="accountFlowRecipient"></p>
+          <label for="accountPassword">New password</label>
+          <input id="accountPassword" type="password" name="password" autocomplete="new-password" minlength="12" maxlength="256" required />
+          <label for="accountConfirmPassword">Confirm new password</label>
+          <input id="accountConfirmPassword" type="password" name="confirmPassword" autocomplete="new-password" minlength="12" maxlength="256" required />
+          <p class="form-message" id="accountCompletionMessage" role="status"></p>
+          <button class="button primary auth-submit" type="submit">Save password</button>
+          <button class="button quiet auth-back" id="accountCompletionBackButton" type="button">Go to sign in</button>
         </form>
         <small>Sessions are protected with secure, HTTP-only cookies.</small>
       </div>
@@ -48,6 +73,7 @@
           <a class="nav-item" href="#instances" data-view="instances"><span class="nav-icon" aria-hidden="true">▤</span><span>Instances</span><span class="nav-badge" id="instanceCount">0</span></a>
           <a class="nav-item" href="#network" data-view="network"><span class="nav-icon" aria-hidden="true">⌘</span><span>Network</span></a>
           <a class="nav-item" href="#activity" data-view="activity"><span class="nav-icon" aria-hidden="true">◷</span><span>Activity</span></a>
+          <a class="nav-item" href="#notifications" data-view="notifications"><span class="nav-icon" aria-hidden="true">✦</span><span>Notifications</span><span class="nav-badge notification-badge" id="notificationCount" hidden>0</span></a>
 
           <p class="nav-label second">Account</p>
           <a class="nav-item" href="#settings" data-view="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>Settings</span></a>
@@ -138,12 +164,27 @@
       </form>
     </dialog>
 
+    <dialog id="snapshotDialog" class="dialog snapshot-dialog" aria-labelledby="snapshotDialogTitle">
+      <form id="snapshotForm" class="dialog-shell">
+        <header class="dialog-header">
+          <div><p class="eyebrow" id="snapshotDialogEyebrow">Recovery point</p><h2 id="snapshotDialogTitle">Manage snapshot</h2></div>
+          <button class="icon-button dialog-close" type="button" data-close-dialog aria-label="Close snapshot dialog">×</button>
+        </header>
+        <div class="dialog-body" id="snapshotDialogBody"></div>
+        <p class="form-message error dialog-form-error" id="snapshotDialogError" role="alert"></p>
+        <footer class="dialog-footer">
+          <button class="button secondary" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" id="confirmSnapshot" type="submit">Continue</button>
+        </footer>
+      </form>
+    </dialog>
+
     <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true">
       <span class="toast-icon" id="toastIcon" aria-hidden="true">✓</span>
       <span><strong id="toastTitle">Action complete</strong><small id="toastMessage"></small></span>
       <button class="icon-button" type="button" id="toastClose" aria-label="Dismiss message">×</button>
     </div>
 
-    <script src="/app.js?v=20260725-2" type="module"></script>
+    <script src="/app.js?v=20260725-10" type="module"></script>
   </body>
 </html>
