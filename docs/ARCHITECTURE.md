@@ -34,6 +34,8 @@ Customer browser                    Administrator browser
           - alerts/notifications     HTTPS :8006
           - MFA/recovery codes
           - account-link hashes
+          - operations telemetry
+          - operations incidents
           - audit/tasks
                  |                          |
           background sync        Proxmox VE cluster(s)
@@ -57,6 +59,7 @@ Core tables:
 - `assignment_permissions`: explicit allowed operations for one assignment.
 - `sessions`: opaque, secret-bound server sessions, CSRF tokens, source IP, and bounded user-agent metadata.
 - `mfa_login_challenges`: hashed, five-minute, attempt-limited challenges that bridge password verification and session creation.
+- `security_policy`: singleton administrator/customer MFA requirements, optional successful-login email setting, and update attribution.
 - `account_tokens`: `APP_SECRET`-keyed token hash, invitation/password-reset purpose, target user, expiration, single-use/revocation state, creator, and bounded request IP. Raw tokens are never stored in this table.
 - `audit_logs`: actor, customer, action, resource, source IP, detail, and time.
 - `api_tasks`: server-only Proxmox UPID tracking, customer-scoped progress, and idempotency.
@@ -72,6 +75,16 @@ Core tables:
 - `notification_preferences`: independent in-panel/email and event-category choices for one customer login.
 - `notification_events`: customer/resource-scoped action, alert, and recovery events with a unique deduplication key.
 - `notifications`: private per-user delivery/read state and optional queued email reference.
+- `operations_collection_status`: per-cluster node/storage telemetry coverage, sanitized failure codes, and collection time.
+- `operations_node_metrics`: normalized node state, CPU, memory, root-storage, uptime, and last-good sample.
+- `operations_storage_metrics`: normalized per-node storage availability, type/content, capacity, and last-good sample.
+- `operations_incidents`: durable administrator-only cluster/node/storage/task/resource conditions with acknowledgement and automatic resolution state.
+- `maintenance_events`: administrator-authored planned work or incidents, schedule, severity, lifecycle, and email intent.
+- `maintenance_targets`: one notice's all/cluster/node/resource/customer audience before publication.
+- `maintenance_deliveries`: immutable affected-user snapshot, read state, and optional initial/resolution email jobs.
+- `support_tickets`: customer ownership, optional assigned resource, subject/category/priority, administrator assignment, workflow status, and lifecycle timestamps.
+- `support_ticket_messages`: customer, administrator, system, and administrator-only internal messages for one ticket.
+- `support_ticket_reads`: individual per-login read position for a customer-shared or administrator-visible ticket.
 
 Important keys:
 
@@ -85,6 +98,13 @@ resource_alert_policies PRIMARY KEY(assignment_id)
 alert_states PRIMARY KEY(assignment_id, alert_type)
 notification_events UNIQUE(dedup_key)
 notifications UNIQUE(event_id, user_id)
+operations_node_metrics PRIMARY KEY(cluster_id, node)
+operations_storage_metrics PRIMARY KEY(cluster_id, node, storage_id)
+operations_incidents UNIQUE(dedup_key)
+maintenance_targets PRIMARY KEY(event_id, target_type, target_id)
+maintenance_deliveries UNIQUE(event_id, user_id)
+support_tickets UNIQUE(reference)
+support_ticket_reads PRIMARY KEY(ticket_id, user_id)
 ```
 
 The canonical resource ID is `cluster-id:type:vmid`. The node is stored and updated during synchronization because a guest can move. Assignments reference the stable resource row, so a migration between nodes does not transfer or delete customer ownership.
@@ -92,6 +112,8 @@ The canonical resource ID is `cluster-id:type:vmid`. The node is stored and upda
 ## 3. Authentication and authorization
 
 Authentication uses scrypt password hashing and opaque HTTP-only sessions. Optional TOTP authentication is compatible with standard authenticator apps. A password-valid account with MFA enabled receives only a short-lived challenge; Nimbus creates the real session only after a current six-digit code or an unused recovery code succeeds. TOTP secrets are encrypted with `APP_SECRET`, while recovery codes are normalized, secret-bound hashed, displayed once, and atomically consumed. Administrators have platform scope. Customer users must belong to one active customer account.
+
+The durable security policy can independently require MFA for administrator and customer roles. A password-valid account covered by policy but missing MFA receives a restricted enrollment session. The backend permits only the redacted dashboard plus TOTP setup/confirmation until enrollment succeeds; it denies administrative, resource, network, account, and other customer routes. Policy evaluation occurs on every request, and disabling MFA is rejected while the authenticated user's role remains covered.
 
 Administrators can create a user in pending-password state and send a 30-minute invitation. Invitations and password resets share a purpose-bound, single-use account-token service. The email contains the raw random token inside an encrypted queued body; SQLite stores only its `APP_SECRET`-keyed hash. Resending invalidates the previous invitation, completion consumes every outstanding account token and revokes every session, and password recovery preserves TOTP configuration. Forgot-password responses are intentionally identical for eligible, unknown, disabled, and pending-invitation addresses. Account-link validation/completion and request generation use independent rate limits.
 
@@ -118,10 +140,12 @@ Each configured cluster has one central, privilege-separated API token. Credenti
 The service layer uses the official `/api2/json` endpoints for:
 
 - `GET /cluster/resources?type=vm` for QEMU/LXC discovery.
+- `GET /cluster/resources?type=node` for normalized node pressure and availability.
+- `GET /nodes/{node}/storage?enabled=1` for normalized enabled-storage availability and capacity, with the cluster resource list retained as a compatibility fallback.
 - `GET /nodes/{node}/{type}/{vmid}/config` for allowlisted configuration.
 - `GET /nodes/{node}/{type}/{vmid}/rrddata` for usage history.
 - `POST /nodes/{node}/{type}/{vmid}/status/{action}` for power actions.
-- Guest-agent/LXC interface endpoints for network information.
+- Guest-agent/LXC interface endpoints for live network information, with allowlisted static QEMU Cloud-Init and LXC configuration fallback.
 - Snapshot list/create/rollback/delete endpoints.
 - `POST .../vncproxy` for short-lived console tickets.
 - `GET /nodes/{node}/tasks/{upid}/status` for asynchronous task status.
@@ -135,6 +159,10 @@ Raw upstream bodies never pass through to customers. Nimbus normalizes errors, a
 
 Synchronization marks previously discovered resources as stale before applying fresh metadata. It does not delete resource rows or assignments when Proxmox is temporarily unavailable or a guest is missing from one response.
 
+Operations telemetry is an optional parallel branch of synchronization. Node and storage calls are settled independently from guest inventory. A denied or failed optional call records only an allowlisted error code, keeps the last good metrics, and does not resolve incidents from a scope that was not successfully evaluated. Cluster reachability, stale assigned resources, and local task age remain evaluable without optional telemetry.
+
+The incident reconciler uses stable server-generated keys. Current conditions create or update an open incident, administrator acknowledgement changes only its workflow state, and a later successful healthy sample resolves it automatically. Browser responses contain normalized values and never contain task UPIDs or raw Proxmox bodies.
+
 ISO bytes are not buffered into the Nimbus data volume. The incoming request is size-checked and streamed as multipart data to Proxmox while Nimbus calculates SHA-256. Nimbus reserves quota in the local database before the stream begins. Upload/delete task UPIDs remain server-only, and a temporary Proxmox error changes operation state without deleting the ownership record.
 
 One-time ISO boot never accepts a raw boot string, CD-ROM slot, volume ID, node, or VMID from the browser. Nimbus loads the active customer-owned mount, verifies the current Proxmox CD-ROM value, saves the exact prior `boot` property internally, and prepends only the verified slot. Restoration compares the current value with Nimbus's armed value before writing. An outside boot-order change therefore produces an error instead of being overwritten.
@@ -144,6 +172,10 @@ Email delivery is a separate service layer and never calls Proxmox. Administrato
 Alert evaluation runs only after a successful resource synchronization. Each enabled assignment condition progresses through healthy, pending, and firing states. Conditions must remain active for the configured duration; an incident creates one deduplicated alert event and its transition back to normal creates one recovery event. Existing stopped guests are baselined without an alert, recent Nimbus stop/shutdown requests suppress expected offline events, and an API synchronization failure never alters alert state. Reassignment resets policy and incident state.
 
 One customer event can fan out to multiple active users in that customer, but every delivery row and preference row belongs to one user. API reads and read-state mutations always filter by the authenticated user ID. Email delivery is opt-in and uses the same encrypted queue and branded template system as administrator test messages.
+
+Maintenance publication is a separate local authorization flow. Nimbus resolves an all/cluster/node/resource/customer target through current active assignments, converts the result to active customer users, and writes one delivery per affected user in the same transaction that marks the notice published. Customer reads query the delivery user ID rather than recalculating current ownership. A later reassignment therefore cannot transfer historical maintenance visibility. Drafts have no delivery rows. Scheduled/active state advances from server time, while cancellation and resolution remain administrator-only, CSRF-protected, and audited.
+
+Support authorization is customer-account scoped rather than resource-pool scoped. Ticket creation takes the customer ID only from the authenticated session. An optional resource reference is accepted only when an active local assignment joins that resource to the same customer. Every list, thread, reply, close, reopen, and read-state operation repeats the customer check in the store layer; administrators receive platform scope. Internal notes are filtered in SQL before customer messages are serialized, and customer-facing ticket records report no internal-note count. Audit details contain ticket/message identifiers and workflow metadata, never conversation bodies.
 
 ## 5. Administrator assignment workflow
 
@@ -159,11 +191,17 @@ Reassigning a resource updates the local assignment and permission rows. Removin
 
 An active customer ISO mount or unresolved one-time boot override blocks reassignment or removal until it is safely restored/ejected. A customer account with non-deleted ISO ownership records cannot be deleted. These guards prevent media or recovery state from becoming silently orphaned or crossing a reassignment boundary.
 
+Administrators open **Control center → Operations** to inspect cluster reachability, node pressure, storage capacity, stale assigned resources, failed/stuck tasks, active incidents, and recent automatic recoveries. A full refresh is independently rate-limited and audited. Acknowledgements record the administrator but cannot disable evaluation. All Operations Center routes require the server-side administrator role and are unavailable to customer sessions.
+
+Administrators use **Control center → Maintenance** to draft and publish planned work or service incidents. A notice can target the whole platform, selected clusters/nodes, individual assigned resources, or customer accounts. Publishing freezes the affected per-user audience, schedules optional branded email through the existing queue, and prevents later editing. Active or scheduled notices can be resolved, scheduled notices can be cancelled, and unpublished drafts can be deleted.
+
+Administrators use the shared **Support** workspace for the global customer queue. They can assign one active administrator, change priority/status, add an administrator-only note, or send a public reply. Public replies and status changes can fan out through the encrypted email queue to active users of the ticket's customer. When a ticket is unassigned, customer activity notifies all active administrators; once assigned, only the owner is targeted.
+
 ## 6. Customer dashboard
 
 The dashboard returns only resources with an active assignment to the authenticated customer and `view_status` permission. It shows status, cluster, node, type/VMID, CPU, RAM, storage, uptime, IP, and recent activity.
 
-Each resource opens a full detail workspace with status-aware power controls, normalized Proxmox RRD history, allowlisted configuration, guest-reported network addresses, and recent tasks. Buttons are generated from assignment permissions for usability, but the same permission is checked again on the server.
+Each resource opens a full detail workspace with status-aware power controls, normalized Proxmox RRD history, allowlisted configuration, guest-reported network addresses, and recent tasks. The Network workspace lazily discovers addresses only for resources visible to the current session, prefers live QEMU Guest Agent/LXC data, and falls back to configured static addresses without returning raw guest configuration. Buttons are generated from assignment permissions for usability, but the same permission is checked again on the server.
 
 Power operations use idempotency keys and return either an immediate result or a tracked Proxmox task. The active browser polls for immediate feedback and the server synchronization cycle independently follows unfinished tasks, so completion state and notifications do not depend on an open page. Nimbus writes a system audit event when tasks finish, updates the expected local status after successful power tasks, and rejects overlapping actions while a recent task is still active.
 
@@ -177,7 +215,13 @@ With the separate `iso_boot` assignment permission, a mounted customer-owned ISO
 
 The Notification Center returns only deliveries for the authenticated login. Users independently enable in-panel/email delivery and action-success, action-failure, infrastructure-alert, and recovery categories. Backend-created event keys prevent task refreshes or repeated synchronization cycles from duplicating a notification.
 
+The Maintenance Center likewise returns only delivery rows for the authenticated login, but maintenance visibility is an operational service record rather than an optional notification category. Active/upcoming notices appear on the overview and in the dedicated timeline even when email is disabled. Email fan-out respects the login's infrastructure/recovery opt-ins and uses the branded encrypted queue.
+
+The Support Ticket Center is shared by active users within one customer account, while read state is private to each login. Customers can open a ticket, optionally link an actively assigned resource, reply, close, and reopen resolved/closed requests. They cannot choose another customer, see internal notes, assign administrators, or change workflow metadata. Ticket create/reply actions have independent user/IP rate limits and every mutation is CSRF-protected.
+
 Account Settings includes TOTP enrollment, recovery-code replacement, password-and-code-protected disablement, and user-scoped session management. Enabling or disabling MFA revokes every other session. An administrator can reset another user's MFA only after re-entering the administrator password; the reset revokes all target sessions and cannot be used on the currently signed-in administrator. Security changes and recovery-code logins are audited, and queued security notices use the existing encrypted SMTP path when enabled.
+
+The administrator Security & Access Center aggregates active-account MFA coverage, required-but-unprotected accounts, active sessions, recent successful/failed logins, and security-specific audit events. Failed password authentication writes an event for a known account; an unknown attempt remains a platform event without persisting the attacker-supplied email. Optional successful-login messages and mandatory password-change/reset notices reuse the encrypted SMTP queue and contain no credential material.
 
 The unauthenticated sign-in surface also handles invitations and password recovery. It removes the email token from browser history before sending it in a JSON request, validates the token's hash/purpose/expiry server-side, and never creates a session automatically after completion. Users sign in normally afterward, including the existing MFA step. Administrators can inspect pending/expired onboarding and resend or revoke links without seeing the token.
 
@@ -189,9 +233,13 @@ The unauthenticated sign-in surface also handles invitations and password recove
 - Passwords use scrypt; TOTP secrets use AES-256-GCM; recovery codes are one-way hashed and single-use.
 - Invitation and password-reset tokens are random, purpose-bound, `APP_SECRET`-keyed hashes at rest, expire after 30 minutes, and are single-use.
 - Sessions are opaque, HTTP-only, SameSite=Strict, and Secure in production; users can review and revoke only their own sessions.
+- Required-MFA policy is enforced server-side on every request; an unenrolled account cannot reach resources or administrative data.
 - State-changing requests require a session-bound CSRF token and same-origin check.
 - Password login, MFA verification, invitation delivery, password recovery, account-link validation, security-setting changes, and resource actions have independent rate limits.
 - SMTP connection and delivery tests have a separate administrator/user/IP rate limit.
+- Full Operations Center refreshes have a separate administrator/IP rate limit; incident acknowledgement is CSRF-protected and audited.
+- Maintenance publication has an independent administrator/IP rate limit; every draft, publication, cancellation, and resolution is CSRF-protected and audited.
+- Support ticket creation and replies have independent user/IP rate limits; every lookup repeats the customer boundary, and internal notes are administrator-only.
 - ISO uploads have an independent per-user hourly rate limit, a hard application size ceiling, per-storage file limits, and per-customer quotas.
 - Customer resource authorization is a database join, never a frontend decision.
 - User-supplied VMID, node, type, or cluster coordinates are never forwarded.
@@ -199,12 +247,14 @@ The unauthenticated sign-in surface also handles invitations and password recove
 - Console tickets are encrypted, short-lived, and single-use.
 - API task IDs are customer-scoped and idempotent.
 - Notification delivery and read-state APIs are user-scoped; deduplication is server-generated.
+- Maintenance delivery/read APIs are user-scoped, and published audiences are immutable assignment-derived snapshots.
+- Support ticket APIs are customer-account scoped, support read state is user-scoped, and internal messages are excluded server-side for customers.
 - Security headers deny framing and unnecessary browser capabilities.
 - Audit logs cover authentication, administration, assignment changes, power requests, configuration, snapshots, console tickets, ISO uploads, mount/eject, one-time boot arm/restore/failure, deletion, and failed uploads.
 - Docker runs unprivileged, read-only, without Linux capabilities or privilege escalation.
 - SMTP transport requires certificate-verified TLS or STARTTLS; plaintext SMTP and verification bypasses are not supported.
 
-Recommended token privileges must be adjusted to the enabled feature set. A status/power/console MVP generally needs `VM.Audit`, `VM.PowerMgmt`, and `VM.Console`; add `VM.Snapshot`/`VM.Snapshot.Rollback`, selected `VM.Config.*`, and guest-agent audit privileges only when those features are enabled. ISO upload/mount adds `VM.Config.CDROM` on managed VMs plus `Datastore.Audit` and `Datastore.AllocateTemplate` on the specific ISO storage. One-time boot additionally uses `VM.Config.Options` on the managed VMs. Optional deletion currently adds the broader `Datastore.Allocate` privilege and should remain disabled unless required. Do not grant `Administrator`, `Sys.Modify`, user management, or host-shell privileges.
+Recommended token privileges must be adjusted to the enabled feature set. A status/power/console MVP generally needs `VM.Audit`, `VM.PowerMgmt`, and `VM.Console`; add `VM.Snapshot`/`VM.Snapshot.Rollback`, selected `VM.Config.*`, and guest-agent audit privileges only when those features are enabled. Operations node telemetry uses `Sys.Audit`; storage capacity telemetry uses `Datastore.Audit` only on intended storage paths. ISO upload/mount adds `VM.Config.CDROM` on managed VMs plus `Datastore.AllocateTemplate` on the specific ISO storage. One-time boot additionally uses `VM.Config.Options` on the managed VMs. Optional deletion currently adds the broader `Datastore.Allocate` privilege and should remain disabled unless required. Do not grant `Administrator`, `Sys.Modify`, user management, or host-shell privileges.
 
 ## 8. Practical MVP plan
 
@@ -223,13 +273,17 @@ Recommended token privileges must be adjusted to the enabled feature set. A stat
 - Encrypted SMTP configuration, administrator connection/message tests, durable delivery retries, and sanitized delivery history.
 - Per-assignment resource alerts, private notification delivery, customer preferences, action completion events, and branded alert/recovery email.
 - TOTP two-factor authentication, one-use recovery codes, active-session management, administrator-assisted reset, and security email notices.
+- Administrator Security & Access Center with enforceable role-based MFA requirements, restricted enrollment sessions, account posture, failed-login audit events, and optional successful-login email.
 - Administrator-issued customer invitations, self-service password recovery, resend/revoke controls, non-enumerating responses, and session-revoking completion.
+- Administrator Operations Center with last-good node/storage telemetry, cluster/stale-assignment/task monitoring, persistent acknowledgement, and automatic recovery.
+- Targeted maintenance/incident drafts, schedules, immutable per-user audiences, customer timeline/banner, read state, resolution, and branded email.
+- Customer-scoped support tickets with resource validation, administrator queue/assignment, internal notes, per-login unread state, audit events, and branded email.
 - Docker deployment, health/readiness endpoints, and automated security/isolation tests.
 
 ### Phase 2 — production hardening
 
 - Replace in-process rate limiting with Redis when running multiple replicas.
-- Add WebAuthn/passkeys and administrator-enforced account security policy.
+- Add WebAuthn/passkeys.
 - Add key rotation with credential re-encryption.
 - Add a durable job runner for sync/task polling rather than one process timer.
 - Add pagination and retention policies for large audit/task tables.
@@ -238,7 +292,7 @@ Recommended token privileges must be adjusted to the enabled feature set. A stat
 ### Phase 3 — controlled expansion
 
 - Selected configuration editors with quotas and change previews.
-- Alert policy templates, maintenance windows, webhooks, and support impersonation controls.
+- Alert policy templates, webhooks, and support impersonation controls.
 - PostgreSQL option and HA deployment.
 - External identity providers and organization-level policy templates.
 

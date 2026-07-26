@@ -8,7 +8,7 @@
     <title>Nimbus Direct</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20260725-10" />
+    <link rel="stylesheet" href="/styles.css?v=20260726-06" />
   </head>
   <body class="auth-pending">
     <a class="skip-link" href="#pageContent">Skip to content</a>
@@ -23,6 +23,10 @@
         <p class="eyebrow">Secure customer access</p>
         <h1 id="loginTitle">Sign in to your infrastructure</h1>
         <p id="authDescription">Use the account issued by your infrastructure provider.</p>
+        <div class="demo-login-notice" id="demoLoginNotice" hidden>
+          <span aria-hidden="true">◇</span>
+          <span><strong>Public read-only demo</strong><small>You can explore every screen, but this shared instance cannot be changed.</small></span>
+        </div>
         <form id="loginForm">
           <label for="loginEmail">Email address</label>
           <input id="loginEmail" type="email" name="email" autocomplete="username" required placeholder="you@company.com" />
@@ -74,6 +78,8 @@
           <a class="nav-item" href="#network" data-view="network"><span class="nav-icon" aria-hidden="true">⌘</span><span>Network</span></a>
           <a class="nav-item" href="#activity" data-view="activity"><span class="nav-icon" aria-hidden="true">◷</span><span>Activity</span></a>
           <a class="nav-item" href="#notifications" data-view="notifications"><span class="nav-icon" aria-hidden="true">✦</span><span>Notifications</span><span class="nav-badge notification-badge" id="notificationCount" hidden>0</span></a>
+          <a class="nav-item" href="#maintenance" data-view="maintenance"><span class="nav-icon" aria-hidden="true">△</span><span>Maintenance</span><span class="nav-badge maintenance-badge" id="maintenanceCount" hidden>0</span></a>
+          <a class="nav-item" href="#support" data-view="support"><span class="nav-icon" aria-hidden="true">?</span><span>Support</span><span class="nav-badge support-badge" id="supportCount" hidden>0</span></a>
 
           <p class="nav-label second">Account</p>
           <a class="nav-item" href="#settings" data-view="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>Settings</span></a>
@@ -108,6 +114,11 @@
         </header>
 
         <div class="content">
+          <section class="demo-read-only-banner" id="demoReadOnlyBanner" role="status" hidden>
+            <span class="demo-read-only-icon" aria-hidden="true">◇</span>
+            <span><strong>Public read-only demo</strong><small>Explore Nimbus freely. Power actions, configuration, account changes, uploads, tickets, and administrator changes are safely disabled.</small></span>
+            <span class="pill">Browsing only</span>
+          </section>
           <div class="page-heading">
             <div>
               <p class="eyebrow" id="todayLabel"></p>
@@ -185,6 +196,6 @@
       <button class="icon-button" type="button" id="toastClose" aria-label="Dismiss message">×</button>
     </div>
 
-    <script src="/app.js?v=20260725-10" type="module"></script>
+    <script src="/app.js?v=20260726-08" type="module"></script>
   </body>
 </html>

@@ -10,14 +10,17 @@ import {
   createEmailService,
   createSmtpTransport,
   invitationEmailTemplate,
+  maintenanceEmailTemplate,
   passwordResetEmailTemplate,
   securityEmailTemplate,
+  supportTicketEmailTemplate,
 } from "./server/email.mjs";
 import { createTotpEnrollment, generateRecoveryCodes, verifyTotp } from "./server/mfa.mjs";
 import { createNotificationService } from "./server/notifications.mjs";
 import { ProxmoxRegistry } from "./server/proxmox-registry.mjs";
 import { RateLimiter } from "./server/rate-limit.mjs";
 import { bootstrapStore, DEFAULT_PERMISSIONS, openStore } from "./server/store.mjs";
+import { assertDemoReadOnlyStore, isDemoReadOnlyRequestAllowed } from "./server/demo-mode.mjs";
 import {
   parseCookies,
   securityHeaders,
@@ -30,6 +33,7 @@ import {
 await loadEnv(new URL("./.env", import.meta.url));
 const config = readConfig();
 const store = await openStore(config.dataDir, { appSecret: config.appSecret });
+if (config.demoReadOnly) assertDemoReadOnlyStore(config, store);
 const bootstrapped = await bootstrapStore(store, config.bootstrap);
 const proxmox = new ProxmoxRegistry({
   getConnection: (clusterId) => store.getClusterConnection(clusterId),
@@ -46,6 +50,10 @@ const actionLimiter = new RateLimiter({ limit: 30, windowMs: 60 * 1000 });
 const uploadLimiter = new RateLimiter({ limit: 5, windowMs: 60 * 60 * 1000 });
 const emailConnectionTestLimiter = new RateLimiter({ limit: 12, windowMs: 5 * 60 * 1000 });
 const emailMessageTestLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
+const operationsRefreshLimiter = new RateLimiter({ limit: 6, windowMs: 5 * 60 * 1000 });
+const maintenancePublishLimiter = new RateLimiter({ limit: 30, windowMs: 60 * 60 * 1000 });
+const supportTicketCreateLimiter = new RateLimiter({ limit: 10, windowMs: 60 * 60 * 1000 });
+const supportTicketMessageLimiter = new RateLimiter({ limit: 60, windowMs: 60 * 60 * 1000 });
 const root = fileURLToPath(new URL("./public", import.meta.url));
 const noVncRoot = fileURLToPath(new URL("./node_modules/@novnc/novnc", import.meta.url));
 const headers = securityHeaders();
@@ -58,11 +66,26 @@ const demoResources = [
   { vmid: 301, type: "lxc", name: "cache-edge-01", node: "pve-ber-03", status: "running", vcpu: 2, memory: 4, memoryUsed: 1.7, storage: 32, storageUsed: 12, ip: "10.24.3.44", cpu: 21, uptime: 338441 },
   { vmid: 302, type: "qemu", name: "worker-gpu-01", node: "pve-fra-02", status: "suspended", vcpu: 12, memory: 32, memoryUsed: 18.4, storage: 300, storageUsed: 201, ip: "10.31.2.55", cpu: 0, uptime: 129223 },
 ];
+const demoOperations = {
+  nodes: [
+    { node: "pve-ber-01", status: "online", cpuPercent: 42, cpuCores: 16, memoryUsedBytes: 39 * 1024 ** 3, memoryTotalBytes: 64 * 1024 ** 3, memoryPercent: 60.9, rootUsedBytes: 46 * 1024 ** 3, rootTotalBytes: 96 * 1024 ** 3, rootPercent: 47.9, uptime: 2_592_000 },
+    { node: "pve-ber-02", status: "online", cpuPercent: 31, cpuCores: 24, memoryUsedBytes: 71 * 1024 ** 3, memoryTotalBytes: 128 * 1024 ** 3, memoryPercent: 55.5, rootUsedBytes: 51 * 1024 ** 3, rootTotalBytes: 96 * 1024 ** 3, rootPercent: 53.1, uptime: 1_814_400 },
+    { node: "pve-ber-03", status: "online", cpuPercent: 18, cpuCores: 12, memoryUsedBytes: 22 * 1024 ** 3, memoryTotalBytes: 64 * 1024 ** 3, memoryPercent: 34.4, rootUsedBytes: 33 * 1024 ** 3, rootTotalBytes: 96 * 1024 ** 3, rootPercent: 34.4, uptime: 950_400 },
+    { node: "pve-fra-01", status: "online", cpuPercent: 27, cpuCores: 16, memoryUsedBytes: 44 * 1024 ** 3, memoryTotalBytes: 96 * 1024 ** 3, memoryPercent: 45.8, rootUsedBytes: 40 * 1024 ** 3, rootTotalBytes: 96 * 1024 ** 3, rootPercent: 41.7, uptime: 1_296_000 },
+    { node: "pve-fra-02", status: "online", cpuPercent: 63, cpuCores: 32, memoryUsedBytes: 122 * 1024 ** 3, memoryTotalBytes: 192 * 1024 ** 3, memoryPercent: 63.5, rootUsedBytes: 58 * 1024 ** 3, rootTotalBytes: 128 * 1024 ** 3, rootPercent: 45.3, uptime: 691_200 },
+  ],
+  storages: [
+    { node: "pve-ber-01", storageId: "local", status: "available", type: "dir", shared: false, content: ["iso", "vztmpl"], usedBytes: 54 * 1024 ** 3, totalBytes: 180 * 1024 ** 3, availableBytes: 126 * 1024 ** 3, usagePercent: 30 },
+    { node: "pve-ber-01", storageId: "ceph-vm", status: "available", type: "rbd", shared: true, content: ["images", "rootdir"], usedBytes: 5.4 * 1024 ** 4, totalBytes: 12 * 1024 ** 4, availableBytes: 6.6 * 1024 ** 4, usagePercent: 45 },
+    { node: "pve-fra-01", storageId: "fra-zfs", status: "available", type: "zfspool", shared: false, content: ["images", "rootdir"], usedBytes: 2.1 * 1024 ** 4, totalBytes: 4 * 1024 ** 4, availableBytes: 1.9 * 1024 ** 4, usagePercent: 52.5 },
+  ],
+};
 const demoSnapshots = new Map();
 
 if (config.allowDemoData && !store.listClusters().length) {
   store.createCluster({ id: "demo-eu", name: "Nimbus Demo EU", apiUrl: "https://demo.invalid:8006", tokenId: "demo@pve!panel", tokenSecret: "demo-secret-never-used" });
   store.syncResources("demo-eu", demoResources);
+  store.saveOperationsSnapshot("demo-eu", { ...demoOperations, collectedAt: Date.now() });
   const customer = store.listCustomers()[0];
   if (customer) {
     for (const resource of store.listResources({ clusterId: "demo-eu" }).slice(0, 3)) {
@@ -70,6 +93,7 @@ if (config.allowDemoData && !store.listClusters().length) {
     }
   }
 }
+assertDemoReadOnlyStore(config, store);
 if (config.allowDemoData && store.listClusters().some((cluster) => cluster.id === "demo-eu") && !store.listIsoPolicies({ clusterId: "demo-eu" }).length) {
   store.createIsoPolicy({
     clusterId: "demo-eu",
@@ -118,8 +142,19 @@ function clientIp(request) {
   return request.socket.remoteAddress;
 }
 
+function securityUser(user) {
+  if (!user) return user;
+  const mfaEnabled = Boolean(user.mfaEnabled ?? user.mfa_enabled);
+  return {
+    ...user,
+    mfaEnrollmentRequired: store.isMfaRequiredForUser(user) && !mfaEnabled,
+  };
+}
+
 function currentSession(request) {
-  return store.getSession(parseCookies(request.headers.cookie)[cookieName]);
+  const session = store.getSession(parseCookies(request.headers.cookie)[cookieName]);
+  if (session) session.user = securityUser(session.user);
+  return session;
 }
 
 function requireSession(request, response) {
@@ -153,9 +188,23 @@ function requireAdmin(response, session) {
 }
 
 function audit(request, session, action, { customerId = session.user.customerId, resourceId = null, detail = {} } = {}) {
+  if (config.demoReadOnly) return;
   store.writeAudit({
     customerId, userId: session.user.id, actorRole: session.user.role, action, resourceId, detail, ipAddress: clientIp(request),
   });
+}
+
+function demoSafeEventPage(page) {
+  if (!config.demoReadOnly) return page;
+  return {
+    ...page,
+    items: (page?.items || []).map((entry) => ({ ...entry, ipAddress: null })),
+  };
+}
+
+function demoSafeSecurityCenter(center) {
+  if (!config.demoReadOnly) return center;
+  return { ...center, events: demoSafeEventPage(center.events) };
 }
 
 function createLoginSession(request, userId) {
@@ -164,14 +213,17 @@ function createLoginSession(request, userId) {
     ttlMs: config.sessionTtlMs,
     ipAddress: clientIp(request),
     userAgent: request.headers["user-agent"],
+    maxSessions: config.demoReadOnly ? 200 : null,
   });
 }
 
 function sendAuthenticated(response, session) {
+  const activeSession = store.getSession(session.token);
   sendJson(response, 200, {
-    user: store.getSession(session.token).user,
+    user: securityUser(activeSession.user),
     csrfToken: session.csrfToken,
     expiresAt: session.expiresAt,
+    demoReadOnly: config.demoReadOnly,
   }, {
     "set-cookie": sessionCookie(session.token, {
       secure: config.secureCookies,
@@ -208,6 +260,15 @@ function queueSecurityNotice(user, { title, message, ipAddress = null }) {
   } catch (error) {
     log("error", "security_notice_queue_failed", { userId: user?.id, error: error.code || error.message });
   }
+}
+
+function queueNewLoginNotice(user, request) {
+  if (!store.getSecurityPolicy().newLoginEmail) return;
+  queueSecurityNotice(user, {
+    title: "New sign-in to your account",
+    message: "A successful sign-in to your Nimbus Direct account was completed.",
+    ipAddress: clientIp(request),
+  });
 }
 
 function accountEmailSettings() {
@@ -261,6 +322,100 @@ function queuePasswordResetEmail(user, accountToken) {
   });
   void email.processDue();
   return job;
+}
+
+function maintenancePanelUrl() {
+  const value = store.getEmailSettings().appUrl;
+  if (!value) return "";
+  const url = new URL(value);
+  url.hash = "maintenance";
+  return url.toString();
+}
+
+function queueMaintenanceEmails({ event, deliveries }, { resolution = false, createdBy = null } = {}) {
+  const settings = store.getEmailSettings();
+  if (!event.notifyEmail || !settings.enabled || !deliveries?.length) return 0;
+  let queued = 0;
+  for (const delivery of deliveries) {
+    const eligible = delivery.emailEnabled
+      && (resolution ? delivery.resolutionAlerts : delivery.infrastructureAlerts);
+    if (!eligible || !delivery.email) continue;
+    try {
+      const content = maintenanceEmailTemplate({
+        displayName: delivery.displayName,
+        event,
+        appUrl: maintenancePanelUrl(),
+      });
+      const job = store.queueEmail({
+        to: delivery.email,
+        ...content,
+        category: resolution ? "maintenance_resolution" : "maintenance_notice",
+        createdBy,
+        maxAttempts: 4,
+      });
+      store.setMaintenanceEmailJob(delivery.deliveryId, job.id, { resolution });
+      queued += 1;
+    } catch (error) {
+      log("error", "maintenance_email_queue_failed", {
+        eventId: event.id,
+        userId: delivery.id,
+        error: error.code || error.message,
+      });
+    }
+  }
+  if (queued) void email.processDue();
+  return queued;
+}
+
+function supportPanelUrl(ticketId) {
+  const value = store.getEmailSettings().appUrl;
+  if (!value) return "";
+  const url = new URL(value);
+  url.hash = `support/${encodeURIComponent(ticketId)}`;
+  return url.toString();
+}
+
+function queueSupportEmails({
+  ticket,
+  message,
+  actor,
+  audience,
+  eventType = "reply",
+  createdBy = null,
+}) {
+  const settings = store.getEmailSettings();
+  if (!settings.enabled || !ticket || !message) return 0;
+  const recipients = store.listSupportTicketRecipients(ticket.id, audience);
+  let queued = 0;
+  for (const recipient of recipients) {
+    if (!recipient.email || recipient.id === actor?.id) continue;
+    try {
+      const content = supportTicketEmailTemplate({
+        displayName: recipient.displayName,
+        ticket,
+        message,
+        actorName: actor?.displayName || "Nimbus Direct support",
+        eventType,
+        appUrl: supportPanelUrl(ticket.id),
+      });
+      store.queueEmail({
+        to: recipient.email,
+        ...content,
+        category: eventType === "created" ? "support_ticket_created" : "support_ticket_update",
+        createdBy,
+        maxAttempts: 4,
+      });
+      queued += 1;
+    } catch (error) {
+      log("error", "support_email_queue_failed", {
+        ticketId: ticket.id,
+        userId: recipient.id,
+        error: error.code || error.message,
+      });
+    }
+  }
+  if (queued) void email.processDue();
+  return queued;
 }
 
 async function waitForUniformResponse(startedAt, minimumMs = 300) {
@@ -587,35 +742,75 @@ async function syncCluster(clusterId) {
       const current = store.getResource(`${clusterId}:${resource.type}:${resource.vmid}`);
       return current ? { ...resource, status: current.status } : resource;
     }));
+    store.saveOperationsSnapshot(clusterId, { ...demoOperations, collectedAt: Date.now() });
     await refreshClusterTasks(clusterId);
+    store.reconcileOperations(clusterId, {
+      staleAfterMs: Math.max(config.syncIntervalMs * 3, 5 * 60_000),
+    });
     try { await notifications.evaluateResourceAlerts({ clusterId }); }
     catch (error) { log("error", "alert_evaluation_failed", { clusterId, error: error.code || error.message }); }
     return synced;
   }
   try {
-    const resources = await proxmox.forCluster(clusterId).listVirtualMachines();
+    const client = proxmox.forCluster(clusterId);
+    const [resources, operations] = await Promise.all([
+      client.listVirtualMachines(),
+      client.getOperationsMetrics(),
+    ]);
     const synced = store.syncResources(clusterId, resources);
+    store.saveOperationsSnapshot(clusterId, operations);
     await refreshClusterTasks(clusterId);
+    store.reconcileOperations(clusterId, {
+      staleAfterMs: Math.max(config.syncIntervalMs * 3, 5 * 60_000),
+    });
     try { await notifications.evaluateResourceAlerts({ clusterId }); }
     catch (error) { log("error", "alert_evaluation_failed", { clusterId, error: error.code || error.message }); }
     return synced;
   } catch (error) {
     store.setClusterSync(clusterId, { error: error.code || "proxmox_sync_failed" });
+    store.reconcileOperations(clusterId, {
+      staleAfterMs: Math.max(config.syncIntervalMs * 3, 5 * 60_000),
+    });
     throw error;
   }
 }
 
 async function syncAllClusters() {
+  const results = [];
   for (const cluster of store.listClusters().filter((entry) => entry.status !== "disabled")) {
-    try { await syncCluster(cluster.id); }
-    catch (error) { log("error", "cluster_sync_failed", { clusterId: cluster.id, error: error.code || error.message }); }
+    try {
+      await syncCluster(cluster.id);
+      results.push({ clusterId: cluster.id, success: true });
+    } catch (error) {
+      results.push({ clusterId: cluster.id, success: false, error: error.code || "proxmox_sync_failed" });
+      log("error", "cluster_sync_failed", { clusterId: cluster.id, error: error.code || error.message });
+    }
+  }
+  return results;
+}
+
+function reconcileAllOperations() {
+  if (config.demoReadOnly) return;
+  for (const cluster of store.listClusters()) {
+    store.reconcileOperations(cluster.id, {
+      staleAfterMs: Math.max(config.syncIntervalMs * 3, 5 * 60_000),
+    });
   }
 }
 
 async function routeAuth(request, response, pathname) {
   if (pathname === "/api/auth/session" && request.method === "GET") {
-    const session = requireSession(request, response);
-    if (session) sendJson(response, 200, { user: session.user, csrfToken: session.csrfToken, expiresAt: session.expiresAt });
+    const session = currentSession(request);
+    if (!session) {
+      sendJson(response, 401, { error: "authentication_required", demoReadOnly: config.demoReadOnly });
+      return true;
+    }
+    sendJson(response, 200, {
+      user: session.user,
+      csrfToken: session.csrfToken,
+      expiresAt: session.expiresAt,
+      demoReadOnly: config.demoReadOnly,
+    });
     return true;
   }
   if (pathname === "/api/auth/login" && request.method === "POST") {
@@ -627,18 +822,30 @@ async function routeAuth(request, response, pathname) {
     if (!user || user.status !== "active" || !user.password_set
       || (user.role === "customer" && user.customer_status !== "active")
       || !(await verifyPassword(String(password || ""), user.password_hash))) {
+      if (!config.demoReadOnly) {
+        store.writeAudit({
+          customerId: user?.customer_id || null,
+          userId: user?.id || null,
+          actorRole: user?.role || "system",
+          action: "auth.login_failed",
+          detail: { stage: "password" },
+          ipAddress: ip,
+        });
+      }
       sendJson(response, 401, { error: "invalid_credentials" }); return true;
     }
     loginLimiter.clear(ip);
     if (user.mfa_enabled) {
       const challenge = store.createMfaChallenge({ userId: user.id });
-      store.writeAudit({
-        customerId: user.customer_id,
-        userId: user.id,
-        actorRole: user.role,
-        action: "auth.mfa_challenge",
-        ipAddress: ip,
-      });
+      if (!config.demoReadOnly) {
+        store.writeAudit({
+          customerId: user.customer_id,
+          userId: user.id,
+          actorRole: user.role,
+          action: "auth.mfa_challenge",
+          ipAddress: ip,
+        });
+      }
       sendJson(response, 202, {
         mfaRequired: true,
         challengeToken: challenge.token,
@@ -647,7 +854,10 @@ async function routeAuth(request, response, pathname) {
       return true;
     }
     const session = createLoginSession(request, user.id);
-    store.writeAudit({ customerId: user.customer_id, userId: user.id, actorRole: user.role, action: "auth.login", ipAddress: ip });
+    if (!config.demoReadOnly) {
+      store.writeAudit({ customerId: user.customer_id, userId: user.id, actorRole: user.role, action: "auth.login", ipAddress: ip });
+      queueNewLoginNotice(user, request);
+    }
     sendAuthenticated(response, session);
     return true;
   }
@@ -669,13 +879,15 @@ async function routeAuth(request, response, pathname) {
     const verification = verifyMfaCredential(user.id, code);
     if (!verification.valid) {
       store.failMfaChallenge(challengeToken);
-      store.writeAudit({
-        customerId: user.customer_id,
-        userId: user.id,
-        actorRole: user.role,
-        action: "auth.mfa_failed",
-        ipAddress: ip,
-      });
+      if (!config.demoReadOnly) {
+        store.writeAudit({
+          customerId: user.customer_id,
+          userId: user.id,
+          actorRole: user.role,
+          action: "auth.mfa_failed",
+          ipAddress: ip,
+        });
+      }
       sendJson(response, 401, { error: "invalid_mfa_code" });
       return true;
     }
@@ -685,20 +897,23 @@ async function routeAuth(request, response, pathname) {
     }
     mfaLimiter.clear(ip);
     const session = createLoginSession(request, user.id);
-    store.writeAudit({
-      customerId: user.customer_id,
-      userId: user.id,
-      actorRole: user.role,
-      action: "auth.login",
-      detail: { mfa: true, recoveryCode: verification.recoveryCode },
-      ipAddress: ip,
-    });
-    if (verification.recoveryCode) {
-      queueSecurityNotice(user, {
-        title: "A recovery code was used",
-        message: "A one-time recovery code was used to sign in. Review your active sessions and regenerate codes if this was unexpected.",
+    if (!config.demoReadOnly) {
+      store.writeAudit({
+        customerId: user.customer_id,
+        userId: user.id,
+        actorRole: user.role,
+        action: "auth.login",
+        detail: { mfa: true, recoveryCode: verification.recoveryCode },
         ipAddress: ip,
       });
+      if (verification.recoveryCode) {
+        queueSecurityNotice(user, {
+          title: "A recovery code was used",
+          message: "A one-time recovery code was used to sign in. Review your active sessions and regenerate codes if this was unexpected.",
+          ipAddress: ip,
+        });
+      }
+      queueNewLoginNotice(user, request);
     }
     sendAuthenticated(response, session);
     return true;
@@ -824,16 +1039,160 @@ async function routeAuth(request, response, pathname) {
 async function routeAdmin(request, response, pathname) {
   const session = requireSession(request, response);
   if (!session || !requireAdmin(response, session)) return true;
+  if (session.user.mfaEnrollmentRequired) {
+    sendJson(response, 403, { error: "mfa_enrollment_required" });
+    return true;
+  }
   if (request.method !== "GET" && !requireCsrf(request, response, session)) return true;
 
   if (pathname === "/api/admin/state" && request.method === "GET") {
+    reconcileAllOperations();
     sendJson(response, 200, {
-      clusters: store.listClusters(), customers: store.listCustomers(), users: store.listUsers(),
+      mode: config.demoReadOnly ? "demo_read_only" : config.allowDemoData ? "demo" : "live",
+      demoReadOnly: config.demoReadOnly,
+      clusters: store.listClusters(), nodes: store.listProxmoxNodes(), customers: store.listCustomers(), users: store.listUsers(),
       resources: store.listResources(), isoPolicies: store.listIsoPolicies(),
       emailSettings: store.getEmailSettings(), emailJobs: store.listEmailJobs({ limit: 30 }),
       notificationEvents: store.listNotificationEvents({ limit: 50 }),
-      audit: store.listAudit(null, { all: true, limit: 50 }),
+      maintenanceEvents: store.listMaintenanceEvents({ limit: 100 }),
+      operations: store.getOperationsCenter(),
+      security: demoSafeSecurityCenter(store.getSecurityCenter({ limit: 100 })),
+      audit: demoSafeEventPage(store.listAudit(null, { all: true, limit: 50 })),
     });
+    return true;
+  }
+  if (pathname === "/api/admin/security/policy" && request.method === "PATCH") {
+    if (!requireSecurityActionRate(request, response, session.user.id)) return true;
+    const policy = store.updateSecurityPolicy(await readBody(request), session.user.id);
+    audit(request, session, "admin.security.policy_updated", { detail: policy });
+    sendJson(response, 200, { policy, security: store.getSecurityCenter({ limit: 100 }) });
+    return true;
+  }
+  if (pathname === "/api/admin/maintenance-events" && request.method === "POST") {
+    const input = await readBody(request);
+    const shouldPublish = input.publication !== "draft";
+    if (shouldPublish) {
+      const limit = maintenancePublishLimiter.consume(`${session.user.id}:${clientIp(request)}`);
+      if (!limit.allowed) {
+        sendJson(response, 429, { error: "maintenance_publish_rate_limited" }, { "retry-after": String(limit.retryAfter) });
+        return true;
+      }
+    }
+    const event = store.createMaintenanceEvent(input, { userId: session.user.id });
+    let published = null;
+    let queuedEmails = 0;
+    if (shouldPublish) {
+      published = store.publishMaintenanceEvent(event.id, { userId: session.user.id });
+      queuedEmails = queueMaintenanceEmails(published, { createdBy: session.user.id });
+    }
+    const result = published?.event || event;
+    audit(request, session, published ? "admin.maintenance.published" : "admin.maintenance.draft_created", {
+      detail: {
+        maintenanceId: result.id,
+        kind: result.kind,
+        severity: result.severity,
+        status: result.status,
+        recipientCount: result.recipientCount,
+        queuedEmails,
+      },
+    });
+    sendJson(response, 201, { event: result, queuedEmails });
+    return true;
+  }
+  let maintenanceMatch = pathname.match(/^\/api\/admin\/maintenance-events\/([^/]+)$/);
+  if (maintenanceMatch && request.method === "PATCH") {
+    const event = store.updateMaintenanceEvent(
+      decodeURIComponent(maintenanceMatch[1]),
+      await readBody(request),
+      { userId: session.user.id },
+    );
+    audit(request, session, "admin.maintenance.draft_updated", {
+      detail: { maintenanceId: event.id, kind: event.kind, severity: event.severity },
+    });
+    sendJson(response, 200, { event });
+    return true;
+  }
+  if (maintenanceMatch && request.method === "DELETE") {
+    const id = decodeURIComponent(maintenanceMatch[1]);
+    store.deleteMaintenanceEvent(id);
+    audit(request, session, "admin.maintenance.draft_deleted", { detail: { maintenanceId: id } });
+    sendJson(response, 204, null);
+    return true;
+  }
+  maintenanceMatch = pathname.match(/^\/api\/admin\/maintenance-events\/([^/]+)\/(publish|resolve|cancel)$/);
+  if (maintenanceMatch && request.method === "POST") {
+    const id = decodeURIComponent(maintenanceMatch[1]);
+    const operation = maintenanceMatch[2];
+    let event;
+    let queuedEmails = 0;
+    if (operation === "publish") {
+      const limit = maintenancePublishLimiter.consume(`${session.user.id}:${clientIp(request)}`);
+      if (!limit.allowed) {
+        sendJson(response, 429, { error: "maintenance_publish_rate_limited" }, { "retry-after": String(limit.retryAfter) });
+        return true;
+      }
+      const result = store.publishMaintenanceEvent(id, { userId: session.user.id });
+      event = result.event;
+      queuedEmails = queueMaintenanceEmails(result, { createdBy: session.user.id });
+    } else if (operation === "resolve") {
+      const result = store.resolveMaintenanceEvent(id, { userId: session.user.id });
+      event = result.event;
+      queuedEmails = queueMaintenanceEmails(result, { resolution: true, createdBy: session.user.id });
+    } else {
+      event = store.cancelMaintenanceEvent(id, { userId: session.user.id });
+    }
+    const auditAction = {
+      publish: "admin.maintenance.published",
+      resolve: "admin.maintenance.resolved",
+      cancel: "admin.maintenance.cancelled",
+    }[operation];
+    audit(request, session, auditAction, {
+      detail: {
+        maintenanceId: event.id,
+        kind: event.kind,
+        status: event.status,
+        recipientCount: event.recipientCount,
+        queuedEmails,
+      },
+    });
+    sendJson(response, 200, { event, queuedEmails });
+    return true;
+  }
+  if (pathname === "/api/admin/operations" && request.method === "GET") {
+    reconcileAllOperations();
+    sendJson(response, 200, { operations: store.getOperationsCenter() });
+    return true;
+  }
+  if (pathname === "/api/admin/operations/refresh" && request.method === "POST") {
+    const limit = operationsRefreshLimiter.consume(`${session.user.id}:${clientIp(request)}`);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "operations_refresh_rate_limited" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const results = await syncAllClusters();
+    reconcileAllOperations();
+    const succeeded = results.filter((result) => result.success).length;
+    audit(request, session, "admin.operations.refreshed", {
+      detail: { clusters: results.length, succeeded, failed: results.length - succeeded },
+    });
+    sendJson(response, 200, { results, operations: store.getOperationsCenter() });
+    return true;
+  }
+  const operationsIncidentMatch = pathname.match(/^\/api\/admin\/operations\/incidents\/([^/]+)\/acknowledge$/);
+  if (operationsIncidentMatch && request.method === "POST") {
+    const incident = store.acknowledgeOperationsIncident(
+      decodeURIComponent(operationsIncidentMatch[1]),
+      session.user.id,
+    );
+    audit(request, session, "admin.operations.incident_acknowledged", {
+      detail: {
+        incidentId: incident.id,
+        clusterId: incident.clusterId,
+        incidentType: incident.type,
+        severity: incident.severity,
+      },
+    });
+    sendJson(response, 200, { incident });
     return true;
   }
   if (pathname === "/api/admin/email/settings" && request.method === "PUT") {
@@ -979,8 +1338,16 @@ async function routeAdmin(request, response, pathname) {
   }
   match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/password$/);
   if (match && request.method === "POST") {
-    await store.updatePassword(decodeURIComponent(match[1]), (await readBody(request)).password);
-    audit(request, session, "admin.user.password_reset", { detail: { targetUserId: decodeURIComponent(match[1]) } });
+    const targetUserId = decodeURIComponent(match[1]);
+    const target = store.getUserForAuth(targetUserId);
+    if (!target) { sendJson(response, 404, { error: "user_not_found" }); return true; }
+    await store.updatePassword(targetUserId, (await readBody(request)).password);
+    audit(request, session, "admin.user.password_reset", { customerId: target.customer_id, detail: { targetUserId } });
+    queueSecurityNotice(target, {
+      title: "Your password was reset",
+      message: "An administrator reset your Nimbus Direct password and signed out every active session. Contact your infrastructure provider if this was unexpected.",
+      ipAddress: clientIp(request),
+    });
     sendJson(response, 204, null); return true;
   }
   match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/mfa\/reset$/);
@@ -1120,21 +1487,47 @@ async function routeCustomer(request, response, pathname) {
   const session = requireSession(request, response);
   if (!session) return true;
   const user = session.user;
+  const enrollmentRequired = Boolean(user.mfaEnrollmentRequired);
+  const enrollmentPath = pathname === "/api/v1/security/mfa/setup" || pathname === "/api/v1/security/mfa/confirm";
+  if (enrollmentRequired && pathname !== "/api/v1/dashboard" && !enrollmentPath) {
+    sendJson(response, 403, { error: "mfa_enrollment_required" });
+    return true;
+  }
 
   if (pathname === "/api/v1/dashboard" && request.method === "GET") {
-    const resources = user.role === "admin"
-      ? store.listResources()
-      : store.listResources({ customerId: user.customerId }).filter((resource) => resource.permissions.includes("view_status"));
+    const resources = enrollmentRequired
+      ? []
+      : user.role === "admin"
+        ? store.listResources()
+        : store.listResources({ customerId: user.customerId }).filter((resource) => resource.permissions.includes("view_status"));
+    const accountSessions = store.listSessions(user.id, { currentIdHash: session.idHash });
+    const visibleSessions = config.demoReadOnly
+      ? accountSessions.filter((entry) => entry.current).map((entry) => ({
+          ...entry,
+          ipAddress: "Hidden in public demo",
+          userAgent: "Public demo browser",
+        }))
+      : accountSessions;
     sendJson(response, 200, {
-      mode: config.allowDemoData ? "demo" : "live", user, summary: summarize(resources), resources,
-      activity: store.listAudit(user.customerId, { limit: 10 }),
-      tasks: store.listTasks(user, { limit: 12 }),
-      notifications: store.listNotifications(user.id, { limit: 8 }),
+      mode: config.demoReadOnly ? "demo_read_only" : config.allowDemoData ? "demo" : "live",
+      demoReadOnly: config.demoReadOnly,
+      user, summary: summarize(resources), resources,
+      activity: enrollmentRequired
+        ? { items: [], total: 0, limit: 10, offset: 0 }
+        : demoSafeEventPage(store.listAudit(user.customerId, { limit: 10, customerVisible: user.role !== "admin" })),
+      tasks: enrollmentRequired ? [] : store.listTasks(user, { limit: 12 }),
+      notifications: enrollmentRequired ? { items: [], unread: 0, total: 0 } : store.listNotifications(user.id, { limit: 8 }),
+      maintenance: enrollmentRequired ? { items: [], unread: 0, total: 0 } : store.listMaintenanceForUser(user.id, { limit: 8 }),
+      support: enrollmentRequired ? { items: [], unread: 0, total: 0 } : store.listSupportTickets(user, { limit: 6 }),
       notificationPreferences: store.getNotificationPreferences(user.id),
       emailDeliveryAvailable: store.getEmailSettings().enabled,
       security: {
-        mfa: store.getMfaStatus(user.id),
-        sessions: store.listSessions(user.id, { currentIdHash: session.idHash }),
+        mfa: {
+          ...store.getMfaStatus(user.id),
+          requiredByPolicy: store.isMfaRequiredForUser(user),
+          enrollmentRequired,
+        },
+        sessions: visibleSessions,
       },
       capabilities: {
         directAssignments: true,
@@ -1142,11 +1535,222 @@ async function routeCustomer(request, response, pathname) {
         consoleTickets: true,
         customerIsoMedia: true,
         notificationCenter: true,
+        maintenanceCenter: true,
+        supportTicketCenter: true,
         twoFactorAuthentication: true,
         customerInvitations: true,
         passwordRecovery: true,
+        demoReadOnly: config.demoReadOnly,
       },
     });
+    return true;
+  }
+
+  if (pathname === "/api/v1/network" && request.method === "GET") {
+    const resources = user.role === "admin"
+      ? store.listResources()
+      : store.listResources({ customerId: user.customerId }).filter((resource) => resource.permissions.includes("view_status"));
+    const networks = {};
+    const clusters = new Map();
+    for (const resource of resources) {
+      if (isDemo(resource)) {
+        networks[resource.id] = {
+          status: resource.status === "running" ? "available" : "stopped",
+          source: "demo",
+          primaryIp: resource.ip,
+          addresses: resource.ip ? [{ address: resource.ip, family: "ipv4", interface: "eth0", prefix: null }] : [],
+          interfaces: [],
+        };
+        continue;
+      }
+      const clusterResources = clusters.get(resource.clusterId) || [];
+      clusterResources.push(resource);
+      clusters.set(resource.clusterId, clusterResources);
+    }
+    await Promise.all([...clusters.values()].map(async (clusterResources) => {
+      const discovered = await clientFor(clusterResources[0]).getNetworks(clusterResources);
+      Object.assign(networks, discovered);
+    }));
+    sendJson(response, 200, { networks, collectedAt: Date.now() });
+    return true;
+  }
+
+  if (pathname === "/api/v1/support/tickets" && request.method === "GET") {
+    const search = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams;
+    sendJson(response, 200, {
+      tickets: store.listSupportTickets(user, {
+        limit: search.get("limit") || 100,
+        offset: search.get("offset") || 0,
+        status: search.get("status") || "",
+        priority: search.get("priority") || "",
+        search: search.get("search") || "",
+      }),
+      assignees: user.role === "admin" ? store.listSupportAssignees() : [],
+    });
+    return true;
+  }
+  if (pathname === "/api/v1/support/tickets" && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    if (user.role !== "customer") {
+      sendJson(response, 403, { error: "customer_required" });
+      return true;
+    }
+    const limit = supportTicketCreateLimiter.consume(`${user.id}:${clientIp(request)}`);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "support_ticket_rate_limited" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const result = store.createSupportTicket(await readBody(request), {
+      customerId: user.customerId,
+      userId: user.id,
+    });
+    const queuedEmails = queueSupportEmails({
+      ticket: result.ticket,
+      message: result.messages[0]?.body,
+      actor: user,
+      audience: "admin",
+      eventType: "created",
+      createdBy: user.id,
+    });
+    audit(request, session, "support.ticket.created", {
+      customerId: result.ticket.customerId,
+      resourceId: result.ticket.resourceId,
+      detail: {
+        ticketId: result.ticket.id,
+        reference: result.ticket.reference,
+        category: result.ticket.category,
+        priority: result.ticket.priority,
+        queuedEmails,
+      },
+    });
+    sendJson(response, 201, { ...result, queuedEmails });
+    return true;
+  }
+  let supportTicketMatch = pathname.match(/^\/api\/v1\/support\/tickets\/([^/]+)$/);
+  if (supportTicketMatch && request.method === "GET") {
+    const id = decodeURIComponent(supportTicketMatch[1]);
+    sendJson(response, 200, {
+      ...store.getSupportTicket(id, user),
+      assignees: user.role === "admin" ? store.listSupportAssignees() : [],
+    });
+    return true;
+  }
+  if (supportTicketMatch && request.method === "PATCH") {
+    if (!requireCsrf(request, response, session)) return true;
+    if (user.role !== "admin") {
+      sendJson(response, 403, { error: "admin_required" });
+      return true;
+    }
+    const id = decodeURIComponent(supportTicketMatch[1]);
+    const previous = store.getSupportTicket(id, user).ticket;
+    const ticket = store.updateSupportTicket(id, await readBody(request), user);
+    let queuedEmails = 0;
+    if (previous.status !== ticket.status) {
+      queuedEmails = queueSupportEmails({
+        ticket,
+        message: `The ticket status changed from ${previous.status.replaceAll("_", " ")} to ${ticket.status.replaceAll("_", " ")}.`,
+        actor: user,
+        audience: "customer",
+        eventType: "status",
+        createdBy: user.id,
+      });
+    }
+    audit(request, session, "admin.support.ticket_updated", {
+      customerId: ticket.customerId,
+      resourceId: ticket.resourceId,
+      detail: {
+        ticketId: ticket.id,
+        reference: ticket.reference,
+        status: ticket.status,
+        priority: ticket.priority,
+        assignedTo: ticket.assignedTo,
+        queuedEmails,
+      },
+    });
+    sendJson(response, 200, { ticket, queuedEmails });
+    return true;
+  }
+  supportTicketMatch = pathname.match(/^\/api\/v1\/support\/tickets\/([^/]+)\/messages$/);
+  if (supportTicketMatch && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    const limit = supportTicketMessageLimiter.consume(`${user.id}:${clientIp(request)}`);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "support_message_rate_limited" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const id = decodeURIComponent(supportTicketMatch[1]);
+    const input = await readBody(request);
+    const internal = user.role === "admin" && Boolean(input.internal);
+    const result = store.addSupportTicketMessage(id, input, user, { internal });
+    const queuedEmails = internal ? 0 : queueSupportEmails({
+      ticket: result.ticket,
+      message: result.message.body,
+      actor: user,
+      audience: user.role === "admin" ? "customer" : "admin",
+      eventType: "reply",
+      createdBy: user.id,
+    });
+    audit(request, session, internal ? "admin.support.internal_note_added" : "support.ticket.replied", {
+      customerId: result.ticket.customerId,
+      resourceId: result.ticket.resourceId,
+      detail: {
+        ticketId: result.ticket.id,
+        reference: result.ticket.reference,
+        messageId: result.message.id,
+        internal,
+        queuedEmails,
+      },
+    });
+    sendJson(response, 201, { ...result, queuedEmails });
+    return true;
+  }
+  supportTicketMatch = pathname.match(/^\/api\/v1\/support\/tickets\/([^/]+)\/(read|close|reopen)$/);
+  if (supportTicketMatch && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    const id = decodeURIComponent(supportTicketMatch[1]);
+    const operation = supportTicketMatch[2];
+    if (operation === "read") {
+      store.markSupportTicketRead(id, user);
+      sendJson(response, 204, null);
+      return true;
+    }
+    const ticket = operation === "close"
+      ? store.closeSupportTicket(id, user)
+      : store.reopenSupportTicket(id, user);
+    const queuedEmails = queueSupportEmails({
+      ticket,
+      message: operation === "close"
+        ? "The customer marked this support request as closed."
+        : "The support request was reopened and is waiting for support.",
+      actor: user,
+      audience: user.role === "admin" ? "customer" : "admin",
+      eventType: "status",
+      createdBy: user.id,
+    });
+    audit(request, session, operation === "close" ? "support.ticket.closed" : "support.ticket.reopened", {
+      customerId: ticket.customerId,
+      resourceId: ticket.resourceId,
+      detail: { ticketId: ticket.id, reference: ticket.reference, queuedEmails },
+    });
+    sendJson(response, 200, { ticket, queuedEmails });
+    return true;
+  }
+
+  if (pathname === "/api/v1/maintenance" && request.method === "GET") {
+    const search = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams;
+    sendJson(response, 200, {
+      maintenance: store.listMaintenanceForUser(user.id, {
+        limit: search.get("limit") || 100,
+        offset: search.get("offset") || 0,
+      }),
+    });
+    return true;
+  }
+  let maintenanceDeliveryMatch = pathname.match(/^\/api\/v1\/maintenance\/([^/]+)\/read$/);
+  if (maintenanceDeliveryMatch && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    store.markMaintenanceRead(decodeURIComponent(maintenanceDeliveryMatch[1]), user.id);
+    sendJson(response, 204, null);
     return true;
   }
 
@@ -1843,6 +2447,10 @@ async function routeCustomer(request, response, pathname) {
   }
   if (pathname === "/api/v1/security/mfa/disable" && request.method === "POST") {
     if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    if (store.isMfaRequiredForUser(user)) {
+      sendJson(response, 409, { error: "mfa_required_by_policy" });
+      return true;
+    }
     const { currentPassword, code } = await readBody(request);
     const authUser = await requireCurrentPassword(response, user.id, currentPassword);
     if (!authUser) return true;
@@ -1921,6 +2529,11 @@ async function routeCustomer(request, response, pathname) {
     }
     await store.updatePassword(session.user.id, password);
     audit(request, session, "password.updated");
+    queueSecurityNotice(authUser, {
+      title: "Your password was changed",
+      message: "Your Nimbus Direct password was changed and every active session was signed out.",
+      ipAddress: clientIp(request),
+    });
     sendJson(response, 204, null, { "set-cookie": sessionCookie("", { secure: config.secureCookies, maxAge: 0, name: cookieName }) }); return true;
   }
 
@@ -1931,6 +2544,13 @@ async function routeCustomer(request, response, pathname) {
 async function routeApi(request, response, pathname) {
   if (pathname === "/api/health" && request.method === "GET") { sendJson(response, 200, { ok: true }); return; }
   if (pathname === "/api/ready" && request.method === "GET") { sendJson(response, store.hasUsers() ? 200 : 503, { ready: store.hasUsers() }); return; }
+  if (config.demoReadOnly && !isDemoReadOnlyRequestAllowed(request.method, pathname)) {
+    sendJson(response, 403, {
+      error: "demo_read_only",
+      message: "This public demo is read-only. No changes were made.",
+    });
+    return;
+  }
   if (pathname.startsWith("/api/auth/") && await routeAuth(request, response, pathname)) return;
   if (pathname.startsWith("/api/admin/")) { await routeAdmin(request, response, pathname); return; }
   await routeCustomer(request, response, pathname);
@@ -1985,6 +2605,7 @@ function rejectUpgrade(socket, status = "401 Unauthorized") {
 
 server.on("upgrade", (request, socket, head) => {
   void (async () => {
+    if (config.demoReadOnly) return rejectUpgrade(socket, "403 Forbidden");
     const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
     const match = url.pathname.match(/^\/api\/v1\/console\/ws\/([^/]+)$/);
     if (!match) return rejectUpgrade(socket, "404 Not Found");
@@ -2051,13 +2672,28 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 server.listen(config.port, config.host, () => {
-  log("info", "server_started", { host: config.host, port: config.port, production: config.production, bootstrapped, demo: config.allowDemoData });
+  log("info", "server_started", {
+    host: config.host,
+    port: config.port,
+    production: config.production,
+    bootstrapped,
+    demo: config.allowDemoData,
+    demoReadOnly: config.demoReadOnly,
+  });
 });
 
-email.start();
-const syncTimer = setInterval(syncAllClusters, config.syncIntervalMs);
-syncTimer.unref();
+if (!config.demoReadOnly) email.start();
+const syncTimer = config.demoReadOnly ? null : setInterval(syncAllClusters, config.syncIntervalMs);
+syncTimer?.unref();
+const maintenanceTimer = config.demoReadOnly ? null : setInterval(() => store.advanceMaintenanceEvents(), 60_000);
+maintenanceTimer?.unref();
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => server.close(() => { email.stop(); clearInterval(syncTimer); store.close(); process.exit(0); }));
+  process.on(signal, () => server.close(() => {
+    if (!config.demoReadOnly) email.stop();
+    if (syncTimer) clearInterval(syncTimer);
+    if (maintenanceTimer) clearInterval(maintenanceTimer);
+    store.close();
+    process.exit(0);
+  }));
 }

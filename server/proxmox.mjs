@@ -6,6 +6,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { isIP } from "node:net";
 
 export class ProxmoxError extends Error {
   constructor(message, { code = "proxmox_request_failed", status = 502, upstreamStatus = null } = {}) {
@@ -27,8 +28,38 @@ function round(value, precision = 1) {
   return Math.round(finite(value) * scale) / scale;
 }
 
+function percent(used, total) {
+  const capacity = finite(total);
+  return capacity > 0 ? round(Math.max(0, finite(used)) / capacity * 100, 1) : 0;
+}
+
 function parseStorageList(value) {
   return [...new Set(String(value || "").split(",").map((entry) => entry.trim()).filter(Boolean))];
+}
+
+function normalizeOperationsStorage(storage, nodeOverride = null) {
+  const node = String(nodeOverride || storage?.node || "");
+  const storageId = String(storage?.storage || "");
+  if (!node || !storageId) return null;
+  const usedBytes = finite(storage.disk ?? storage.used);
+  const totalBytes = finite(storage.maxdisk ?? storage.total);
+  const availableBytes = Math.max(0, finite(storage.avail, totalBytes - usedBytes));
+  return {
+    node,
+    storageId,
+    status: String(storage.status || (storage.enabled === 0 ? "disabled" : storage.active === 0 ? "inactive" : "available")).toLowerCase(),
+    type: String(storage.plugintype || storage.type || "unknown"),
+    shared: Boolean(storage.shared),
+    content: parseStorageList(storage.content),
+    usedBytes,
+    totalBytes,
+    availableBytes,
+    usagePercent: percent(usedBytes, totalBytes),
+  };
+}
+
+function uniqueOperationsStorages(storages) {
+  return [...new Map(storages.filter(Boolean).map((storage) => [`${storage.node}\0${storage.storageId}`, storage])).values()];
 }
 
 function safeIsoFilename(value) {
@@ -72,7 +103,13 @@ async function mapLimit(items, limit, mapper) {
 
 function usableAddress(address) {
   const value = String(address || "").split("%")[0];
-  return value && value !== "0.0.0.0" && value !== "127.0.0.1" && value !== "::" && value !== "::1" && !value.startsWith("169.254.") && !value.toLowerCase().startsWith("fe80:");
+  return isIP(value) !== 0
+    && value !== "0.0.0.0"
+    && value !== "127.0.0.1"
+    && value !== "::"
+    && value !== "::1"
+    && !value.startsWith("169.254.")
+    && !value.toLowerCase().startsWith("fe80:");
 }
 
 function normalizeAddresses(entries = []) {
@@ -106,15 +143,49 @@ function normalizeInterface(entry = {}) {
   };
 }
 
-function summarizeNetwork(interfaces, status = "available") {
+function summarizeNetwork(interfaces, status = "available", source = "guest") {
   const safeInterfaces = interfaces.map(normalizeInterface).filter((entry) => entry.name !== "lo" || entry.addresses.length);
   const addresses = safeInterfaces.flatMap((entry) => entry.addresses.map((address) => ({ ...address, interface: entry.name })));
   return {
     status,
+    source,
     primaryIp: addresses.find((entry) => entry.family === "ipv4")?.address || addresses[0]?.address || null,
     addresses,
     interfaces: safeInterfaces,
   };
+}
+
+function propertyMap(value) {
+  return Object.fromEntries(String(value || "").split(",").map((entry) => {
+    const separator = entry.indexOf("=");
+    return separator > 0
+      ? [entry.slice(0, separator).trim(), entry.slice(separator + 1).trim()]
+      : [entry.trim(), ""];
+  }).filter(([key]) => key));
+}
+
+function configuredNetwork(config = {}, type = "qemu", status = "configured") {
+  const interfaces = Object.entries(config).flatMap(([key, value]) => {
+    if (type === "qemu" && /^ipconfig\d+$/.test(key)) {
+      const properties = propertyMap(value);
+      return [{
+        name: key.replace(/^ipconfig/, "net"),
+        inet: properties.ip,
+        inet6: properties.ip6,
+      }];
+    }
+    if (type === "lxc" && /^net\d+$/.test(key)) {
+      const properties = propertyMap(value);
+      return [{
+        name: properties.name || key,
+        hwaddr: properties.hwaddr,
+        inet: properties.ip,
+        inet6: properties.ip6,
+      }];
+    }
+    return [];
+  });
+  return summarizeNetwork(interfaces, status, "configuration");
 }
 
 function safeConfig(config = {}) {
@@ -231,6 +302,86 @@ export class ProxmoxClient {
     }));
   }
 
+  async getOperationsMetrics() {
+    const [nodeResult, clusterStorageResult] = await Promise.allSettled([
+      this.request("/cluster/resources?type=node"),
+      this.request("/cluster/resources?type=storage"),
+    ]);
+    const errors = {};
+    let nodes = null;
+    let storages = null;
+    let storagesAuthoritative = false;
+
+    if (nodeResult.status === "fulfilled") {
+      if (!Array.isArray(nodeResult.value)) {
+        errors.nodes = "proxmox_invalid_response";
+      } else {
+        nodes = nodeResult.value.filter((node) => node?.node).map((node) => {
+          const memoryUsedBytes = finite(node.mem);
+          const memoryTotalBytes = finite(node.maxmem);
+          const rootUsedBytes = finite(node.disk);
+          const rootTotalBytes = finite(node.maxdisk);
+          return {
+            node: String(node.node),
+            status: String(node.status || "unknown").toLowerCase(),
+            cpuPercent: round(finite(node.cpu) * 100, 1),
+            cpuCores: round(finite(node.maxcpu), 1),
+            memoryUsedBytes,
+            memoryTotalBytes,
+            memoryPercent: percent(memoryUsedBytes, memoryTotalBytes),
+            rootUsedBytes,
+            rootTotalBytes,
+            rootPercent: percent(rootUsedBytes, rootTotalBytes),
+            uptime: finite(node.uptime),
+          };
+        });
+      }
+    } else {
+      errors.nodes = nodeResult.reason?.code || "proxmox_request_failed";
+    }
+
+    if (nodes?.length) {
+      const nodeStorageResults = await mapLimit(nodes, 4, async ({ node }) => {
+        try {
+          const value = await this.request(`/nodes/${encodeURIComponent(node)}/storage?enabled=1`);
+          return Array.isArray(value)
+            ? { ok: true, node, value }
+            : { ok: false, code: "proxmox_invalid_response" };
+        } catch (error) {
+          return { ok: false, code: error?.code || "proxmox_request_failed" };
+        }
+      });
+      if (nodeStorageResults.every((result) => result.ok)) {
+        storages = uniqueOperationsStorages(nodeStorageResults.flatMap((result) =>
+          result.value.map((storage) => normalizeOperationsStorage(storage, result.node))))
+          .filter((storage) => storage.status !== "disabled");
+        storagesAuthoritative = true;
+      }
+    }
+
+    // Older Proxmox releases and narrowly scoped tokens may not allow the
+    // per-node inventory endpoint. The cluster resource list remains a safe
+    // fallback, but it is not preferred because it can omit node-local stores.
+    if (storages === null) {
+      if (clusterStorageResult.status === "fulfilled" && Array.isArray(clusterStorageResult.value)) {
+        storages = uniqueOperationsStorages(clusterStorageResult.value.map((storage) => normalizeOperationsStorage(storage)))
+          .filter((storage) => storage.status !== "disabled");
+      } else if (clusterStorageResult.status === "fulfilled") {
+        errors.storages = "proxmox_invalid_response";
+      } else {
+        errors.storages = clusterStorageResult.reason?.code || "proxmox_request_failed";
+      }
+    }
+
+    return {
+      nodes,
+      storages,
+      storagesAuthoritative,
+      errors,
+      collectedAt: Date.now(),
+    };
+  }
+
   async testConnection() {
     const [version, nodes] = await Promise.all([this.request("/version"), this.request("/nodes")]);
     return {
@@ -241,22 +392,47 @@ export class ProxmoxClient {
   }
 
   async getNetwork(vm) {
-    if (vm.status !== "running") return { status: "stopped", primaryIp: null, addresses: [], interfaces: [] };
+    const configuredFallback = async (status) => {
+      try {
+        const config = await this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/config?current=1`);
+        const network = configuredNetwork(config, vm.type, status);
+        return network.addresses.length ? network : null;
+      } catch {
+        return null;
+      }
+    };
+    if (vm.status !== "running") {
+      return (await configuredFallback("stopped"))
+        || { status: "stopped", source: null, primaryIp: null, addresses: [], interfaces: [] };
+    }
+    let unavailableStatus = vm.type === "lxc" ? "network_unavailable" : "guest_agent_unavailable";
     try {
       if (vm.type === "lxc") {
         const result = await this.request(`/nodes/${encodeURIComponent(vm.node)}/lxc/${vm.vmid}/interfaces`);
-        return summarizeNetwork(Array.isArray(result) ? result : []);
+        const live = summarizeNetwork(Array.isArray(result) ? result : [], "available", "guest");
+        if (live.addresses.length) return live;
+      } else {
+        const result = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/agent/network-get-interfaces`);
+        const live = summarizeNetwork(Array.isArray(result?.result) ? result.result : [], "available", "guest_agent");
+        if (live.addresses.length) return live;
       }
-      const result = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/agent/network-get-interfaces`);
-      return summarizeNetwork(Array.isArray(result?.result) ? result.result : []);
     } catch (error) {
-      if (error.code === "proxmox_permission_denied") return { status: "permission_required", primaryIp: null, addresses: [], interfaces: [] };
-      return { status: "guest_agent_unavailable", primaryIp: null, addresses: [], interfaces: [] };
+      unavailableStatus = error.code === "proxmox_permission_denied"
+        ? "permission_required"
+        : vm.type === "lxc" ? "network_unavailable" : "guest_agent_unavailable";
     }
+    return (await configuredFallback("configured"))
+      || { status: unavailableStatus, source: null, primaryIp: null, addresses: [], interfaces: [] };
   }
 
   async getNetworks(instances) {
-    const rows = await mapLimit(instances, 5, async (vm) => ({ id: vm.id, ...(await this.getNetwork(vm)) }));
+    const rows = await mapLimit(instances, 5, async (vm) => {
+      try {
+        return { id: vm.id, ...(await this.getNetwork(vm)) };
+      } catch {
+        return { id: vm.id, status: "unavailable", source: null, primaryIp: null, addresses: [], interfaces: [] };
+      }
+    });
     return Object.fromEntries(rows.map((entry) => [entry.id, entry]));
   }
 

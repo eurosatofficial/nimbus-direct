@@ -6,6 +6,7 @@ const KEYS = [
   "NODE_ENV", "APP_SECRET", "BOOTSTRAP_CUSTOMER_ID", "BOOTSTRAP_CUSTOMER_NAME",
   "BOOTSTRAP_SUPPORT_EMAIL", "BOOTSTRAP_PLAN_NAME", "PROXMOX_REQUEST_TIMEOUT_MS", "RESOURCE_SYNC_SECONDS",
   "ISO_MAX_UPLOAD_MB", "ISO_UPLOAD_TIMEOUT_MINUTES", "EMAIL_SMTP_TIMEOUT_SECONDS", "EMAIL_QUEUE_INTERVAL_SECONDS",
+  "ALLOW_DEMO_DATA", "DEMO_READ_ONLY",
 ];
 
 function withEnvironment(values, callback) {
@@ -35,6 +36,8 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     ISO_UPLOAD_TIMEOUT_MINUTES: "45",
     EMAIL_SMTP_TIMEOUT_SECONDS: "12",
     EMAIL_QUEUE_INTERVAL_SECONDS: "7",
+    ALLOW_DEMO_DATA: "true",
+    DEMO_READ_ONLY: "true",
   }, () => {
     const config = readConfig();
     assert.equal(config.bootstrap.customerId, "acme");
@@ -46,8 +49,19 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     assert.equal(config.isoUploadTimeoutMs, 45 * 60 * 1000);
     assert.equal(config.emailSmtpTimeoutMs, 12_000);
     assert.equal(config.emailQueueIntervalMs, 7_000);
+    assert.equal(config.allowDemoData, true);
+    assert.equal(config.demoReadOnly, true);
     assert.equal("globalProxmoxTenantId" in config, false);
   });
+});
+
+test("public read-only mode cannot be enabled without simulated demo data", () => {
+  withEnvironment({
+    NODE_ENV: "production",
+    APP_SECRET: "a-production-secret-with-at-least-32-characters",
+    ALLOW_DEMO_DATA: "false",
+    DEMO_READ_ONLY: "true",
+  }, () => assert.throws(() => readConfig(), /DEMO_READ_ONLY requires ALLOW_DEMO_DATA=true/));
 });
 
 test("invalid timeouts and sync intervals fail at startup", () => {

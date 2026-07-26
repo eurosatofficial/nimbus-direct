@@ -38,6 +38,16 @@ export const DEFAULT_ALERT_POLICY = Object.freeze({
   cooldownMinutes: 60,
 });
 
+export const OPERATIONS_THRESHOLDS = Object.freeze({
+  nodeCpuWarning: 90,
+  nodeCpuCritical: 97,
+  nodeMemoryWarning: 90,
+  nodeMemoryCritical: 97,
+  storageWarning: 85,
+  storageCritical: 95,
+  stuckTaskMinutes: 15,
+});
+
 function problem(message, code = "invalid_input", status = 400) {
   return Object.assign(new Error(message), { status, code });
 }
@@ -88,6 +98,16 @@ function publicSession(row, currentIdHash = null) {
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
     expiresAt: row.expires_at,
+  };
+}
+
+function publicSecurityPolicy(row = {}) {
+  return {
+    requireAdminMfa: Boolean(row.require_admin_mfa),
+    requireCustomerMfa: Boolean(row.require_customer_mfa),
+    newLoginEmail: Boolean(row.new_login_email),
+    updatedBy: row.updated_by || null,
+    updatedAt: row.updated_at || null,
   };
 }
 
@@ -190,6 +210,86 @@ function publicNotification(row) {
   };
 }
 
+function publicMaintenanceEvent(row, targets = []) {
+  return row && {
+    id: row.id,
+    kind: row.kind,
+    title: row.title,
+    message: row.message,
+    severity: row.severity,
+    status: row.status,
+    startsAt: row.starts_at,
+    endsAt: row.ends_at || null,
+    notifyEmail: Boolean(row.notify_email),
+    targets,
+    recipientCount: Number(row.recipient_count || 0),
+    publishedAt: row.published_at || null,
+    resolvedAt: row.resolved_at || null,
+    cancelledAt: row.cancelled_at || null,
+    createdBy: row.created_by || null,
+    createdByName: row.created_by_name || null,
+    updatedBy: row.updated_by || null,
+    updatedByName: row.updated_by_name || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function publicMaintenanceDelivery(row, targets = []) {
+  const event = publicMaintenanceEvent(row, targets);
+  return event && {
+    ...event,
+    deliveryId: row.delivery_id,
+    readAt: row.read_at || null,
+    emailJobId: row.email_job_id || null,
+    resolutionEmailJobId: row.resolution_email_job_id || null,
+  };
+}
+
+function publicSupportTicket(row, { includeInternal = true } = {}) {
+  return row && {
+    id: row.id,
+    reference: row.reference,
+    customerId: row.customer_id,
+    customerName: row.customer_name || null,
+    createdBy: row.created_by || null,
+    createdByName: row.created_by_name || "Former user",
+    assignedTo: row.assigned_to || null,
+    assignedToName: row.assigned_to_name || null,
+    resourceId: row.resource_id || null,
+    resourceName: row.resource_name || null,
+    resourceType: row.resource_type || null,
+    vmid: row.vmid === null || row.vmid === undefined ? null : Number(row.vmid),
+    subject: row.subject,
+    category: row.category,
+    priority: row.priority,
+    status: row.status,
+    messageCount: includeInternal
+      ? Number(row.message_count || 0)
+      : Number(row.public_message_count ?? row.message_count ?? 0),
+    internalNoteCount: includeInternal ? Number(row.internal_note_count || 0) : 0,
+    unread: Boolean(row.unread),
+    lastMessageAt: row.last_message_at,
+    resolvedAt: row.resolved_at || null,
+    closedAt: row.closed_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function publicSupportMessage(row) {
+  return row && {
+    id: row.id,
+    ticketId: row.ticket_id,
+    authorUserId: row.author_user_id || null,
+    authorName: row.author_name || (row.author_role === "system" ? "Nimbus Direct" : "Former user"),
+    authorRole: row.author_role,
+    internal: Boolean(row.internal),
+    body: row.body,
+    createdAt: row.created_at,
+  };
+}
+
 function publicTask(row) {
   if (!row) return null;
   const completed = Boolean(row.completed_at) || row.status === "stopped";
@@ -229,6 +329,68 @@ function publicTask(row) {
     createdAt: row.created_at,
     completedAt: row.completed_at || null,
     lastCheckedAt: row.last_checked_at || null,
+  };
+}
+
+function publicOperationsNode(row) {
+  return row && {
+    clusterId: row.cluster_id,
+    clusterName: row.cluster_name || row.cluster_id,
+    node: row.node,
+    status: row.status || "unknown",
+    cpuPercent: Number(row.cpu_percent || 0),
+    cpuCores: Number(row.cpu_cores || 0),
+    memoryUsedBytes: Number(row.memory_used_bytes || 0),
+    memoryTotalBytes: Number(row.memory_total_bytes || 0),
+    memoryPercent: Number(row.memory_percent || 0),
+    rootUsedBytes: Number(row.root_used_bytes || 0),
+    rootTotalBytes: Number(row.root_total_bytes || 0),
+    rootPercent: Number(row.root_percent || 0),
+    uptime: Number(row.uptime || 0),
+    lastSeenAt: row.last_seen_at || null,
+    updatedAt: row.updated_at,
+  };
+}
+
+function publicOperationsStorage(row) {
+  return row && {
+    clusterId: row.cluster_id,
+    clusterName: row.cluster_name || row.cluster_id,
+    node: row.node,
+    storageId: row.storage_id,
+    status: row.status || "unknown",
+    type: row.storage_type || "unknown",
+    shared: Boolean(row.shared),
+    content: String(row.content || "").split(",").filter(Boolean),
+    usedBytes: Number(row.used_bytes || 0),
+    totalBytes: Number(row.total_bytes || 0),
+    availableBytes: Number(row.available_bytes || 0),
+    usagePercent: Number(row.usage_percent || 0),
+    lastSeenAt: row.last_seen_at || null,
+    updatedAt: row.updated_at,
+  };
+}
+
+function publicOperationsIncident(row) {
+  return row && {
+    id: row.id,
+    clusterId: row.cluster_id || null,
+    clusterName: row.cluster_name || row.cluster_id || "Platform",
+    scope: row.scope,
+    sourceType: row.source_type,
+    sourceId: row.source_id,
+    type: row.incident_type,
+    severity: row.severity,
+    status: row.status,
+    title: row.title,
+    message: row.message,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+    acknowledgedAt: row.acknowledged_at || null,
+    acknowledgedBy: row.acknowledged_by || null,
+    acknowledgedByName: row.acknowledged_by_name || null,
+    resolvedAt: row.resolved_at || null,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -386,6 +548,65 @@ function normalizeSnapshotLimit(value) {
   return limit;
 }
 
+function normalizeMaintenanceInput(input = {}, existing = null) {
+  const kind = String(input.kind ?? existing?.kind ?? "maintenance").trim().toLowerCase();
+  const severity = String(input.severity ?? existing?.severity ?? "info").trim().toLowerCase();
+  const title = String(input.title ?? existing?.title ?? "").trim();
+  const message = String(input.message ?? existing?.message ?? "").trim();
+  const startsAt = Number(input.startsAt ?? existing?.starts_at);
+  const rawEndsAt = input.endsAt === undefined ? existing?.ends_at : input.endsAt;
+  const endsAt = rawEndsAt === null || rawEndsAt === "" || rawEndsAt === undefined ? null : Number(rawEndsAt);
+  if (!["maintenance", "incident"].includes(kind)) throw problem("Choose planned maintenance or an incident", "invalid_maintenance_kind");
+  if (!["info", "warning", "critical"].includes(severity)) throw problem("Choose a valid maintenance severity", "invalid_maintenance_severity");
+  if (!title || title.length > 160) throw problem("Maintenance title must contain 1-160 characters", "invalid_maintenance_title");
+  if (!message || message.length > 4000) throw problem("Maintenance message must contain 1-4000 characters", "invalid_maintenance_message");
+  if (!Number.isSafeInteger(startsAt) || startsAt < Date.UTC(2020, 0, 1) || startsAt > Date.UTC(2100, 0, 1)) {
+    throw problem("Choose a valid maintenance start time", "invalid_maintenance_schedule");
+  }
+  if (endsAt !== null && (!Number.isSafeInteger(endsAt) || endsAt <= startsAt)) {
+    throw problem("Maintenance end time must be after its start time", "invalid_maintenance_schedule");
+  }
+  return {
+    kind,
+    severity,
+    title,
+    message,
+    startsAt,
+    endsAt,
+    notifyEmail: input.notifyEmail === undefined ? Boolean(existing?.notify_email) : Boolean(input.notifyEmail),
+  };
+}
+
+function normalizeSupportTicketInput(input = {}) {
+  const subject = String(input.subject || "").trim();
+  const category = String(input.category || "technical").trim().toLowerCase();
+  const priority = String(input.priority || "normal").trim().toLowerCase();
+  const resourceId = String(input.resourceId || "").trim() || null;
+  const message = String(input.message || "").trim();
+  if (subject.length < 3 || subject.length > 160) {
+    throw problem("Ticket subject must contain 3-160 characters", "invalid_ticket_subject");
+  }
+  if (!["technical", "network", "account", "billing", "other"].includes(category)) {
+    throw problem("Choose a valid ticket category", "invalid_ticket_category");
+  }
+  if (!["low", "normal", "high", "urgent"].includes(priority)) {
+    throw problem("Choose a valid ticket priority", "invalid_ticket_priority");
+  }
+  if (resourceId && resourceId.length > 240) throw problem("The selected resource is invalid", "invalid_ticket_resource");
+  if (!message || message.length > 8000) {
+    throw problem("Ticket message must contain 1-8000 characters", "invalid_ticket_message");
+  }
+  return { subject, category, priority, resourceId, message };
+}
+
+function normalizeSupportMessage(value) {
+  const message = String(value || "").trim();
+  if (!message || message.length > 8000) {
+    throw problem("Ticket message must contain 1-8000 characters", "invalid_ticket_message");
+  }
+  return message;
+}
+
 function normalizeAlertPolicy(input = {}, existing = null) {
   const current = existing ? {
     enabled: Boolean(existing.enabled),
@@ -518,6 +739,14 @@ function isoImageSelect(where = "") {
     LEFT JOIN iso_storage_policies p ON p.id=i.storage_policy_id ${where}`;
 }
 
+function operationsIncidentSelect(where = "") {
+  return `SELECT i.*,c.name AS cluster_name,u.display_name AS acknowledged_by_name
+    FROM operations_incidents i
+    LEFT JOIN proxmox_clusters c ON c.id=i.cluster_id
+    LEFT JOIN users u ON u.id=i.acknowledged_by
+    ${where}`;
+}
+
 export async function openStore(dataDir, { appSecret = "" } = {}) {
   const directory = dataDir instanceof URL ? fileURLToPath(dataDir) : resolve(String(dataDir));
   await mkdir(directory, { recursive: true });
@@ -590,6 +819,71 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       PRIMARY KEY(cluster_id,name)
     ) STRICT;
 
+    CREATE TABLE IF NOT EXISTS operations_collection_status (
+      cluster_id TEXT PRIMARY KEY REFERENCES proxmox_clusters(id) ON DELETE CASCADE,
+      nodes_available INTEGER NOT NULL DEFAULT 0,
+      storages_available INTEGER NOT NULL DEFAULT 0,
+      nodes_error TEXT,
+      storages_error TEXT,
+      collected_at INTEGER,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS operations_node_metrics (
+      cluster_id TEXT NOT NULL REFERENCES proxmox_clusters(id) ON DELETE CASCADE,
+      node TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      cpu_percent REAL NOT NULL DEFAULT 0,
+      cpu_cores REAL NOT NULL DEFAULT 0,
+      memory_used_bytes INTEGER NOT NULL DEFAULT 0,
+      memory_total_bytes INTEGER NOT NULL DEFAULT 0,
+      memory_percent REAL NOT NULL DEFAULT 0,
+      root_used_bytes INTEGER NOT NULL DEFAULT 0,
+      root_total_bytes INTEGER NOT NULL DEFAULT 0,
+      root_percent REAL NOT NULL DEFAULT 0,
+      uptime INTEGER NOT NULL DEFAULT 0,
+      last_seen_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(cluster_id,node)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS operations_storage_metrics (
+      cluster_id TEXT NOT NULL REFERENCES proxmox_clusters(id) ON DELETE CASCADE,
+      node TEXT NOT NULL,
+      storage_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      storage_type TEXT NOT NULL DEFAULT 'unknown',
+      shared INTEGER NOT NULL DEFAULT 0,
+      content TEXT NOT NULL DEFAULT '',
+      used_bytes INTEGER NOT NULL DEFAULT 0,
+      total_bytes INTEGER NOT NULL DEFAULT 0,
+      available_bytes INTEGER NOT NULL DEFAULT 0,
+      usage_percent REAL NOT NULL DEFAULT 0,
+      last_seen_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(cluster_id,node,storage_id)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS operations_incidents (
+      id TEXT PRIMARY KEY,
+      dedup_key TEXT NOT NULL UNIQUE,
+      cluster_id TEXT REFERENCES proxmox_clusters(id) ON DELETE CASCADE,
+      scope TEXT NOT NULL,
+      source_type TEXT NOT NULL CHECK(source_type IN ('cluster','node','storage','task','resource')),
+      source_id TEXT NOT NULL,
+      incident_type TEXT NOT NULL,
+      severity TEXT NOT NULL CHECK(severity IN ('warning','critical')),
+      status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','acknowledged','resolved')),
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      first_seen_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      acknowledged_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      acknowledged_at INTEGER,
+      resolved_at INTEGER,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
     CREATE TABLE IF NOT EXISTS resources (
       id TEXT PRIMARY KEY,
       cluster_id TEXT NOT NULL REFERENCES proxmox_clusters(id) ON DELETE CASCADE,
@@ -660,6 +954,16 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       expires_at INTEGER NOT NULL,
       used_at INTEGER,
       created_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS security_policy (
+      id TEXT PRIMARY KEY CHECK(id='default'),
+      require_admin_mfa INTEGER NOT NULL DEFAULT 0,
+      require_customer_mfa INTEGER NOT NULL DEFAULT 0,
+      new_login_email INTEGER NOT NULL DEFAULT 0,
+      updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
     ) STRICT;
 
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -856,6 +1160,79 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       UNIQUE(event_id,user_id)
     ) STRICT;
 
+    CREATE TABLE IF NOT EXISTS maintenance_events (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK(kind IN ('maintenance','incident')),
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      severity TEXT NOT NULL CHECK(severity IN ('info','warning','critical')),
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','scheduled','active','resolved','cancelled')),
+      starts_at INTEGER NOT NULL,
+      ends_at INTEGER,
+      notify_email INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      published_at INTEGER,
+      resolved_at INTEGER,
+      cancelled_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      CHECK(ends_at IS NULL OR ends_at > starts_at)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS maintenance_targets (
+      event_id TEXT NOT NULL REFERENCES maintenance_events(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL CHECK(target_type IN ('all','cluster','node','resource','customer')),
+      target_id TEXT NOT NULL,
+      PRIMARY KEY(event_id,target_type,target_id)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS maintenance_deliveries (
+      id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL REFERENCES maintenance_events(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      email_job_id TEXT REFERENCES email_jobs(id) ON DELETE SET NULL,
+      resolution_email_job_id TEXT REFERENCES email_jobs(id) ON DELETE SET NULL,
+      read_at INTEGER,
+      created_at INTEGER NOT NULL,
+      UNIQUE(event_id,user_id)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS support_tickets (
+      id TEXT PRIMARY KEY,
+      reference TEXT NOT NULL UNIQUE,
+      customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      assigned_to TEXT REFERENCES users(id) ON DELETE SET NULL,
+      resource_id TEXT REFERENCES resources(id) ON DELETE SET NULL,
+      subject TEXT NOT NULL,
+      category TEXT NOT NULL CHECK(category IN ('technical','network','account','billing','other')),
+      priority TEXT NOT NULL CHECK(priority IN ('low','normal','high','urgent')),
+      status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','waiting_support','waiting_customer','resolved','closed')),
+      last_message_at INTEGER NOT NULL,
+      resolved_at INTEGER,
+      closed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS support_ticket_messages (
+      id TEXT PRIMARY KEY,
+      ticket_id TEXT NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+      author_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      author_role TEXT NOT NULL CHECK(author_role IN ('admin','customer','system')),
+      body TEXT NOT NULL,
+      internal INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS support_ticket_reads (
+      ticket_id TEXT NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      last_read_at INTEGER NOT NULL,
+      PRIMARY KEY(ticket_id,user_id)
+    ) STRICT;
+
     CREATE TABLE IF NOT EXISTS console_sessions (
       id_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -874,9 +1251,14 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     CREATE INDEX IF NOT EXISTS account_tokens_user_purpose_idx ON account_tokens(user_id,purpose,created_at DESC);
     CREATE INDEX IF NOT EXISTS account_tokens_expires_idx ON account_tokens(expires_at);
     CREATE INDEX IF NOT EXISTS resources_cluster_idx ON resources(cluster_id,node,type,vmid);
+    CREATE INDEX IF NOT EXISTS operations_nodes_status_idx ON operations_node_metrics(cluster_id,status,updated_at);
+    CREATE INDEX IF NOT EXISTS operations_storage_usage_idx ON operations_storage_metrics(cluster_id,usage_percent DESC);
+    CREATE INDEX IF NOT EXISTS operations_incidents_status_idx ON operations_incidents(status,severity,last_seen_at DESC);
+    CREATE INDEX IF NOT EXISTS operations_incidents_scope_idx ON operations_incidents(scope,status);
     CREATE INDEX IF NOT EXISTS assignments_customer_idx ON customer_resource_assignments(customer_id,status);
     CREATE INDEX IF NOT EXISTS audit_customer_created_idx ON audit_logs(customer_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_logs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS audit_action_created_idx ON audit_logs(action,created_at DESC);
     CREATE INDEX IF NOT EXISTS tasks_customer_created_idx ON api_tasks(customer_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS tasks_resource_created_idx ON api_tasks(resource_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS iso_images_customer_created_idx ON iso_images(customer_id,created_at DESC);
@@ -892,6 +1274,13 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     CREATE INDEX IF NOT EXISTS notification_events_customer_created_idx ON notification_events(customer_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS notification_events_resource_created_idx ON notification_events(resource_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS notifications_user_created_idx ON notifications(user_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS maintenance_events_status_schedule_idx ON maintenance_events(status,starts_at,ends_at);
+    CREATE INDEX IF NOT EXISTS maintenance_targets_lookup_idx ON maintenance_targets(target_type,target_id,event_id);
+    CREATE INDEX IF NOT EXISTS maintenance_deliveries_user_event_idx ON maintenance_deliveries(user_id,event_id);
+    CREATE INDEX IF NOT EXISTS support_tickets_customer_status_idx ON support_tickets(customer_id,status,last_message_at DESC);
+    CREATE INDEX IF NOT EXISTS support_tickets_assignee_status_idx ON support_tickets(assigned_to,status,last_message_at DESC);
+    CREATE INDEX IF NOT EXISTS support_ticket_messages_ticket_created_idx ON support_ticket_messages(ticket_id,created_at);
+    CREATE INDEX IF NOT EXISTS support_ticket_reads_user_idx ON support_ticket_reads(user_id,last_read_at);
     CREATE UNIQUE INDEX IF NOT EXISTS tasks_idempotency_idx ON api_tasks(user_id,idempotency_key) WHERE idempotency_key IS NOT NULL;
   `);
 
@@ -906,6 +1295,10 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   if (!userColumns.has("password_set")) database.exec("ALTER TABLE users ADD COLUMN password_set INTEGER NOT NULL DEFAULT 1");
   const emailSettingsColumns = new Set(database.prepare("PRAGMA table_info(email_settings)").all().map((column) => column.name));
   if (!emailSettingsColumns.has("app_url")) database.exec("ALTER TABLE email_settings ADD COLUMN app_url TEXT NOT NULL DEFAULT ''");
+  const securityPolicyNow = Date.now();
+  database.prepare(`INSERT OR IGNORE INTO security_policy
+    (id,require_admin_mfa,require_customer_mfa,new_login_email,created_at,updated_at)
+    VALUES ('default',0,0,0,?,?)`).run(securityPolicyNow, securityPolicyNow);
 
   const getCustomerRow = database.prepare(customerSelect("WHERE c.id=?"));
   const getUserRow = database.prepare(userSelect("WHERE u.id=?"));
@@ -948,6 +1341,179 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
         now,
       );
     return policy;
+  }
+
+  function normalizeMaintenanceTargets(targets = []) {
+    if (!Array.isArray(targets) || !targets.length || targets.length > 200) {
+      throw problem("Choose at least one maintenance audience", "invalid_maintenance_targets");
+    }
+    const normalized = [];
+    const seen = new Set();
+    for (const target of targets) {
+      const type = String(target?.type || "").trim().toLowerCase();
+      const id = String(target?.id || "").trim();
+      if (!["all", "cluster", "node", "resource", "customer"].includes(type) || !id || id.length > 240) {
+        throw problem("Maintenance audience is invalid", "invalid_maintenance_targets");
+      }
+      const key = `${type}:${id}`;
+      if (!seen.has(key)) normalized.push({ type, id });
+      seen.add(key);
+    }
+    const types = new Set(normalized.map((target) => target.type));
+    if (types.size !== 1 || (types.has("all") && (normalized.length !== 1 || normalized[0].id !== "*"))) {
+      throw problem("Use one maintenance audience type per notice", "invalid_maintenance_targets");
+    }
+    for (const target of normalized) {
+      const exists = target.type === "all"
+        ? true
+        : target.type === "cluster"
+          ? Boolean(database.prepare("SELECT 1 FROM proxmox_clusters WHERE id=?").get(target.id))
+          : target.type === "node"
+            ? Boolean(database.prepare("SELECT 1 FROM proxmox_nodes WHERE cluster_id || ':' || name=?").get(target.id))
+            : target.type === "resource"
+              ? Boolean(database.prepare("SELECT 1 FROM resources WHERE id=?").get(target.id))
+              : Boolean(database.prepare("SELECT 1 FROM customers WHERE id=?").get(target.id));
+      if (!exists) throw problem("A selected maintenance target no longer exists", "maintenance_target_not_found", 404);
+    }
+    return normalized;
+  }
+
+  function maintenanceTargets(eventId) {
+    const rows = database.prepare("SELECT target_type,target_id FROM maintenance_targets WHERE event_id=? ORDER BY target_type,target_id").all(eventId);
+    return rows.map((row) => {
+      let label = row.target_id;
+      if (row.target_type === "all") label = "All customers";
+      if (row.target_type === "cluster") {
+        label = database.prepare("SELECT name FROM proxmox_clusters WHERE id=?").get(row.target_id)?.name || row.target_id;
+      }
+      if (row.target_type === "customer") {
+        label = database.prepare("SELECT name FROM customers WHERE id=?").get(row.target_id)?.name || row.target_id;
+      }
+      if (row.target_type === "resource") {
+        const resource = database.prepare("SELECT name,type,vmid FROM resources WHERE id=?").get(row.target_id);
+        label = resource ? `${resource.name} · ${String(resource.type).toUpperCase()} ${resource.vmid}` : row.target_id;
+      }
+      if (row.target_type === "node") {
+        const node = database.prepare(`SELECT n.name,c.name AS cluster_name FROM proxmox_nodes n
+          JOIN proxmox_clusters c ON c.id=n.cluster_id WHERE n.cluster_id || ':' || n.name=?`).get(row.target_id);
+        label = node ? `${node.name} · ${node.cluster_name}` : row.target_id;
+      }
+      return { type: row.target_type, id: row.target_id, label };
+    });
+  }
+
+  function maintenanceEventRow(id) {
+    return database.prepare(`SELECT e.*,
+      creator.display_name AS created_by_name,updater.display_name AS updated_by_name,
+      (SELECT COUNT(*) FROM maintenance_deliveries d WHERE d.event_id=e.id) AS recipient_count
+      FROM maintenance_events e
+      LEFT JOIN users creator ON creator.id=e.created_by
+      LEFT JOIN users updater ON updater.id=e.updated_by
+      WHERE e.id=?`).get(id);
+  }
+
+  function maintenanceRecipientsForTargets(targets) {
+    let customerIds = null;
+    const type = targets[0]?.type;
+    const ids = targets.map((target) => target.id);
+    if (type !== "all") {
+      const selectedCustomers = new Set();
+      const placeholders = ids.map(() => "?").join(",");
+      if (type === "customer") {
+        for (const id of ids) selectedCustomers.add(id);
+      } else if (type === "cluster") {
+        for (const row of database.prepare(`SELECT DISTINCT a.customer_id FROM customer_resource_assignments a
+          JOIN resources r ON r.id=a.resource_id
+          WHERE a.status='active' AND r.cluster_id IN (${placeholders})`).all(...ids)) selectedCustomers.add(row.customer_id);
+      } else if (type === "resource") {
+        for (const row of database.prepare(`SELECT DISTINCT customer_id FROM customer_resource_assignments
+          WHERE status='active' AND resource_id IN (${placeholders})`).all(...ids)) selectedCustomers.add(row.customer_id);
+      } else if (type === "node") {
+        for (const row of database.prepare(`SELECT DISTINCT a.customer_id FROM customer_resource_assignments a
+          JOIN resources r ON r.id=a.resource_id
+          WHERE a.status='active' AND (r.cluster_id || ':' || r.node) IN (${placeholders})`).all(...ids)) selectedCustomers.add(row.customer_id);
+      }
+      customerIds = [...selectedCustomers];
+      if (!customerIds.length) return [];
+    }
+    const customerFilter = customerIds
+      ? `AND u.customer_id IN (${customerIds.map(() => "?").join(",")})`
+      : "";
+    return database.prepare(`SELECT u.id,u.customer_id,u.email,u.display_name,
+      COALESCE(p.email_enabled,0) AS email_enabled,
+      COALESCE(p.infrastructure_alerts,1) AS infrastructure_alerts,
+      COALESCE(p.resolution_alerts,1) AS resolution_alerts
+      FROM users u JOIN customers c ON c.id=u.customer_id
+      LEFT JOIN notification_preferences p ON p.user_id=u.id
+      WHERE u.role='customer' AND u.status='active' AND c.status='active' ${customerFilter}
+      ORDER BY u.id`).all(...(customerIds || [])).map((row) => ({
+      id: row.id,
+      customerId: row.customer_id,
+      email: row.email,
+      displayName: row.display_name,
+      emailEnabled: Boolean(row.email_enabled),
+      infrastructureAlerts: Boolean(row.infrastructure_alerts),
+      resolutionAlerts: Boolean(row.resolution_alerts),
+    }));
+  }
+
+  function maintenanceDeliveryRecipients(eventId) {
+    return database.prepare(`SELECT d.id AS delivery_id,u.id,u.customer_id,u.email,u.display_name,
+      COALESCE(p.email_enabled,0) AS email_enabled,
+      COALESCE(p.infrastructure_alerts,1) AS infrastructure_alerts,
+      COALESCE(p.resolution_alerts,1) AS resolution_alerts
+      FROM maintenance_deliveries d JOIN users u ON u.id=d.user_id
+      LEFT JOIN notification_preferences p ON p.user_id=u.id
+      WHERE d.event_id=? AND u.role='customer' AND u.status='active'
+      ORDER BY u.id`).all(eventId).map((row) => ({
+      deliveryId: row.delivery_id,
+      id: row.id,
+      customerId: row.customer_id,
+      email: row.email,
+      displayName: row.display_name,
+      emailEnabled: Boolean(row.email_enabled),
+      infrastructureAlerts: Boolean(row.infrastructure_alerts),
+      resolutionAlerts: Boolean(row.resolution_alerts),
+    }));
+  }
+
+  function supportTicketRow(id, userId = null) {
+    return database.prepare(`SELECT t.*,c.name AS customer_name,
+      creator.display_name AS created_by_name,assignee.display_name AS assigned_to_name,
+      r.name AS resource_name,r.type AS resource_type,r.vmid,
+      (SELECT COUNT(*) FROM support_ticket_messages m WHERE m.ticket_id=t.id) AS message_count,
+      (SELECT COUNT(*) FROM support_ticket_messages m WHERE m.ticket_id=t.id AND m.internal=0) AS public_message_count,
+      (SELECT COUNT(*) FROM support_ticket_messages m WHERE m.ticket_id=t.id AND m.internal=1) AS internal_note_count,
+      CASE WHEN t.last_message_at>COALESCE(rd.last_read_at,0) THEN 1 ELSE 0 END AS unread
+      FROM support_tickets t
+      JOIN customers c ON c.id=t.customer_id
+      LEFT JOIN users creator ON creator.id=t.created_by
+      LEFT JOIN users assignee ON assignee.id=t.assigned_to
+      LEFT JOIN resources r ON r.id=t.resource_id
+      LEFT JOIN support_ticket_reads rd ON rd.ticket_id=t.id AND rd.user_id=?
+      WHERE t.id=?`).get(userId, id);
+  }
+
+  function requireSupportTicket(id, scope, userId = scope?.id || null) {
+    const row = supportTicketRow(id, userId);
+    if (!row || (scope?.role !== "admin" && row.customer_id !== scope?.customerId)) {
+      throw problem("Support ticket does not exist", "support_ticket_not_found", 404);
+    }
+    return row;
+  }
+
+  function supportTicketReference(id, now) {
+    const date = new Date(now).toISOString().slice(0, 10).replaceAll("-", "");
+    const suffix = String(id).replace(/[^A-Za-z0-9]/g, "").slice(0, 6).toUpperCase();
+    return `ND-${date}-${suffix}`;
+  }
+
+  function supportTicketMessages(ticketId, { includeInternal = false } = {}) {
+    return database.prepare(`SELECT m.*,u.display_name AS author_name
+      FROM support_ticket_messages m
+      LEFT JOIN users u ON u.id=m.author_user_id
+      WHERE m.ticket_id=? ${includeInternal ? "" : "AND m.internal=0"}
+      ORDER BY m.created_at,m.id`).all(ticketId).map(publicSupportMessage);
   }
 
   return {
@@ -1089,6 +1655,15 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       return publicCluster(getClusterRow.get(id));
     },
     listClusters: () => database.prepare(clusterSelect("ORDER BY c.name")).all().map(publicCluster),
+    listProxmoxNodes: () => database.prepare(`SELECT n.cluster_id,n.name,n.status,n.last_seen_at,c.name AS cluster_name
+      FROM proxmox_nodes n JOIN proxmox_clusters c ON c.id=n.cluster_id
+      ORDER BY c.name,n.name`).all().map((row) => ({
+      clusterId: row.cluster_id,
+      clusterName: row.cluster_name,
+      node: row.name,
+      status: row.status,
+      lastSeenAt: row.last_seen_at || null,
+    })),
     getCluster: (id) => publicCluster(getClusterRow.get(id)),
     getClusterConnection(id) {
       const row = database.prepare(`SELECT c.id,c.name,c.api_url,c.status,pc.token_id,pc.token_secret_encrypted
@@ -1160,6 +1735,444 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
         database.exec("COMMIT");
       } catch (error) { database.exec("ROLLBACK"); throw error; }
       return this.listResources({ clusterId });
+    },
+
+    saveOperationsSnapshot(clusterId, snapshot = {}) {
+      if (!database.prepare("SELECT 1 FROM proxmox_clusters WHERE id=?").get(clusterId)) {
+        throw problem("Cluster does not exist", "cluster_not_found", 404);
+      }
+      const now = Number(snapshot.collectedAt) || Date.now();
+      const nodesAvailable = Array.isArray(snapshot.nodes);
+      const storagesAvailable = Array.isArray(snapshot.storages);
+      const storagesAuthoritative = storagesAvailable && snapshot.storagesAuthoritative === true;
+      const cleanError = (value) => value ? String(value).replace(/[^a-z0-9_.-]/gi, "_").slice(0, 100) : null;
+      const integer = (value) => Math.max(0, Math.round(Number(value) || 0));
+      const decimal = (value) => Math.max(0, Math.round((Number(value) || 0) * 10) / 10);
+      const status = (value) => String(value || "unknown").toLowerCase().slice(0, 40);
+      const nodesError = nodesAvailable ? null : cleanError(snapshot.errors?.nodes || "telemetry_unavailable");
+      const storagesError = storagesAvailable ? null : cleanError(snapshot.errors?.storages || "telemetry_unavailable");
+      const upsertCollection = database.prepare(`INSERT INTO operations_collection_status
+        (cluster_id,nodes_available,storages_available,nodes_error,storages_error,collected_at,updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(cluster_id) DO UPDATE SET
+          nodes_available=excluded.nodes_available,storages_available=excluded.storages_available,
+          nodes_error=excluded.nodes_error,storages_error=excluded.storages_error,
+          collected_at=excluded.collected_at,updated_at=excluded.updated_at`);
+      const upsertNode = database.prepare(`INSERT INTO operations_node_metrics
+        (cluster_id,node,status,cpu_percent,cpu_cores,memory_used_bytes,memory_total_bytes,memory_percent,
+         root_used_bytes,root_total_bytes,root_percent,uptime,last_seen_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(cluster_id,node) DO UPDATE SET
+          status=excluded.status,cpu_percent=excluded.cpu_percent,cpu_cores=excluded.cpu_cores,
+          memory_used_bytes=excluded.memory_used_bytes,memory_total_bytes=excluded.memory_total_bytes,
+          memory_percent=excluded.memory_percent,root_used_bytes=excluded.root_used_bytes,
+          root_total_bytes=excluded.root_total_bytes,root_percent=excluded.root_percent,
+          uptime=excluded.uptime,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`);
+      const upsertStorage = database.prepare(`INSERT INTO operations_storage_metrics
+        (cluster_id,node,storage_id,status,storage_type,shared,content,used_bytes,total_bytes,
+         available_bytes,usage_percent,last_seen_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(cluster_id,node,storage_id) DO UPDATE SET
+          status=excluded.status,storage_type=excluded.storage_type,shared=excluded.shared,content=excluded.content,
+          used_bytes=excluded.used_bytes,total_bytes=excluded.total_bytes,available_bytes=excluded.available_bytes,
+          usage_percent=excluded.usage_percent,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`);
+      const upsertLegacyNode = database.prepare(`INSERT INTO proxmox_nodes (cluster_id,name,status,last_seen_at)
+        VALUES (?,?,?,?)
+        ON CONFLICT(cluster_id,name) DO UPDATE SET
+          status=excluded.status,last_seen_at=excluded.last_seen_at`);
+
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        upsertCollection.run(clusterId, nodesAvailable ? 1 : 0, storagesAvailable ? 1 : 0, nodesError, storagesError, now, now);
+        if (nodesAvailable) {
+          database.prepare("UPDATE operations_node_metrics SET status='unknown',updated_at=? WHERE cluster_id=?").run(now, clusterId);
+          for (const node of snapshot.nodes) {
+            const name = String(node?.node || "").trim().slice(0, 120);
+            if (!name) continue;
+            const nodeStatus = status(node.status);
+            upsertNode.run(
+              clusterId, name, nodeStatus, decimal(node.cpuPercent), decimal(node.cpuCores),
+              integer(node.memoryUsedBytes), integer(node.memoryTotalBytes), decimal(node.memoryPercent),
+              integer(node.rootUsedBytes), integer(node.rootTotalBytes), decimal(node.rootPercent),
+              integer(node.uptime), now, now,
+            );
+            upsertLegacyNode.run(clusterId, name, nodeStatus, now);
+          }
+        }
+        if (storagesAvailable) {
+          database.prepare("UPDATE operations_storage_metrics SET status='unknown',updated_at=? WHERE cluster_id=?").run(now, clusterId);
+          for (const storage of snapshot.storages) {
+            const node = String(storage?.node || "").trim().slice(0, 120);
+            const storageId = String(storage?.storageId || "").trim().slice(0, 120);
+            if (!node || !storageId) continue;
+            upsertStorage.run(
+              clusterId, node, storageId, status(storage.status),
+              String(storage.type || "unknown").slice(0, 80), storage.shared ? 1 : 0,
+              (Array.isArray(storage.content) ? storage.content : String(storage.content || "").split(","))
+                .map((entry) => String(entry).trim()).filter(Boolean).join(",").slice(0, 500),
+              integer(storage.usedBytes), integer(storage.totalBytes), integer(storage.availableBytes),
+              decimal(storage.usagePercent), now, now,
+            );
+          }
+          if (storagesAuthoritative) {
+            database.prepare("DELETE FROM operations_storage_metrics WHERE cluster_id=? AND status IN ('unknown','disabled')")
+              .run(clusterId);
+          }
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return {
+        clusterId,
+        nodesAvailable,
+        storagesAvailable,
+        nodesError,
+        storagesError,
+        collectedAt: now,
+      };
+    },
+
+    reconcileOperations(clusterId, {
+      staleAfterMs = 5 * 60_000,
+      stuckTaskMs = OPERATIONS_THRESHOLDS.stuckTaskMinutes * 60_000,
+    } = {}) {
+      const cluster = database.prepare("SELECT * FROM proxmox_clusters WHERE id=?").get(clusterId);
+      if (!cluster) throw problem("Cluster does not exist", "cluster_not_found", 404);
+      const now = Date.now();
+      const collection = database.prepare("SELECT * FROM operations_collection_status WHERE cluster_id=?").get(clusterId);
+      const conditions = [];
+      const evaluatedScopes = new Set([`cluster:${clusterId}`, `tasks:${clusterId}`, `resources:${clusterId}`]);
+      const addCondition = ({ scope, sourceType, sourceId, type, severity, title, message }) => {
+        conditions.push({
+          dedupKey: `${scope}:${type}:${sourceId}`,
+          clusterId,
+          scope,
+          sourceType,
+          sourceId: String(sourceId),
+          type,
+          severity,
+          title: String(title).slice(0, 180),
+          message: String(message).slice(0, 1000),
+        });
+      };
+
+      if (cluster.status !== "disabled") {
+        if (cluster.status === "error") {
+          const message = {
+            proxmox_timeout: "The Proxmox API did not respond before the synchronization timeout.",
+            proxmox_unreachable: "Nimbus could not establish a secure connection to the Proxmox API.",
+            proxmox_auth_failed: "Proxmox rejected the configured API token.",
+            proxmox_permission_denied: "The API token lacks permission required for resource synchronization.",
+          }[cluster.last_error] || `The latest synchronization failed (${cluster.last_error || "unknown error"}).`;
+          addCondition({
+            scope: `cluster:${clusterId}`,
+            sourceType: "cluster",
+            sourceId: clusterId,
+            type: "cluster_unreachable",
+            severity: "critical",
+            title: `${cluster.name} is unreachable`,
+            message,
+          });
+        } else if (!cluster.last_sync_at) {
+          addCondition({
+            scope: `cluster:${clusterId}`,
+            sourceType: "cluster",
+            sourceId: clusterId,
+            type: "cluster_never_synced",
+            severity: "warning",
+            title: `${cluster.name} has not synchronized`,
+            message: "Run the first synchronization to populate inventory and health telemetry.",
+          });
+        } else if (now - cluster.last_sync_at > Math.max(60_000, Number(staleAfterMs) || 0)) {
+          addCondition({
+            scope: `cluster:${clusterId}`,
+            sourceType: "cluster",
+            sourceId: clusterId,
+            type: "cluster_sync_stale",
+            severity: "warning",
+            title: `${cluster.name} telemetry is stale`,
+            message: `The latest successful synchronization was ${Math.round((now - cluster.last_sync_at) / 60_000)} minutes ago.`,
+          });
+        }
+
+        if (collection?.nodes_available) {
+          const scope = `nodes:${clusterId}`;
+          evaluatedScopes.add(scope);
+          const nodes = database.prepare("SELECT * FROM operations_node_metrics WHERE cluster_id=?").all(clusterId);
+          for (const node of nodes) {
+            if (node.status !== "online") {
+              addCondition({
+                scope,
+                sourceType: "node",
+                sourceId: node.node,
+                type: "node_offline",
+                severity: "critical",
+                title: `${node.node} is not online`,
+                message: `Proxmox currently reports the node state as ${node.status || "unknown"}.`,
+              });
+            }
+            if (node.cpu_percent >= OPERATIONS_THRESHOLDS.nodeCpuWarning) {
+              addCondition({
+                scope,
+                sourceType: "node",
+                sourceId: node.node,
+                type: "node_cpu_pressure",
+                severity: node.cpu_percent >= OPERATIONS_THRESHOLDS.nodeCpuCritical ? "critical" : "warning",
+                title: `High CPU pressure on ${node.node}`,
+                message: `Node CPU usage is ${Math.round(node.cpu_percent)}% across ${Number(node.cpu_cores || 0)} cores.`,
+              });
+            }
+            if (node.memory_percent >= OPERATIONS_THRESHOLDS.nodeMemoryWarning) {
+              addCondition({
+                scope,
+                sourceType: "node",
+                sourceId: node.node,
+                type: "node_memory_pressure",
+                severity: node.memory_percent >= OPERATIONS_THRESHOLDS.nodeMemoryCritical ? "critical" : "warning",
+                title: `High memory pressure on ${node.node}`,
+                message: `Node memory usage is ${Math.round(node.memory_percent)}%.`,
+              });
+            }
+          }
+        }
+
+        if (collection?.storages_available) {
+          const scope = `storages:${clusterId}`;
+          evaluatedScopes.add(scope);
+          const storages = database.prepare(`SELECT * FROM operations_storage_metrics
+            WHERE cluster_id=? AND status NOT IN ('unknown','disabled')`).all(clusterId);
+          for (const storage of storages) {
+            if (!["active", "available", "online"].includes(storage.status)) {
+              addCondition({
+                scope,
+                sourceType: "storage",
+                sourceId: `${storage.node}:${storage.storage_id}`,
+                type: "storage_unavailable",
+                severity: "critical",
+                title: `${storage.storage_id} is unavailable on ${storage.node}`,
+                message: `Proxmox currently reports the storage state as ${storage.status || "unknown"}.`,
+              });
+            }
+            if (storage.total_bytes > 0 && storage.usage_percent >= OPERATIONS_THRESHOLDS.storageWarning) {
+              addCondition({
+                scope,
+                sourceType: "storage",
+                sourceId: `${storage.node}:${storage.storage_id}`,
+                type: "storage_capacity",
+                severity: storage.usage_percent >= OPERATIONS_THRESHOLDS.storageCritical ? "critical" : "warning",
+                title: `${storage.storage_id} is filling up`,
+                message: `Storage usage on ${storage.node} is ${Math.round(storage.usage_percent)}%.`,
+              });
+            }
+          }
+        }
+
+        const staleAssignments = Number(database.prepare(`SELECT COUNT(*) AS count
+          FROM resources r JOIN customer_resource_assignments a ON a.resource_id=r.id AND a.status='active'
+          WHERE r.cluster_id=? AND r.stale=1`).get(clusterId).count);
+        if (staleAssignments) {
+          addCondition({
+            scope: `resources:${clusterId}`,
+            sourceType: "resource",
+            sourceId: clusterId,
+            type: "assigned_resources_stale",
+            severity: "warning",
+            title: `${staleAssignments} assigned ${staleAssignments === 1 ? "resource is" : "resources are"} missing`,
+            message: "The assignment remains protected locally, but the latest successful Proxmox inventory did not return the resource.",
+          });
+        }
+
+        const stuckTasks = database.prepare(`SELECT t.*,r.name AS resource_name
+          FROM api_tasks t LEFT JOIN resources r ON r.id=t.resource_id
+          WHERE t.cluster_id=? AND t.completed_at IS NULL AND t.status!='stopped' AND t.created_at<=?`)
+          .all(clusterId, now - Math.max(60_000, Number(stuckTaskMs) || 0));
+        for (const task of stuckTasks) {
+          const ageMinutes = Math.max(1, Math.round((now - task.created_at) / 60_000));
+          addCondition({
+            scope: `tasks:${clusterId}`,
+            sourceType: "task",
+            sourceId: task.id,
+            type: "task_stuck",
+            severity: ageMinutes >= 60 ? "critical" : "warning",
+            title: `${task.action.replace(/_/g, " ")} task is taking too long`,
+            message: `${task.resource_name || task.resource_id} has been waiting for ${ageMinutes} minutes on ${task.node}.`,
+          });
+        }
+      } else {
+        evaluatedScopes.add(`nodes:${clusterId}`);
+        evaluatedScopes.add(`storages:${clusterId}`);
+      }
+
+      const activeKeys = new Set(conditions.map((condition) => condition.dedupKey));
+      const getIncident = database.prepare("SELECT * FROM operations_incidents WHERE dedup_key=?");
+      const createIncident = database.prepare(`INSERT INTO operations_incidents
+        (id,dedup_key,cluster_id,scope,source_type,source_id,incident_type,severity,status,title,message,
+         first_seen_at,last_seen_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,'open',?,?,?,?,?)`);
+      const updateIncident = database.prepare(`UPDATE operations_incidents SET
+        severity=?,title=?,message=?,last_seen_at=?,updated_at=? WHERE id=?`);
+      const reopenIncident = database.prepare(`UPDATE operations_incidents SET
+        severity=?,status='open',title=?,message=?,first_seen_at=?,last_seen_at=?,
+        acknowledged_by=NULL,acknowledged_at=NULL,resolved_at=NULL,updated_at=? WHERE id=?`);
+      const resolveIncident = database.prepare(`UPDATE operations_incidents SET
+        status='resolved',resolved_at=?,updated_at=? WHERE id=?`);
+
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        for (const condition of conditions) {
+          const existing = getIncident.get(condition.dedupKey);
+          if (!existing) {
+            createIncident.run(
+              randomToken(18), condition.dedupKey, condition.clusterId, condition.scope,
+              condition.sourceType, condition.sourceId, condition.type, condition.severity,
+              condition.title, condition.message, now, now, now,
+            );
+          } else if (existing.status === "resolved") {
+            reopenIncident.run(condition.severity, condition.title, condition.message, now, now, now, existing.id);
+          } else {
+            updateIncident.run(condition.severity, condition.title, condition.message, now, now, existing.id);
+          }
+        }
+        const unresolved = database.prepare("SELECT * FROM operations_incidents WHERE cluster_id=? AND status!='resolved'").all(clusterId);
+        for (const incident of unresolved) {
+          if (evaluatedScopes.has(incident.scope) && !activeKeys.has(incident.dedup_key)) {
+            resolveIncident.run(now, now, incident.id);
+          }
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return database.prepare(operationsIncidentSelect("WHERE i.cluster_id=? AND i.status!='resolved' ORDER BY CASE i.severity WHEN 'critical' THEN 0 ELSE 1 END,i.last_seen_at DESC"))
+        .all(clusterId).map(publicOperationsIncident);
+    },
+
+    acknowledgeOperationsIncident(id, userId) {
+      const incident = database.prepare("SELECT * FROM operations_incidents WHERE id=?").get(id);
+      if (!incident) throw problem("Operations incident does not exist", "operations_incident_not_found", 404);
+      if (incident.status === "resolved") throw problem("Resolved incidents cannot be acknowledged", "operations_incident_resolved", 409);
+      const user = database.prepare("SELECT id FROM users WHERE id=? AND role='admin' AND status='active'").get(userId);
+      if (!user) throw problem("An active administrator is required", "admin_required", 403);
+      const now = Date.now();
+      database.prepare(`UPDATE operations_incidents SET status='acknowledged',
+        acknowledged_by=?,acknowledged_at=?,updated_at=? WHERE id=?`)
+        .run(userId, now, now, id);
+      return publicOperationsIncident(database.prepare(operationsIncidentSelect("WHERE i.id=?")).get(id));
+    },
+
+    getOperationsCenter({ taskWindowMs = 24 * 60 * 60_000 } = {}) {
+      const clusters = database.prepare(clusterSelect("ORDER BY c.name")).all().map(publicCluster);
+      const collections = new Map(database.prepare("SELECT * FROM operations_collection_status").all().map((row) => [row.cluster_id, row]));
+      const nodes = database.prepare(`SELECT n.*,c.name AS cluster_name FROM operations_node_metrics n
+        JOIN proxmox_clusters c ON c.id=n.cluster_id ORDER BY c.name,n.node`).all().map(publicOperationsNode);
+      const storages = database.prepare(`SELECT s.*,c.name AS cluster_name FROM operations_storage_metrics s
+        JOIN proxmox_clusters c ON c.id=s.cluster_id
+        WHERE s.status NOT IN ('unknown','disabled')
+        ORDER BY c.name,s.node,s.storage_id`).all().map(publicOperationsStorage);
+      const incidents = database.prepare(operationsIncidentSelect(`WHERE i.status!='resolved'
+        ORDER BY CASE i.severity WHEN 'critical' THEN 0 ELSE 1 END,
+        CASE i.status WHEN 'open' THEN 0 ELSE 1 END,i.last_seen_at DESC LIMIT 100`)).all().map(publicOperationsIncident);
+      const recentResolved = database.prepare(operationsIncidentSelect(`WHERE i.status='resolved'
+        ORDER BY i.resolved_at DESC LIMIT 20`)).all().map(publicOperationsIncident);
+      const rawTasks = database.prepare(`SELECT t.*,c.name AS cluster_name,r.name AS resource_name,r.vmid,r.type,
+          u.display_name AS user_name,cu.name AS customer_name
+        FROM api_tasks t
+        JOIN proxmox_clusters c ON c.id=t.cluster_id
+        LEFT JOIN resources r ON r.id=t.resource_id
+        LEFT JOIN users u ON u.id=t.user_id
+        LEFT JOIN customers cu ON cu.id=t.customer_id
+        WHERE (t.completed_at IS NULL AND t.status!='stopped')
+           OR (t.completed_at>=? AND t.exit_status IS NOT NULL AND t.exit_status!='OK')
+        ORDER BY CASE WHEN t.completed_at IS NULL THEN 0 ELSE 1 END,t.created_at DESC LIMIT 50`)
+        .all(Date.now() - Math.max(60_000, Number(taskWindowMs) || 0));
+      const tasks = rawTasks.map((row) => {
+        const task = publicTask(row);
+        return {
+          ...task,
+          clusterId: row.cluster_id,
+          clusterName: row.cluster_name,
+          resourceName: row.resource_name || row.resource_id,
+          vmid: row.vmid === null || row.vmid === undefined ? null : Number(row.vmid),
+          resourceType: row.type || null,
+          exitStatus: row.exit_status || null,
+          userName: row.user_name || null,
+          customerName: row.customer_name || null,
+          durationMs: Math.max(0, Number((row.completed_at || Date.now()) - row.created_at)),
+        };
+      });
+      const activeByCluster = new Map();
+      for (const incident of incidents) {
+        const entry = activeByCluster.get(incident.clusterId) || { total: 0, critical: 0 };
+        entry.total += 1;
+        if (incident.severity === "critical") entry.critical += 1;
+        activeByCluster.set(incident.clusterId, entry);
+      }
+      const clusterRows = clusters.map((cluster) => {
+        const collection = collections.get(cluster.id);
+        const clusterNodes = nodes.filter((node) => node.clusterId === cluster.id);
+        const clusterStorages = storages.filter((storage) => storage.clusterId === cluster.id);
+        const active = activeByCluster.get(cluster.id) || { total: 0, critical: 0 };
+        return {
+          ...cluster,
+          health: cluster.status === "disabled"
+            ? "disabled"
+            : active.critical ? "critical" : active.total ? "warning" : cluster.lastSyncAt ? "healthy" : "pending",
+          incidentCount: active.total,
+          criticalIncidentCount: active.critical,
+          onlineNodes: clusterNodes.filter((node) => node.status === "online").length,
+          telemetryNodes: clusterNodes.length,
+          telemetryStorages: clusterStorages.length,
+          telemetry: {
+            nodesAvailable: Boolean(collection?.nodes_available),
+            storagesAvailable: Boolean(collection?.storages_available),
+            nodesError: collection?.nodes_error || null,
+            storagesError: collection?.storages_error || null,
+            collectedAt: collection?.collected_at || null,
+          },
+        };
+      });
+      const uniqueStorages = new Map();
+      for (const storage of storages.filter((entry) => entry.status !== "unknown")) {
+        const key = storage.shared
+          ? `${storage.clusterId}:${storage.storageId}`
+          : `${storage.clusterId}:${storage.node}:${storage.storageId}`;
+        const current = uniqueStorages.get(key);
+        if (!current || storage.totalBytes > current.totalBytes) uniqueStorages.set(key, storage);
+      }
+      const storageTotals = [...uniqueStorages.values()].reduce((total, storage) => ({
+        used: total.used + storage.usedBytes,
+        capacity: total.capacity + storage.totalBytes,
+      }), { used: 0, capacity: 0 });
+      const staleAssignedResources = Number(database.prepare(`SELECT COUNT(*) AS count
+        FROM resources r JOIN customer_resource_assignments a ON a.resource_id=r.id AND a.status='active'
+        WHERE r.stale=1`).get().count);
+      return {
+        generatedAt: Date.now(),
+        thresholds: OPERATIONS_THRESHOLDS,
+        summary: {
+          clusters: clusterRows.length,
+          healthyClusters: clusterRows.filter((cluster) => cluster.health === "healthy").length,
+          nodes: nodes.length,
+          onlineNodes: nodes.filter((node) => node.status === "online").length,
+          storageUsedBytes: storageTotals.used,
+          storageTotalBytes: storageTotals.capacity,
+          activeIncidents: incidents.length,
+          criticalIncidents: incidents.filter((incident) => incident.severity === "critical").length,
+          failedTasks24h: tasks.filter((task) => task.completed && !task.success).length,
+          stuckTasks: tasks.filter((task) => !task.completed
+            && task.durationMs >= OPERATIONS_THRESHOLDS.stuckTaskMinutes * 60_000).length,
+          staleAssignedResources,
+        },
+        clusters: clusterRows,
+        nodes,
+        storages,
+        incidents,
+        recentResolved,
+        tasks,
+      };
     },
 
     listResources({ clusterId = null, customerId = null } = {}) {
@@ -1565,6 +2578,443 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
         .run(Date.now(), userId).changes;
     },
 
+    createMaintenanceEvent(input, { userId = null } = {}) {
+      const event = normalizeMaintenanceInput(input);
+      const targets = normalizeMaintenanceTargets(input.targets);
+      const id = randomToken(18);
+      const now = Date.now();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare(`INSERT INTO maintenance_events
+          (id,kind,title,message,severity,status,starts_at,ends_at,notify_email,created_by,updated_by,created_at,updated_at)
+          VALUES (?,?,?,?,?,'draft',?,?,?,?,?,?,?)`)
+          .run(
+            id,
+            event.kind,
+            event.title,
+            event.message,
+            event.severity,
+            event.startsAt,
+            event.endsAt,
+            event.notifyEmail ? 1 : 0,
+            userId,
+            userId,
+            now,
+            now,
+          );
+        const insertTarget = database.prepare("INSERT INTO maintenance_targets (event_id,target_type,target_id) VALUES (?,?,?)");
+        for (const target of targets) insertTarget.run(id, target.type, target.id);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return publicMaintenanceEvent(maintenanceEventRow(id), maintenanceTargets(id));
+    },
+    updateMaintenanceEvent(id, input, { userId = null } = {}) {
+      const row = database.prepare("SELECT * FROM maintenance_events WHERE id=?").get(id);
+      if (!row) throw problem("Maintenance notice does not exist", "maintenance_not_found", 404);
+      if (row.status !== "draft") throw problem("Published maintenance notices cannot be edited", "maintenance_not_editable", 409);
+      const event = normalizeMaintenanceInput(input, row);
+      const targets = input.targets === undefined ? maintenanceTargets(id).map(({ type, id: targetId }) => ({ type, id: targetId })) : normalizeMaintenanceTargets(input.targets);
+      const now = Date.now();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare(`UPDATE maintenance_events SET kind=?,title=?,message=?,severity=?,starts_at=?,ends_at=?,
+          notify_email=?,updated_by=?,updated_at=? WHERE id=?`)
+          .run(
+            event.kind,
+            event.title,
+            event.message,
+            event.severity,
+            event.startsAt,
+            event.endsAt,
+            event.notifyEmail ? 1 : 0,
+            userId,
+            now,
+            id,
+          );
+        if (input.targets !== undefined) {
+          database.prepare("DELETE FROM maintenance_targets WHERE event_id=?").run(id);
+          const insertTarget = database.prepare("INSERT INTO maintenance_targets (event_id,target_type,target_id) VALUES (?,?,?)");
+          for (const target of targets) insertTarget.run(id, target.type, target.id);
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return publicMaintenanceEvent(maintenanceEventRow(id), maintenanceTargets(id));
+    },
+    publishMaintenanceEvent(id, { userId = null } = {}) {
+      const row = database.prepare("SELECT * FROM maintenance_events WHERE id=?").get(id);
+      if (!row) throw problem("Maintenance notice does not exist", "maintenance_not_found", 404);
+      if (row.status !== "draft") throw problem("This maintenance notice was already published", "maintenance_already_published", 409);
+      if (row.ends_at !== null && Number(row.ends_at) <= Date.now()) {
+        throw problem("The maintenance window has already ended", "maintenance_ended", 409);
+      }
+      const targets = normalizeMaintenanceTargets(
+        maintenanceTargets(id).map(({ type, id: targetId }) => ({ type, id: targetId })),
+      );
+      const recipients = maintenanceRecipientsForTargets(targets);
+      if (!recipients.length) throw problem("No active customer users are affected by this audience", "maintenance_no_recipients", 409);
+      const now = Date.now();
+      const status = Number(row.starts_at) <= now ? "active" : "scheduled";
+      const deliveries = [];
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare(`UPDATE maintenance_events SET status=?,published_at=?,updated_by=?,updated_at=? WHERE id=?`)
+          .run(status, now, userId, now, id);
+        const insertDelivery = database.prepare(`INSERT INTO maintenance_deliveries
+          (id,event_id,user_id,created_at) VALUES (?,?,?,?)`);
+        for (const recipient of recipients) {
+          const deliveryId = randomToken(18);
+          insertDelivery.run(deliveryId, id, recipient.id, now);
+          deliveries.push({ ...recipient, deliveryId });
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return {
+        event: publicMaintenanceEvent(maintenanceEventRow(id), maintenanceTargets(id)),
+        deliveries,
+      };
+    },
+    listMaintenanceEvents({ limit = 100, offset = 0 } = {}) {
+      this.advanceMaintenanceEvents();
+      const safeLimit = Math.min(250, Math.max(1, Number(limit) || 100));
+      const safeOffset = Math.max(0, Number(offset) || 0);
+      const rows = database.prepare(`SELECT e.*,
+        creator.display_name AS created_by_name,updater.display_name AS updated_by_name,
+        (SELECT COUNT(*) FROM maintenance_deliveries d WHERE d.event_id=e.id) AS recipient_count
+        FROM maintenance_events e
+        LEFT JOIN users creator ON creator.id=e.created_by
+        LEFT JOIN users updater ON updater.id=e.updated_by
+        ORDER BY CASE e.status WHEN 'active' THEN 0 WHEN 'scheduled' THEN 1 WHEN 'draft' THEN 2 ELSE 3 END,
+          e.starts_at DESC LIMIT ? OFFSET ?`).all(safeLimit, safeOffset);
+      return {
+        items: rows.map((row) => publicMaintenanceEvent(row, maintenanceTargets(row.id))),
+        total: Number(database.prepare("SELECT COUNT(*) AS count FROM maintenance_events").get().count),
+        limit: safeLimit,
+        offset: safeOffset,
+      };
+    },
+    getMaintenanceEvent(id) {
+      const row = maintenanceEventRow(id);
+      return row ? publicMaintenanceEvent(row, maintenanceTargets(id)) : null;
+    },
+    listMaintenanceForUser(userId, { limit = 100, offset = 0 } = {}) {
+      this.advanceMaintenanceEvents();
+      const safeLimit = Math.min(250, Math.max(1, Number(limit) || 100));
+      const safeOffset = Math.max(0, Number(offset) || 0);
+      const select = `SELECT e.*,d.id AS delivery_id,d.read_at,d.email_job_id,d.resolution_email_job_id
+        FROM maintenance_deliveries d JOIN maintenance_events e ON e.id=d.event_id
+        WHERE d.user_id=? AND e.status!='draft'`;
+      const rows = database.prepare(`${select}
+        ORDER BY CASE e.status WHEN 'active' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END,
+          e.starts_at DESC LIMIT ? OFFSET ?`).all(userId, safeLimit, safeOffset);
+      const counts = database.prepare(`SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN d.read_at IS NULL THEN 1 ELSE 0 END) AS unread,
+        SUM(CASE WHEN e.status='active' THEN 1 ELSE 0 END) AS active_count,
+        SUM(CASE WHEN e.status='scheduled' THEN 1 ELSE 0 END) AS upcoming_count
+        FROM maintenance_deliveries d JOIN maintenance_events e ON e.id=d.event_id
+        WHERE d.user_id=? AND e.status!='draft'`).get(userId);
+      return {
+        items: rows.map((row) => publicMaintenanceDelivery(row, maintenanceTargets(row.id))),
+        total: Number(counts.total || 0),
+        unread: Number(counts.unread || 0),
+        activeCount: Number(counts.active_count || 0),
+        upcomingCount: Number(counts.upcoming_count || 0),
+        limit: safeLimit,
+        offset: safeOffset,
+      };
+    },
+    markMaintenanceRead(deliveryId, userId) {
+      const result = database.prepare(`UPDATE maintenance_deliveries SET read_at=COALESCE(read_at,?)
+        WHERE id=? AND user_id=?`).run(Date.now(), deliveryId, userId);
+      if (!result.changes) throw problem("Maintenance notice does not exist", "maintenance_not_found", 404);
+    },
+    setMaintenanceEmailJob(deliveryId, emailJobId, { resolution = false } = {}) {
+      const column = resolution ? "resolution_email_job_id" : "email_job_id";
+      database.prepare(`UPDATE maintenance_deliveries SET ${column}=? WHERE id=?`).run(emailJobId, deliveryId);
+    },
+    resolveMaintenanceEvent(id, { userId = null } = {}) {
+      this.advanceMaintenanceEvents();
+      const row = database.prepare("SELECT * FROM maintenance_events WHERE id=?").get(id);
+      if (!row) throw problem("Maintenance notice does not exist", "maintenance_not_found", 404);
+      if (!["active", "scheduled"].includes(row.status)) {
+        throw problem("Only active or scheduled maintenance can be resolved", "maintenance_not_resolvable", 409);
+      }
+      const now = Date.now();
+      database.prepare(`UPDATE maintenance_events SET status='resolved',resolved_at=?,updated_by=?,updated_at=? WHERE id=?`)
+        .run(now, userId, now, id);
+      return {
+        event: publicMaintenanceEvent(maintenanceEventRow(id), maintenanceTargets(id)),
+        deliveries: maintenanceDeliveryRecipients(id),
+      };
+    },
+    cancelMaintenanceEvent(id, { userId = null } = {}) {
+      const row = database.prepare("SELECT * FROM maintenance_events WHERE id=?").get(id);
+      if (!row) throw problem("Maintenance notice does not exist", "maintenance_not_found", 404);
+      if (!["draft", "scheduled"].includes(row.status)) {
+        throw problem("Only draft or scheduled maintenance can be cancelled", "maintenance_not_cancellable", 409);
+      }
+      const now = Date.now();
+      database.prepare(`UPDATE maintenance_events SET status='cancelled',cancelled_at=?,updated_by=?,updated_at=? WHERE id=?`)
+        .run(now, userId, now, id);
+      return publicMaintenanceEvent(maintenanceEventRow(id), maintenanceTargets(id));
+    },
+    deleteMaintenanceEvent(id) {
+      const row = database.prepare("SELECT status FROM maintenance_events WHERE id=?").get(id);
+      if (!row) throw problem("Maintenance notice does not exist", "maintenance_not_found", 404);
+      if (row.status !== "draft") throw problem("Only drafts can be deleted", "maintenance_not_deletable", 409);
+      database.prepare("DELETE FROM maintenance_events WHERE id=?").run(id);
+    },
+    advanceMaintenanceEvents(now = Date.now()) {
+      database.prepare(`UPDATE maintenance_events SET status='active',updated_at=?
+        WHERE status='scheduled' AND starts_at<=?`).run(now, now);
+      const resolved = database.prepare(`UPDATE maintenance_events SET status='resolved',
+        resolved_at=COALESCE(resolved_at,?),updated_at=?
+        WHERE status='active' AND ends_at IS NOT NULL AND ends_at<=?`).run(now, now, now);
+      return resolved.changes;
+    },
+
+    createSupportTicket(input, { customerId, userId }) {
+      const ticket = normalizeSupportTicketInput(input);
+      const customer = database.prepare("SELECT status FROM customers WHERE id=?").get(customerId);
+      if (!customer || customer.status !== "active") {
+        throw problem("Customer account does not exist", "customer_not_found", 404);
+      }
+      if (ticket.resourceId) {
+        const assignment = database.prepare(`SELECT 1 FROM customer_resource_assignments
+          WHERE customer_id=? AND resource_id=? AND status='active'`).get(customerId, ticket.resourceId);
+        if (!assignment) throw problem("The selected resource is not assigned to this customer", "invalid_ticket_resource", 404);
+      }
+      const id = randomToken(18);
+      const messageId = randomToken(18);
+      const now = Date.now();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare(`INSERT INTO support_tickets
+          (id,reference,customer_id,created_by,resource_id,subject,category,priority,status,last_message_at,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(
+            id,
+            supportTicketReference(id, now),
+            customerId,
+            userId,
+            ticket.resourceId,
+            ticket.subject,
+            ticket.category,
+            ticket.priority,
+            "waiting_support",
+            now,
+            now,
+            now,
+          );
+        database.prepare(`INSERT INTO support_ticket_messages
+          (id,ticket_id,author_user_id,author_role,body,internal,created_at)
+          VALUES (?,?,?,?,?,0,?)`).run(messageId, id, userId, "customer", ticket.message, now);
+        database.prepare(`INSERT INTO support_ticket_reads (ticket_id,user_id,last_read_at)
+          VALUES (?,?,?)`).run(id, userId, now);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return this.getSupportTicket(id, { role: "customer", customerId, id: userId });
+    },
+    listSupportTickets(scope, { limit = 100, offset = 0, status = "", priority = "", search = "" } = {}) {
+      const safeLimit = Math.min(250, Math.max(1, Number(limit) || 100));
+      const safeOffset = Math.max(0, Number(offset) || 0);
+      const filters = [];
+      const values = [scope?.id || null];
+      if (scope?.role !== "admin") {
+        if (!scope?.customerId) return { items: [], total: 0, unread: 0, active: 0, waitingSupport: 0, waitingCustomer: 0, resolved: 0, limit: safeLimit, offset: safeOffset };
+        filters.push("t.customer_id=?");
+        values.push(scope.customerId);
+      }
+      if (status && ["open", "waiting_support", "waiting_customer", "resolved", "closed"].includes(status)) {
+        filters.push("t.status=?");
+        values.push(status);
+      }
+      if (priority && ["low", "normal", "high", "urgent"].includes(priority)) {
+        filters.push("t.priority=?");
+        values.push(priority);
+      }
+      const cleanSearch = String(search || "").trim().toLowerCase().slice(0, 160);
+      if (cleanSearch) {
+        filters.push("(LOWER(t.reference) LIKE ? OR LOWER(t.subject) LIKE ? OR LOWER(c.name) LIKE ?)");
+        const like = `%${cleanSearch.replace(/[%_]/g, "\\$&")}%`;
+        values.push(like, like, like);
+      }
+      const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+      const select = `SELECT t.*,c.name AS customer_name,
+        creator.display_name AS created_by_name,assignee.display_name AS assigned_to_name,
+        r.name AS resource_name,r.type AS resource_type,r.vmid,
+        (SELECT COUNT(*) FROM support_ticket_messages m WHERE m.ticket_id=t.id) AS message_count,
+        (SELECT COUNT(*) FROM support_ticket_messages m WHERE m.ticket_id=t.id AND m.internal=0) AS public_message_count,
+        (SELECT COUNT(*) FROM support_ticket_messages m WHERE m.ticket_id=t.id AND m.internal=1) AS internal_note_count,
+        CASE WHEN t.last_message_at>COALESCE(rd.last_read_at,0) THEN 1 ELSE 0 END AS unread
+        FROM support_tickets t
+        JOIN customers c ON c.id=t.customer_id
+        LEFT JOIN users creator ON creator.id=t.created_by
+        LEFT JOIN users assignee ON assignee.id=t.assigned_to
+        LEFT JOIN resources r ON r.id=t.resource_id
+        LEFT JOIN support_ticket_reads rd ON rd.ticket_id=t.id AND rd.user_id=?
+        ${where}`;
+      const items = database.prepare(`${select}
+        ORDER BY CASE t.status WHEN 'waiting_support' THEN 0 WHEN 'open' THEN 1 WHEN 'waiting_customer' THEN 2 WHEN 'resolved' THEN 3 ELSE 4 END,
+          CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+          t.last_message_at DESC LIMIT ? OFFSET ?`).all(...values, safeLimit, safeOffset)
+        .map((row) => publicSupportTicket(row, { includeInternal: scope?.role === "admin" }));
+      const scopeFilter = scope?.role === "admin" ? "" : "WHERE customer_id=?";
+      const scopeValues = scope?.role === "admin" ? [] : [scope.customerId];
+      const counts = database.prepare(`SELECT COUNT(*) AS total,
+        SUM(CASE WHEN status IN ('open','waiting_support','waiting_customer') THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN status='waiting_support' THEN 1 ELSE 0 END) AS waiting_support,
+        SUM(CASE WHEN status='waiting_customer' THEN 1 ELSE 0 END) AS waiting_customer,
+        SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) AS resolved
+        FROM support_tickets ${scopeFilter}`).get(...scopeValues);
+      const unreadFilter = scope?.role === "admin" ? "" : "AND t.customer_id=?";
+      const unread = Number(database.prepare(`SELECT COUNT(*) AS count FROM support_tickets t
+        LEFT JOIN support_ticket_reads rd ON rd.ticket_id=t.id AND rd.user_id=?
+        WHERE t.last_message_at>COALESCE(rd.last_read_at,0) ${unreadFilter}`)
+        .get(scope?.id || null, ...scopeValues).count || 0);
+      return {
+        items,
+        total: Number(counts.total || 0),
+        unread,
+        active: Number(counts.active || 0),
+        waitingSupport: Number(counts.waiting_support || 0),
+        waitingCustomer: Number(counts.waiting_customer || 0),
+        resolved: Number(counts.resolved || 0),
+        limit: safeLimit,
+        offset: safeOffset,
+      };
+    },
+    getSupportTicket(id, scope) {
+      const row = requireSupportTicket(id, scope);
+      return {
+        ticket: publicSupportTicket(row, { includeInternal: scope?.role === "admin" }),
+        messages: supportTicketMessages(id, { includeInternal: scope?.role === "admin" }),
+      };
+    },
+    addSupportTicketMessage(id, input, scope, { internal = false } = {}) {
+      const row = requireSupportTicket(id, scope);
+      if (internal && scope?.role !== "admin") {
+        throw problem("Only administrators can create internal notes", "admin_required", 403);
+      }
+      if (!internal && ["resolved", "closed"].includes(row.status)) {
+        throw problem("Reopen this ticket before replying", "support_ticket_not_replyable", 409);
+      }
+      const body = normalizeSupportMessage(input?.message);
+      const messageId = randomToken(18);
+      const now = Date.now();
+      const authorRole = scope.role === "admin" ? "admin" : "customer";
+      const nextStatus = internal ? row.status : authorRole === "admin" ? "waiting_customer" : "waiting_support";
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare(`INSERT INTO support_ticket_messages
+          (id,ticket_id,author_user_id,author_role,body,internal,created_at)
+          VALUES (?,?,?,?,?,?,?)`).run(messageId, id, scope.id, authorRole, body, internal ? 1 : 0, now);
+        if (!internal) {
+          database.prepare(`UPDATE support_tickets SET status=?,last_message_at=?,updated_at=? WHERE id=?`)
+            .run(nextStatus, now, now, id);
+        }
+        database.prepare(`INSERT INTO support_ticket_reads (ticket_id,user_id,last_read_at) VALUES (?,?,?)
+          ON CONFLICT(ticket_id,user_id) DO UPDATE SET last_read_at=excluded.last_read_at`).run(id, scope.id, now);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return {
+        ...this.getSupportTicket(id, scope),
+        message: publicSupportMessage(database.prepare(`SELECT m.*,u.display_name AS author_name
+          FROM support_ticket_messages m LEFT JOIN users u ON u.id=m.author_user_id WHERE m.id=?`).get(messageId)),
+      };
+    },
+    updateSupportTicket(id, input, adminUser) {
+      const row = requireSupportTicket(id, adminUser);
+      if (adminUser?.role !== "admin") throw problem("Administrator access is required", "admin_required", 403);
+      const status = input.status === undefined ? row.status : String(input.status).trim().toLowerCase();
+      const priority = input.priority === undefined ? row.priority : String(input.priority).trim().toLowerCase();
+      const rawAssignee = input.assignedTo === undefined ? row.assigned_to : String(input.assignedTo || "").trim();
+      const assignedTo = rawAssignee || null;
+      if (!["open", "waiting_support", "waiting_customer", "resolved", "closed"].includes(status)) {
+        throw problem("Choose a valid ticket status", "invalid_ticket_status");
+      }
+      if (!["low", "normal", "high", "urgent"].includes(priority)) {
+        throw problem("Choose a valid ticket priority", "invalid_ticket_priority");
+      }
+      if (assignedTo) {
+        const assignee = database.prepare("SELECT role,status FROM users WHERE id=?").get(assignedTo);
+        if (!assignee || assignee.role !== "admin" || assignee.status !== "active") {
+          throw problem("Choose an active administrator", "invalid_ticket_assignee");
+        }
+      }
+      const now = Date.now();
+      const resolvedAt = status === "resolved" ? (row.resolved_at || now) : null;
+      const closedAt = status === "closed" ? (row.closed_at || now) : null;
+      database.prepare(`UPDATE support_tickets SET status=?,priority=?,assigned_to=?,resolved_at=?,closed_at=?,updated_at=?
+        WHERE id=?`).run(status, priority, assignedTo, resolvedAt, closedAt, now, id);
+      return publicSupportTicket(supportTicketRow(id, adminUser.id), { includeInternal: true });
+    },
+    closeSupportTicket(id, scope) {
+      const row = requireSupportTicket(id, scope);
+      if (row.status === "closed") return publicSupportTicket(row, { includeInternal: scope?.role === "admin" });
+      const now = Date.now();
+      database.prepare(`UPDATE support_tickets SET status='closed',closed_at=?,updated_at=? WHERE id=?`).run(now, now, id);
+      return publicSupportTicket(supportTicketRow(id, scope.id), { includeInternal: scope?.role === "admin" });
+    },
+    reopenSupportTicket(id, scope) {
+      const row = requireSupportTicket(id, scope);
+      if (!["resolved", "closed"].includes(row.status)) {
+        throw problem("Only resolved or closed tickets can be reopened", "support_ticket_not_reopenable", 409);
+      }
+      const now = Date.now();
+      database.prepare(`UPDATE support_tickets SET status='waiting_support',resolved_at=NULL,closed_at=NULL,updated_at=?
+        WHERE id=?`).run(now, id);
+      return publicSupportTicket(supportTicketRow(id, scope.id), { includeInternal: scope?.role === "admin" });
+    },
+    markSupportTicketRead(id, scope) {
+      requireSupportTicket(id, scope);
+      database.prepare(`INSERT INTO support_ticket_reads (ticket_id,user_id,last_read_at) VALUES (?,?,?)
+        ON CONFLICT(ticket_id,user_id) DO UPDATE SET last_read_at=excluded.last_read_at`)
+        .run(id, scope.id, Date.now());
+    },
+    listSupportTicketRecipients(id, audience = "customer") {
+      const row = supportTicketRow(id);
+      if (!row) throw problem("Support ticket does not exist", "support_ticket_not_found", 404);
+      if (audience === "admin") {
+        if (row.assigned_to) {
+          const assigned = database.prepare(`SELECT id,email,display_name FROM users
+            WHERE id=? AND role='admin' AND status='active'`).get(row.assigned_to);
+          if (assigned) return [{ id: assigned.id, email: assigned.email, displayName: assigned.display_name }];
+        }
+        return database.prepare(`SELECT id,email,display_name FROM users
+          WHERE role='admin' AND status='active' ORDER BY id`).all().map((entry) => ({
+          id: entry.id, email: entry.email, displayName: entry.display_name,
+        }));
+      }
+      return database.prepare(`SELECT u.id,u.email,u.display_name FROM users u
+        JOIN customers c ON c.id=u.customer_id
+        WHERE u.customer_id=? AND u.role='customer' AND u.status='active' AND c.status='active'
+        ORDER BY u.id`).all(row.customer_id).map((entry) => ({
+        id: entry.id, email: entry.email, displayName: entry.display_name,
+      }));
+    },
+    listSupportAssignees() {
+      return database.prepare(`SELECT id,email,display_name FROM users
+        WHERE role='admin' AND status='active' ORDER BY display_name`).all().map((row) => ({
+        id: row.id, email: row.email, displayName: row.display_name,
+      }));
+    },
+
     getEmailSettings() {
       return publicEmailSettings(database.prepare("SELECT * FROM email_settings WHERE id='default'").get());
     },
@@ -1915,7 +3365,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       return row;
     },
 
-    createSession({ userId, ttlMs, ipAddress = null, userAgent = null }) {
+    createSession({ userId, ttlMs, ipAddress = null, userAgent = null, maxSessions = null }) {
       const token = randomToken();
       const csrfToken = randomToken(24);
       const now = Date.now();
@@ -1933,6 +3383,12 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
           now,
           now,
         );
+      if (Number.isInteger(maxSessions) && maxSessions > 0) {
+        database.prepare(`DELETE FROM sessions
+          WHERE user_id=? AND id_hash NOT IN (
+            SELECT id_hash FROM sessions WHERE user_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?
+          )`).run(userId, userId, maxSessions);
+      }
       return { token, csrfToken, expiresAt: now + ttlMs };
     },
     getSession(token) {
@@ -1962,21 +3418,122 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       return database.prepare("DELETE FROM sessions WHERE user_id=?").run(userId).changes;
     },
 
+    getSecurityPolicy() {
+      return publicSecurityPolicy(database.prepare("SELECT * FROM security_policy WHERE id='default'").get());
+    },
+    updateSecurityPolicy(input = {}, updatedBy = null) {
+      for (const field of ["requireAdminMfa", "requireCustomerMfa", "newLoginEmail"]) {
+        if (input[field] !== undefined && typeof input[field] !== "boolean") {
+          throw problem("Security policy values must be true or false", "invalid_security_policy");
+        }
+      }
+      const current = this.getSecurityPolicy();
+      const next = {
+        requireAdminMfa: input.requireAdminMfa ?? current.requireAdminMfa,
+        requireCustomerMfa: input.requireCustomerMfa ?? current.requireCustomerMfa,
+        newLoginEmail: input.newLoginEmail ?? current.newLoginEmail,
+      };
+      database.prepare(`UPDATE security_policy SET
+        require_admin_mfa=?,require_customer_mfa=?,new_login_email=?,updated_by=?,updated_at=?
+        WHERE id='default'`).run(
+        Number(next.requireAdminMfa),
+        Number(next.requireCustomerMfa),
+        Number(next.newLoginEmail),
+        updatedBy,
+        Date.now(),
+      );
+      return this.getSecurityPolicy();
+    },
+    isMfaRequiredForUser(user) {
+      if (!user) return false;
+      const policy = this.getSecurityPolicy();
+      return user.role === "admin" ? policy.requireAdminMfa : policy.requireCustomerMfa;
+    },
+    listSecurityEvents({ limit = 100, offset = 0 } = {}) {
+      const safeLimit = Math.min(200, Math.max(1, Number(limit) || 100));
+      const safeOffset = Math.max(0, Number(offset) || 0);
+      const predicate = `(a.action LIKE 'auth.%' OR a.action LIKE 'security.%' OR a.action LIKE 'password.%'
+        OR a.action IN ('admin.user.password_reset','admin.user.mfa_reset','admin.security.policy_updated'))`;
+      const rows = database.prepare(`SELECT a.*,u.display_name,u.email,u.role AS user_role,c.name AS customer_name
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id=a.actor_user_id
+        LEFT JOIN customers c ON c.id=a.customer_id
+        WHERE ${predicate}
+        ORDER BY a.created_at DESC LIMIT ? OFFSET ?`).all(safeLimit, safeOffset);
+      const total = database.prepare(`SELECT COUNT(*) AS count FROM audit_logs a WHERE ${predicate}`).get().count;
+      return {
+        items: rows.map((row) => ({
+          id: row.id,
+          customerId: row.customer_id,
+          customerName: row.customer_name,
+          userId: row.actor_user_id,
+          displayName: row.display_name,
+          email: row.email,
+          actorRole: row.actor_role,
+          userRole: row.user_role,
+          action: row.action,
+          detail: parseJson(row.detail, {}),
+          ipAddress: row.ip_address,
+          createdAt: row.created_at,
+        })),
+        total,
+        limit: safeLimit,
+        offset: safeOffset,
+      };
+    },
+    getSecurityCenter({ limit = 100 } = {}) {
+      database.prepare("DELETE FROM sessions WHERE expires_at<=?").run(Date.now());
+      const policy = this.getSecurityPolicy();
+      const accounts = database.prepare(`SELECT
+        COUNT(*) AS active_accounts,
+        COALESCE(SUM(CASE WHEN u.role='admin' THEN 1 ELSE 0 END),0) AS admins,
+        COALESCE(SUM(CASE WHEN u.role='customer' THEN 1 ELSE 0 END),0) AS customers,
+        COALESCE(SUM(CASE WHEN m.enabled=1 THEN 1 ELSE 0 END),0) AS mfa_protected,
+        COALESCE(SUM(CASE WHEN u.role='admin' AND m.enabled=1 THEN 1 ELSE 0 END),0) AS protected_admins,
+        COALESCE(SUM(CASE WHEN u.role='customer' AND m.enabled=1 THEN 1 ELSE 0 END),0) AS protected_customers
+        FROM users u LEFT JOIN user_mfa m ON m.user_id=u.id
+        WHERE u.status='active'`).get();
+      const since = Date.now() - 24 * 60 * 60 * 1000;
+      const successfulLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action='auth.login' AND created_at>=?").get(since).count;
+      const failedLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action IN ('auth.login_failed','auth.mfa_failed') AND created_at>=?").get(since).count;
+      const activeAccounts = Number(accounts.active_accounts || 0);
+      const mfaProtected = Number(accounts.mfa_protected || 0);
+      const requiredPending =
+        (policy.requireAdminMfa ? Number(accounts.admins || 0) - Number(accounts.protected_admins || 0) : 0)
+        + (policy.requireCustomerMfa ? Number(accounts.customers || 0) - Number(accounts.protected_customers || 0) : 0);
+      return {
+        policy,
+        summary: {
+          activeAccounts,
+          mfaProtected,
+          mfaCoverage: activeAccounts ? Math.round(mfaProtected / activeAccounts * 100) : 100,
+          requiredPending,
+          activeSessions: Number(database.prepare("SELECT COUNT(*) AS count FROM sessions").get().count || 0),
+          successfulLogins24h: Number(successfulLogins || 0),
+          failedLogins24h: Number(failedLogins || 0),
+        },
+        events: this.listSecurityEvents({ limit }),
+      };
+    },
+
     writeAudit({ customerId = null, userId = null, actorRole = "system", action, resourceId = null, detail = {}, ipAddress = null }) {
       database.prepare("INSERT INTO audit_logs (customer_id,actor_user_id,actor_role,action,resource_id,detail,ip_address,created_at) VALUES (?,?,?,?,?,?,?,?)")
         .run(customerId, userId, actorRole, action, resourceId, JSON.stringify(detail), ipAddress, Date.now());
     },
-    listAudit(customerId = null, { limit = 30, offset = 0, all = false } = {}) {
+    listAudit(customerId = null, { limit = 30, offset = 0, all = false, customerVisible = false } = {}) {
       const safeLimit = Math.min(100, Math.max(1, Number(limit) || 30));
       const safeOffset = Math.max(0, Number(offset) || 0);
-      const where = all ? "" : "WHERE a.customer_id=?";
+      const where = all
+        ? ""
+        : `WHERE a.customer_id=?${customerVisible ? " AND a.action!='admin.support.internal_note_added'" : ""}`;
       const params = all ? [safeLimit, safeOffset] : [customerId, safeLimit, safeOffset];
       const rows = database.prepare(`SELECT a.*,u.display_name,c.name AS customer_name FROM audit_logs a
         LEFT JOIN users u ON u.id=a.actor_user_id LEFT JOIN customers c ON c.id=a.customer_id
         ${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`).all(...params);
       const total = all
         ? database.prepare("SELECT COUNT(*) AS count FROM audit_logs").get().count
-        : database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE customer_id=?").get(customerId).count;
+        : database.prepare(`SELECT COUNT(*) AS count FROM audit_logs WHERE customer_id=?
+          ${customerVisible ? "AND action!='admin.support.internal_note_added'" : ""}`).get(customerId).count;
       return { items: rows.map((row) => ({
         id: row.id, customerId: row.customer_id, customerName: row.customer_name, userId: row.actor_user_id,
         displayName: row.display_name, actorRole: row.actor_role, action: row.action, resourceId: row.resource_id,

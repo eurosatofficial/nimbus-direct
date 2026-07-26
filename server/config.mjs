@@ -29,6 +29,11 @@ export function readConfig() {
   const production = process.env.NODE_ENV === "production";
   const appSecret = process.env.APP_SECRET || (production ? "" : "development-only-secret-change-me");
   if (appSecret.length < 32) throw new Error("APP_SECRET must contain at least 32 characters");
+  const allowDemoData = boolean(process.env.ALLOW_DEMO_DATA, false);
+  const demoReadOnly = boolean(process.env.DEMO_READ_ONLY, false);
+  if (demoReadOnly && !allowDemoData) {
+    throw new Error("DEMO_READ_ONLY requires ALLOW_DEMO_DATA=true");
+  }
   return {
     production,
     port: integer(process.env.PORT, 4173),
@@ -44,7 +49,8 @@ export function readConfig() {
     isoUploadTimeoutMs: integer(process.env.ISO_UPLOAD_TIMEOUT_MINUTES, 120) * 60 * 1000,
     emailSmtpTimeoutMs: integer(process.env.EMAIL_SMTP_TIMEOUT_SECONDS, 10) * 1000,
     emailQueueIntervalMs: integer(process.env.EMAIL_QUEUE_INTERVAL_SECONDS, 5) * 1000,
-    allowDemoData: boolean(process.env.ALLOW_DEMO_DATA, false),
+    allowDemoData,
+    demoReadOnly,
     bootstrap: {
       email: process.env.BOOTSTRAP_ADMIN_EMAIL,
       password: process.env.BOOTSTRAP_ADMIN_PASSWORD,

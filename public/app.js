@@ -1,11 +1,17 @@
+import { mergeNetworkAddresses } from "./network-state.js";
+
 const state = {
   user: null,
   csrfToken: null,
+  demoReadOnly: false,
   dashboard: null,
+  network: null,
   notifications: null,
+  maintenance: null,
+  support: null,
   admin: null,
   currentView: "overview",
-  adminTab: "inventory",
+  adminTab: "operations",
   mfaChallenge: null,
   accountFlow: null,
   mfaEnrollment: null,
@@ -33,6 +39,10 @@ const announcedTaskIds = new Set();
 let taskPollTimer = null;
 let taskPolling = false;
 let mediaPollTimer = null;
+let networkLoadPromise = null;
+let networkLoadedAt = 0;
+let networkLoading = false;
+const networkRefreshMs = 30_000;
 
 const permissions = [
   ["view_status", "View status"], ["start", "Start"], ["stop", "Stop"], ["shutdown", "Shutdown"],
@@ -52,23 +62,66 @@ const views = {
   network: ["Network", "Basic addresses for assigned guests."],
   activity: ["Activity", "Recent account actions and Proxmox task requests."],
   notifications: ["Notifications", "Infrastructure alerts, recoveries, and completed actions."],
+  maintenance: ["Maintenance", "Planned work and service incidents affecting your infrastructure."],
+  support: ["Support tickets", "Private conversations with your infrastructure support team."],
   settings: ["Account settings", "Manage your profile and security."],
   admin: ["Control center", "Clusters, customers, direct assignments, and policy."],
 };
 
 const els = Object.fromEntries([
   "authView", "appShell", "loginForm", "authError", "mfaForm", "mfaLoginCode", "mfaAuthError", "mfaBackButton",
-  "authDescription", "forgotPasswordButton", "forgotPasswordForm", "forgotPasswordEmail", "forgotPasswordMessage",
+  "authDescription", "demoLoginNotice", "demoReadOnlyBanner", "forgotPasswordButton", "forgotPasswordForm", "forgotPasswordEmail", "forgotPasswordMessage",
   "forgotPasswordBackButton", "accountCompletionForm", "accountFlowRecipient", "accountPassword",
   "accountConfirmPassword", "accountCompletionMessage", "accountCompletionBackButton",
   "viewRoot", "pageTitle", "pageDescription", "currentSection",
   "tenantPlan", "connectionHealth", "healthTitle", "healthDetail", "instanceCount", "profileName", "profileTenant",
-  "profileAvatar", "globalSearch", "refreshButton", "logoutButton", "todayLabel", "lastUpdated", "notificationCount",
+  "profileAvatar", "globalSearch", "refreshButton", "logoutButton", "todayLabel", "lastUpdated", "notificationCount", "maintenanceCount", "supportCount",
   "actionDialog", "actionForm", "actionDialogTitle", "actionDialogDescription",
   "actionDialogResource", "confirmAction", "editDialog", "editForm", "editDialogTitle", "editDialogBody", "editDialogError",
   "snapshotDialog", "snapshotForm", "snapshotDialogEyebrow", "snapshotDialogTitle", "snapshotDialogBody", "snapshotDialogError", "confirmSnapshot",
   "toast", "toastIcon", "toastTitle", "toastMessage", "toastClose", "menuButton", "sidebar", "sidebarBackdrop",
 ].map((id) => [id, document.getElementById(id)]));
+
+const readOnlyBrowsingControls = [
+  "[data-admin-tab]",
+  "[data-details]",
+  "[data-open-support]",
+  "[data-copy]",
+  "[data-copy-mfa-secret]",
+  "[data-copy-recovery]",
+  "[data-dismiss-recovery]",
+  "[data-retry-instance]",
+  "[data-refresh-media]",
+].join(",");
+
+function applyDemoReadOnlyUi(root = els.viewRoot) {
+  if (!state.demoReadOnly || !root) return;
+  root.querySelectorAll("form").forEach((form) => {
+    form.classList.add("demo-form-disabled");
+    form.setAttribute("aria-disabled", "true");
+    form.querySelectorAll("input, textarea, select, button").forEach((control) => {
+      control.disabled = true;
+      control.title ||= "Changes are disabled in the public read-only demo.";
+    });
+  });
+  root.querySelectorAll("button").forEach((button) => {
+    if (button.matches(readOnlyBrowsingControls)) return;
+    button.disabled = true;
+    button.title ||= "Changes are disabled in the public read-only demo.";
+  });
+}
+
+function setDemoReadOnly(enabled) {
+  state.demoReadOnly = Boolean(enabled);
+  document.body.classList.toggle("demo-read-only", state.demoReadOnly);
+  els.demoLoginNotice.hidden = !state.demoReadOnly;
+  els.demoReadOnlyBanner.hidden = !state.demoReadOnly;
+  els.forgotPasswordButton.hidden = state.demoReadOnly;
+  applyDemoReadOnlyUi();
+}
+
+new MutationObserver(() => applyDemoReadOnlyUi())
+  .observe(els.viewRoot, { childList: true, subtree: true });
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -116,6 +169,15 @@ function formatRelative(value) {
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
 }
+function formatDuration(milliseconds) {
+  const seconds = Math.max(0, Math.round(Number(milliseconds || 0) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
 function actionLabel(action) {
   return ({
     start: "Starting", stop: "Stopping", shutdown: "Shutting down", reboot: "Rebooting", reset: "Resetting",
@@ -135,6 +197,8 @@ function actionProgressTitle(action) {
 }
 
 async function apiFetch(path, options = {}) {
+  const timeoutMs = Math.max(1_000, Number(options.timeoutMs) || 20_000);
+  delete options.timeoutMs;
   const headers = { Accept: "application/json", ...(options.headers || {}) };
   if (options.body !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -142,7 +206,7 @@ async function apiFetch(path, options = {}) {
   }
   if (state.csrfToken && options.method && options.method !== "GET") headers["X-CSRF-Token"] = state.csrfToken;
   const timeoutController = new AbortController();
-  const timeout = setTimeout(() => timeoutController.abort(), 20_000);
+  const timeout = setTimeout(() => timeoutController.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(path, { credentials: "same-origin", ...options, headers, signal: options.signal || timeoutController.signal });
@@ -164,6 +228,7 @@ async function apiFetch(path, options = {}) {
 
 function friendlyError(error) {
   const messages = {
+    demo_read_only: "This public demo is read-only. No changes were made.",
     invalid_credentials: "The email address or password is incorrect.",
     invalid_password: "Passwords must contain between 12 and 256 characters.",
     too_many_attempts: "Too many sign-in attempts. Please wait and try again.",
@@ -174,6 +239,9 @@ function friendlyError(error) {
     invalid_mfa_secret: "Nimbus could not read the stored authenticator secret.",
     mfa_already_enabled: "Two-factor authentication is already enabled.",
     mfa_not_enabled: "Two-factor authentication is not enabled for this account.",
+    mfa_enrollment_required: "Two-factor authentication must be configured before this account can continue.",
+    mfa_required_by_policy: "Two-factor authentication is required by the platform security policy and cannot be disabled.",
+    invalid_security_policy: "Choose valid Security Center policy settings.",
     mfa_setup_expired: "The setup window expired. Start two-factor setup again.",
     mfa_self_reset_forbidden: "Use your own account settings to disable two-factor authentication.",
     session_not_found: "That session has already ended.",
@@ -262,6 +330,38 @@ function friendlyError(error) {
     password_confirmation_mismatch: "The two passwords do not match.",
     invitation_not_pending: "This account has already completed its invitation.",
     password_not_set: "This account must complete its invitation before password recovery can be used.",
+    operations_refresh_rate_limited: "Too many full health refreshes were requested. Wait a few minutes and try again.",
+    operations_incident_not_found: "That operations incident no longer exists.",
+    operations_incident_resolved: "That incident was automatically resolved before it could be acknowledged.",
+    invalid_maintenance_kind: "Choose planned maintenance or a service incident.",
+    invalid_maintenance_severity: "Choose a valid notice severity.",
+    invalid_maintenance_title: "Enter a maintenance title with no more than 160 characters.",
+    invalid_maintenance_message: "Enter a maintenance message with no more than 4,000 characters.",
+    invalid_maintenance_schedule: "Choose a valid start time and an optional later end time.",
+    invalid_maintenance_targets: "Choose one audience type and at least one target.",
+    maintenance_target_not_found: "One of the selected maintenance targets no longer exists.",
+    maintenance_not_found: "That maintenance notice no longer exists.",
+    maintenance_not_editable: "Only unpublished drafts can be edited.",
+    maintenance_already_published: "That maintenance notice has already been published.",
+    maintenance_ended: "This maintenance window has already ended.",
+    maintenance_no_recipients: "No active customer users are affected by that audience. Check assignments and customer users.",
+    maintenance_not_resolvable: "Only active or scheduled maintenance can be resolved.",
+    maintenance_not_cancellable: "Only a draft or scheduled notice can be cancelled.",
+    maintenance_not_deletable: "Only unpublished drafts can be deleted.",
+    maintenance_publish_rate_limited: "Too many maintenance notices were published. Wait before trying again.",
+    customer_required: "Only customer accounts can create support tickets.",
+    invalid_ticket_subject: "Enter a clear ticket subject containing 3-160 characters.",
+    invalid_ticket_category: "Choose a valid support category.",
+    invalid_ticket_priority: "Choose a valid support priority.",
+    invalid_ticket_resource: "That server is not assigned to this customer account.",
+    invalid_ticket_message: "Enter a support message containing no more than 8,000 characters.",
+    invalid_ticket_status: "Choose a valid support status.",
+    invalid_ticket_assignee: "Choose an active administrator.",
+    support_ticket_not_found: "That support ticket does not exist or is outside your customer account.",
+    support_ticket_not_replyable: "Reopen this ticket before adding another reply.",
+    support_ticket_not_reopenable: "Only resolved or closed tickets can be reopened.",
+    support_ticket_rate_limited: "Too many support tickets were opened. Wait before creating another.",
+    support_message_rate_limited: "Too many support replies were sent. Wait before trying again.",
   };
   return messages[error?.code] || error?.message || "Something went wrong.";
 }
@@ -277,9 +377,10 @@ function showToast(type, title, message) {
 }
 
 function setConnection(mode) {
-  els.connectionHealth.className = `connection-card ${mode === "demo" ? "demo" : ""}`;
-  els.healthTitle.textContent = mode === "demo" ? "Interactive demo" : "Connected securely";
-  els.healthDetail.textContent = mode === "demo" ? "Safe simulated Proxmox data" : "Official Proxmox API";
+  const demo = mode === "demo" || mode === "demo_read_only";
+  els.connectionHealth.className = `connection-card ${demo ? "demo" : ""}`;
+  els.healthTitle.textContent = mode === "demo_read_only" ? "Public read-only demo" : mode === "demo" ? "Interactive demo" : "Connected securely";
+  els.healthDetail.textContent = mode === "demo_read_only" ? "Safe fictional infrastructure" : mode === "demo" ? "Safe simulated Proxmox data" : "Official Proxmox API";
 }
 
 function setAuthenticated(authenticated) {
@@ -303,30 +404,43 @@ function applyUser() {
 async function loadSession() {
   try {
     const result = await apiFetch("/api/auth/session");
+    setDemoReadOnly(result.demoReadOnly);
     state.user = result.user;
     state.csrfToken = result.csrfToken;
     setAuthenticated(true);
     applyUser();
     await loadDashboard();
     route();
-  } catch {
+  } catch (error) {
+    setDemoReadOnly(error.payload?.demoReadOnly);
     setAuthenticated(false);
   }
 }
 
 async function loadDashboard() {
   state.dashboard = await apiFetch("/api/v1/dashboard");
+  setDemoReadOnly(state.dashboard.demoReadOnly);
   if (state.currentView !== "notifications") state.notifications = null;
+  if (state.currentView !== "maintenance") state.maintenance = null;
+  if (state.currentView !== "support") state.support = null;
   state.user = state.dashboard.user;
+  mergeNetworkAddresses(state.dashboard.resources, state.network);
   state.lastUpdatedAt = Date.now();
   els.instanceCount.textContent = state.dashboard.resources.length;
   const unread = Number(state.dashboard.notifications?.unread || 0);
   els.notificationCount.textContent = unread > 99 ? "99+" : String(unread);
   els.notificationCount.hidden = unread === 0;
+  const maintenanceUnread = Number(state.dashboard.maintenance?.unread || 0);
+  els.maintenanceCount.textContent = maintenanceUnread > 99 ? "99+" : String(maintenanceUnread);
+  els.maintenanceCount.hidden = maintenanceUnread === 0;
+  const supportUnread = Number(state.dashboard.support?.unread || 0);
+  els.supportCount.textContent = supportUnread > 99 ? "99+" : String(supportUnread);
+  els.supportCount.hidden = supportUnread === 0;
   els.lastUpdated.textContent = `Updated ${formatDate(state.lastUpdatedAt)}`;
   setConnection(state.dashboard.mode);
   applyUser();
   scheduleTaskPolling();
+  scheduleNetworkDiscovery();
 }
 
 async function loadNotifications() {
@@ -334,8 +448,77 @@ async function loadNotifications() {
   return state.notifications;
 }
 
+async function loadNetwork({ force = false } = {}) {
+  if (networkLoadPromise) return networkLoadPromise;
+  if (!force && state.network && Date.now() - networkLoadedAt < networkRefreshMs) {
+    mergeNetworkAddresses(state.dashboard?.resources, state.network);
+    return state.network;
+  }
+  networkLoading = true;
+  networkLoadPromise = apiFetch("/api/v1/network")
+    .then((result) => {
+      state.network = result;
+      networkLoadedAt = Date.now();
+      mergeNetworkAddresses(state.dashboard?.resources, result);
+      return result;
+    })
+    .finally(() => {
+      networkLoading = false;
+      networkLoadPromise = null;
+    });
+  return networkLoadPromise;
+}
+
+function scheduleNetworkDiscovery() {
+  if (!state.user || state.dashboard?.security?.mfa?.enrollmentRequired) return;
+  if (state.network && Date.now() - networkLoadedAt < networkRefreshMs) return;
+  void loadNetwork({ force: true }).then(() => {
+    if (["overview", "instances", "network"].includes(state.currentView)) route();
+  }).catch(() => {
+    // Preserve the last successful discovery. The Network page exposes details
+    // when a guest agent or Proxmox permission is unavailable.
+  });
+}
+
+function resourceAddressLabel(resource) {
+  if (resource.ip) return resource.ip;
+  const known = Boolean(state.network?.networks && Object.hasOwn(state.network.networks, resource.id));
+  return networkLoading && !known ? "Discovering…" : "Unavailable";
+}
+
+async function loadMaintenance() {
+  state.maintenance = await apiFetch("/api/v1/maintenance?limit=100");
+  return state.maintenance;
+}
+
+function supportTicketIdFromHash() {
+  const match = location.hash.replace(/^#/, "").match(/^support\/(.+)$/);
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
+async function loadSupport(ticketId = supportTicketIdFromHash()) {
+  const listing = await apiFetch("/api/v1/support/tickets?limit=100");
+  let selected = null;
+  if (ticketId) {
+    selected = await apiFetch(`/api/v1/support/tickets/${encodeURIComponent(ticketId)}`);
+    if (selected.ticket?.unread && !state.demoReadOnly) {
+      await apiFetch(`/api/v1/support/tickets/${encodeURIComponent(ticketId)}/read`, { method: "POST", body: {} });
+      selected.ticket.unread = false;
+      const listed = listing.tickets?.items?.find((ticket) => ticket.id === ticketId);
+      if (listed) listed.unread = false;
+      listing.tickets.unread = Math.max(0, Number(listing.tickets.unread || 0) - 1);
+    }
+  }
+  state.support = { ...listing, selected };
+  els.supportCount.textContent = Number(listing.tickets?.unread || 0) > 99 ? "99+" : String(listing.tickets?.unread || 0);
+  els.supportCount.hidden = !Number(listing.tickets?.unread || 0);
+  return state.support;
+}
+
 async function loadAdmin() {
   state.admin = await apiFetch("/api/admin/state");
+  setDemoReadOnly(state.admin.demoReadOnly);
 }
 
 function filteredResources(resources = state.dashboard?.resources || []) {
@@ -404,14 +587,52 @@ function activityLabel(action) {
   return String(action || "activity").split(".").map((part) => part.replace(/_/g, " ")).join(" · ").replace(/^./, (value) => value.toUpperCase());
 }
 
+function maintenanceStatusLabel(status) {
+  return ({
+    draft: "Draft",
+    scheduled: "Scheduled",
+    active: "In progress",
+    resolved: "Resolved",
+    cancelled: "Cancelled",
+  })[status] || status;
+}
+
+function maintenanceSchedule(item) {
+  const start = formatDate(item.startsAt);
+  if (item.status === "resolved") return item.resolvedAt ? `Resolved ${formatDate(item.resolvedAt)}` : `Completed after ${start}`;
+  if (item.status === "cancelled") return `Cancelled · originally ${start}`;
+  if (item.endsAt) return `${start} — ${formatDate(item.endsAt)}`;
+  return `${start} — until further notice`;
+}
+
+function maintenanceBanner() {
+  const items = (state.dashboard.maintenance?.items || [])
+    .filter((item) => ["active", "scheduled"].includes(item.status))
+    .slice(0, 3);
+  if (!items.length) return "";
+  const highest = items.some((item) => item.severity === "critical") ? "critical"
+    : items.some((item) => item.severity === "warning") ? "warning"
+      : "info";
+  return `<section class="maintenance-overview-banner ${highest}">
+    <span class="maintenance-banner-icon">${highest === "critical" ? "!" : "△"}</span>
+    <div>
+      <p class="eyebrow">${items.some((item) => item.status === "active") ? "Active service notice" : "Upcoming maintenance"}</p>
+      <h2>${escapeHtml(items[0].title)}</h2>
+      <p>${escapeHtml(items[0].message)}</p>
+      <small>${escapeHtml(maintenanceSchedule(items[0]))}${items.length > 1 ? ` · ${items.length - 1} more notice${items.length === 2 ? "" : "s"}` : ""}</small>
+    </div>
+    <a class="button secondary small" href="#maintenance">View details</a>
+  </section>`;
+}
+
 function renderOverview() {
   const resources = filteredResources().slice(0, 6);
-  els.viewRoot.innerHTML = `${metricCards()}<section class="layout-grid overview-primary"><article class="panel"><header class="panel-header"><div><h2>${state.user.role === "admin" ? "Infrastructure inventory" : "Your infrastructure"}</h2><p>Individually assigned guests, resolved by the panel.</p></div><a class="text-link" href="#instances">View all →</a></header>${resourceTable(resources, { compact: true })}</article><aside class="panel"><header class="panel-header"><div><h2>Recent activity</h2><p>Audited account events.</p></div></header>${activityMarkup(state.dashboard.activity.items)}</aside></section>`;
+  els.viewRoot.innerHTML = `${maintenanceBanner()}${metricCards()}<section class="layout-grid overview-primary"><article class="panel"><header class="panel-header"><div><h2>${state.user.role === "admin" ? "Infrastructure inventory" : "Your infrastructure"}</h2><p>Individually assigned guests, resolved by the panel.</p></div><a class="text-link" href="#instances">View all →</a></header>${resourceTable(resources, { compact: true })}</article><aside class="panel"><header class="panel-header"><div><h2>Recent activity</h2><p>Audited account events.</p></div></header>${activityMarkup(state.dashboard.activity.items)}</aside></section>`;
 }
 
 function renderInstances() {
   const resources = filteredResources();
-  els.viewRoot.innerHTML = resources.length ? `<section class="instance-grid">${resources.map((resource) => `<article class="instance-card"><div class="card-title">${resourceIdentity(resource)}${statusMarkup(resource)}</div><div class="instance-stats"><div class="mini-stat"><small>CPU</small><strong>${pct(resource.cpu)}</strong></div><div class="mini-stat"><small>Memory</small><strong>${resource.memoryUsed} / ${resource.memory} GB</strong></div><div class="mini-stat"><small>Storage</small><strong>${resource.storageUsed} / ${resource.storage} GB</strong></div><div class="mini-stat"><small>Address</small><strong>${escapeHtml(resource.ip || "Unavailable")}</strong></div></div><div class="instance-actions">${actionButtons(resource)}</div></article>`).join("")}</section>` : emptyState("▤", "No resources assigned", "Ask an administrator to assign a VM or container directly to your customer account.");
+  els.viewRoot.innerHTML = resources.length ? `<section class="instance-grid">${resources.map((resource) => `<article class="instance-card"><div class="card-title">${resourceIdentity(resource)}${statusMarkup(resource)}</div><div class="instance-stats"><div class="mini-stat"><small>CPU</small><strong>${pct(resource.cpu)}</strong></div><div class="mini-stat"><small>Memory</small><strong>${resource.memoryUsed} / ${resource.memory} GB</strong></div><div class="mini-stat"><small>Storage</small><strong>${resource.storageUsed} / ${resource.storage} GB</strong></div><div class="mini-stat"><small>Address</small><strong>${escapeHtml(resourceAddressLabel(resource))}</strong></div></div><div class="instance-actions">${actionButtons(resource)}</div></article>`).join("")}</section>` : emptyState("▤", "No resources assigned", "Ask an administrator to assign a VM or container directly to your customer account.");
 }
 
 function detailSkeleton() {
@@ -807,9 +1028,33 @@ function drawInstanceChart() {
   drawLine("memory", "#36aa82");
 }
 
+function networkDiscoveryMessage(network, resource) {
+  if (network?.source === "guest_agent") return { tone: "success", text: "Live address reported by QEMU Guest Agent." };
+  if (network?.source === "guest") return { tone: "success", text: "Live address reported by the container." };
+  if (network?.source === "configuration" && network.status === "stopped") return { tone: "neutral", text: "Configured static address; the guest is currently stopped." };
+  if (network?.source === "configuration") return { tone: "neutral", text: "Configured static address; live guest discovery is unavailable." };
+  if (network?.status === "stopped") return { tone: "neutral", text: "The guest is stopped and has no configured static address." };
+  if (network?.status === "permission_required") return {
+    tone: "warning",
+    text: resource.type === "qemu"
+      ? "The Proxmox API token needs VM.GuestAgent.Audit for live QEMU network information."
+      : "The Proxmox API token cannot read this container's network information.",
+  };
+  if (network?.status === "guest_agent_unavailable" && resource.type === "qemu") return { tone: "warning", text: "QEMU Guest Agent did not report an address. Static Cloud-Init addresses are used as a fallback." };
+  if (network?.status === "network_unavailable") return { tone: "warning", text: "The container did not report an address and has no configured static address." };
+  if (network?.status === "unavailable") return { tone: "warning", text: "Network discovery is temporarily unavailable." };
+  return { tone: "neutral", text: "No usable guest address was reported." };
+}
+
 function renderNetwork() {
   const resources = filteredResources();
-  els.viewRoot.innerHTML = resources.length ? `<section class="network-grid">${resources.map((resource) => `<article class="network-card"><div class="card-title">${resourceIdentity(resource)}${statusMarkup(resource)}</div><ul class="network-addresses"><li><small>Primary address</small><span>${escapeHtml(resource.ip || "Unavailable")}</span></li><li><small>Cluster / node</small><span>${escapeHtml(resource.clusterId)} / ${escapeHtml(resource.node)}</span></li><li><small>Guest identity</small><span>${resource.type.toUpperCase()} ${resource.vmid}</span></li></ul></article>`).join("")}</section>` : emptyState("⌘", "No network information", "Assigned resources will appear here.");
+  els.viewRoot.innerHTML = resources.length ? `<section class="network-grid">${resources.map((resource) => {
+    const network = state.network?.networks?.[resource.id] || {};
+    const primaryIp = network.primaryIp || resource.ip;
+    const discovery = networkDiscoveryMessage(network, resource);
+    const additional = Math.max(0, Number(network.addresses?.length || 0) - (primaryIp ? 1 : 0));
+    return `<article class="network-card"><div class="card-title">${resourceIdentity(resource)}${statusMarkup(resource)}</div><ul class="network-addresses"><li><small>Primary address</small><span>${escapeHtml(primaryIp || "Not reported")}${additional ? `<em>+${additional} more</em>` : ""}</span></li><li><small>Cluster / node</small><span>${escapeHtml(resource.clusterId)} / ${escapeHtml(resource.node)}</span></li><li><small>Guest identity</small><span>${resource.type.toUpperCase()} ${resource.vmid}</span></li></ul><p class="network-discovery ${discovery.tone}"><span aria-hidden="true"></span>${escapeHtml(discovery.text)}</p></article>`;
+  }).join("")}</section>` : emptyState("⌘", "No network information", "Assigned resources will appear here.");
 }
 
 function renderActivity() {
@@ -869,6 +1114,184 @@ function renderNotifications() {
   </section>`;
 }
 
+function maintenanceItemMarkup(item, { admin = false } = {}) {
+  const targets = (item.targets || []).map((target) => target.label).join(", ");
+  const icon = item.status === "resolved" ? "✓"
+    : item.status === "cancelled" ? "×"
+      : item.severity === "critical" ? "!"
+        : "△";
+  const actions = admin
+    ? `<div class="maintenance-admin-actions">
+        ${item.status === "draft" ? `<button class="row-button" data-edit-maintenance="${escapeHtml(item.id)}">Edit</button><button class="row-button" data-publish-maintenance="${escapeHtml(item.id)}">Publish</button><button class="row-button danger" data-delete-maintenance="${escapeHtml(item.id)}">Delete</button>` : ""}
+        ${item.status === "scheduled" ? `<button class="row-button" data-resolve-maintenance="${escapeHtml(item.id)}">Resolve now</button><button class="row-button danger" data-cancel-maintenance="${escapeHtml(item.id)}">Cancel</button>` : ""}
+        ${item.status === "active" ? `<button class="row-button" data-resolve-maintenance="${escapeHtml(item.id)}">Mark resolved</button>` : ""}
+      </div>`
+    : item.readAt
+      ? ""
+      : `<button class="row-button" data-read-maintenance="${escapeHtml(item.deliveryId)}">Mark read</button>`;
+  return `<article class="maintenance-item ${escapeHtml(item.status)} ${escapeHtml(item.severity)} ${item.readAt || admin ? "" : "unread"}">
+    <span class="maintenance-item-icon">${icon}</span>
+    <div class="maintenance-item-copy">
+      <div class="maintenance-item-heading">
+        <span class="pill ${item.status === "resolved" ? "success" : ["critical", "warning"].includes(item.severity) ? "warning" : ""}">${escapeHtml(maintenanceStatusLabel(item.status))}</span>
+        <span class="maintenance-kind">${item.kind === "incident" ? "Service incident" : "Planned maintenance"}</span>
+        ${!admin && !item.readAt ? `<i>New</i>` : ""}
+      </div>
+      <h3>${escapeHtml(item.title)}</h3>
+      <p>${escapeHtml(item.message).replace(/\r?\n/g, "<br>")}</p>
+      <div class="maintenance-item-meta">
+        <span><strong>Window</strong>${escapeHtml(maintenanceSchedule(item))}</span>
+        ${admin ? `<span><strong>Audience</strong>${escapeHtml(targets || "No target")}</span><span><strong>Recipients</strong>${plural(item.recipientCount || 0, "user")}${item.notifyEmail ? " · email enabled" : " · in-panel only"}</span>` : ""}
+      </div>
+    </div>
+    ${actions}
+  </article>`;
+}
+
+function renderMaintenance() {
+  const result = state.maintenance || { maintenance: state.dashboard.maintenance };
+  if (!result?.maintenance) {
+    els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading maintenance notices</div>`;
+    loadMaintenance().then(renderMaintenance).catch((error) => showToast("error", "Could not load maintenance", friendlyError(error)));
+    return;
+  }
+  const notices = result.maintenance;
+  const active = notices.items.filter((item) => ["active", "scheduled"].includes(item.status));
+  const history = notices.items.filter((item) => !["active", "scheduled"].includes(item.status));
+  els.viewRoot.innerHTML = `<section class="maintenance-status-hero ${notices.activeCount ? "active" : ""}">
+      <span>${notices.activeCount ? "!" : "✓"}</span>
+      <div><p class="eyebrow">Service status</p><h2>${notices.activeCount ? plural(notices.activeCount, "active notice") : notices.upcomingCount ? plural(notices.upcomingCount, "scheduled window") : "All systems available"}</h2><p>${notices.activeCount ? "Review the active work or incident below." : notices.upcomingCount ? "Your affected maintenance windows are shown below." : "There is no active or upcoming maintenance for your assigned infrastructure."}</p></div>
+      <span class="pill ${notices.unread ? "warning" : "success"}">${plural(notices.unread || 0, "unread")}</span>
+    </section>
+    <section class="panel maintenance-center-panel">
+      <header class="panel-header"><div><h2>Active & upcoming</h2><p>Only notices mapped to your customer account are visible here.</p></div><span class="pill">${active.length}</span></header>
+      <div class="maintenance-list">${active.length ? active.map((item) => maintenanceItemMarkup(item)).join("") : emptyState("✓", "No affected maintenance", "Nimbus will show scheduled work and active incidents here.")}</div>
+    </section>
+    <section class="panel maintenance-center-panel">
+      <header class="panel-header"><div><h2>Maintenance history</h2><p>Resolved and cancelled notices that were previously published to this login.</p></div><span class="pill">${history.length}</span></header>
+      <div class="maintenance-list">${history.length ? history.map((item) => maintenanceItemMarkup(item)).join("") : emptyState("△", "No maintenance history", "Completed notices will remain available here.")}</div>
+    </section>`;
+}
+
+function supportStatusLabel(status) {
+  return ({
+    open: "Open",
+    waiting_support: "Waiting for support",
+    waiting_customer: "Waiting for customer",
+    resolved: "Resolved",
+    closed: "Closed",
+  })[status] || status;
+}
+
+function supportPriorityLabel(priority) {
+  return priority === "urgent" ? "Urgent" : priority === "high" ? "High" : priority === "low" ? "Low" : "Normal";
+}
+
+function supportTicketListMarkup(tickets) {
+  if (!tickets.length) return emptyState("?", "No support tickets", state.user.role === "admin"
+    ? "New customer requests will appear in this queue."
+    : "Open a ticket when you need help with your managed infrastructure.");
+  return `<div class="support-ticket-list">${tickets.map((ticket) => `
+    <button class="support-ticket-row ${ticket.unread ? "unread" : ""} ${state.support?.selected?.ticket?.id === ticket.id ? "active" : ""}" type="button" data-open-support="${escapeHtml(ticket.id)}">
+      <span class="support-ticket-row-top"><strong>${escapeHtml(ticket.subject)}</strong>${ticket.unread ? "<i>New</i>" : ""}</span>
+      <span class="support-ticket-row-reference">${escapeHtml(ticket.reference)}${state.user.role === "admin" ? ` · ${escapeHtml(ticket.customerName)}` : ""}</span>
+      <span class="support-ticket-row-bottom">
+        <span class="support-status ${escapeHtml(ticket.status)}">${escapeHtml(supportStatusLabel(ticket.status))}</span>
+        <span class="support-priority ${escapeHtml(ticket.priority)}">${escapeHtml(supportPriorityLabel(ticket.priority))}</span>
+        <small>${escapeHtml(formatRelative(ticket.lastMessageAt))}</small>
+      </span>
+    </button>`).join("")}</div>`;
+}
+
+function supportCreateMarkup() {
+  if (state.user.role === "admin") return "";
+  const resources = state.dashboard.resources || [];
+  return `<details class="panel support-create-panel" ${state.support?.tickets?.total ? "" : "open"}>
+    <summary><span><strong>Open a support ticket</strong><small>Describe the problem once; Nimbus keeps the complete conversation together.</small></span><span class="button primary small">New ticket</span></summary>
+    <form class="support-create-form" id="supportTicketForm">
+      <div class="form-grid">
+        <div class="field full"><label for="supportSubject">Subject</label><input id="supportSubject" name="subject" minlength="3" maxlength="160" required placeholder="Example: VM cannot reach the internet"></div>
+        <div class="field"><label for="supportCategory">Category</label><select id="supportCategory" name="category"><option value="technical">Technical</option><option value="network">Network</option><option value="account">Account</option><option value="billing">Billing</option><option value="other">Other</option></select></div>
+        <div class="field"><label for="supportPriority">Priority</label><select id="supportPriority" name="priority"><option value="normal">Normal</option><option value="low">Low</option><option value="high">High</option><option value="urgent">Urgent</option></select></div>
+        <div class="field full"><label for="supportResource">Related server <span>optional</span></label><select id="supportResource" name="resourceId"><option value="">General account question</option>${resources.map((resource) => `<option value="${escapeHtml(resource.id)}">${escapeHtml(resource.displayName || resource.name)} · ${resource.type.toUpperCase()} ${resource.vmid}</option>`).join("")}</select><small>Only servers assigned to this customer account are accepted by the backend.</small></div>
+        <div class="field full"><label for="supportMessage">What can we help with?</label><textarea id="supportMessage" name="message" maxlength="8000" rows="6" required placeholder="Include what you expected, what happened, and when you first noticed it."></textarea></div>
+      </div>
+      <div class="notice warning"><span>!</span><span>Never include passwords, Proxmox tokens, private keys, or recovery codes.</span></div>
+      <div class="form-actions"><button class="button primary" type="submit">Create support ticket</button><p class="form-message"></p></div>
+    </form>
+  </details>`;
+}
+
+function supportConversationMarkup(selected) {
+  if (!selected?.ticket) {
+    return `<section class="panel support-thread-panel">${emptyState("?", "Choose a ticket", state.user.role === "admin"
+      ? "Select a customer request to review its conversation and ownership."
+      : "Select a ticket to view replies or continue the conversation.")}</section>`;
+  }
+  const ticket = selected.ticket;
+  const active = !["resolved", "closed"].includes(ticket.status);
+  const admin = state.user.role === "admin";
+  const assignees = selected.assignees || state.support.assignees || [];
+  const management = admin ? `<form class="support-management" id="supportManageForm" data-ticket-id="${escapeHtml(ticket.id)}">
+    <div class="field"><label>Status</label><select name="status">${["open", "waiting_support", "waiting_customer", "resolved", "closed"].map((status) => `<option value="${status}" ${ticket.status === status ? "selected" : ""}>${escapeHtml(supportStatusLabel(status))}</option>`).join("")}</select></div>
+    <div class="field"><label>Priority</label><select name="priority">${["low", "normal", "high", "urgent"].map((priority) => `<option value="${priority}" ${ticket.priority === priority ? "selected" : ""}>${escapeHtml(supportPriorityLabel(priority))}</option>`).join("")}</select></div>
+    <div class="field"><label>Assigned administrator</label><select name="assignedTo"><option value="">Unassigned</option>${assignees.map((assignee) => `<option value="${escapeHtml(assignee.id)}" ${ticket.assignedTo === assignee.id ? "selected" : ""}>${escapeHtml(assignee.displayName)}</option>`).join("")}</select></div>
+    <button class="button secondary" type="submit">Save ticket</button>
+    <p class="form-message"></p>
+  </form>` : "";
+  const messages = selected.messages || [];
+  const conversation = messages.map((message) => `<article class="support-message ${message.authorRole} ${message.internal ? "internal" : ""}">
+    <span class="support-message-avatar">${message.internal ? "•" : initials(message.authorName)}</span>
+    <div class="support-message-body">
+      <header><span><strong>${escapeHtml(message.authorName)}</strong><small>${message.internal ? "Internal administrator note" : message.authorRole === "admin" ? "Support team" : "Customer"}</small></span><time>${escapeHtml(formatDate(message.createdAt))}</time></header>
+      <p>${escapeHtml(message.body).replace(/\r?\n/g, "<br>")}</p>
+    </div>
+  </article>`).join("");
+  const reply = active ? `<form class="support-reply-form" id="supportReplyForm" data-ticket-id="${escapeHtml(ticket.id)}">
+    <div class="field"><label for="supportReply">${admin ? "Add reply or internal note" : "Reply to support"}</label><textarea id="supportReply" name="message" maxlength="8000" rows="5" required placeholder="${admin ? "Write a customer-facing reply…" : "Add any new details here…"}"></textarea></div>
+    ${admin ? `<label class="policy-checkbox support-internal-toggle"><input type="checkbox" name="internal"><span><strong>Internal note</strong><small>Visible only to administrators and never emailed to the customer.</small></span></label>` : ""}
+    <div class="form-actions"><button class="button primary" type="submit">Send ${admin ? "message" : "reply"}</button>${!admin ? `<button class="button secondary" type="button" data-close-support="${escapeHtml(ticket.id)}">Close ticket</button>` : ""}<p class="form-message"></p></div>
+  </form>` : `<div class="support-thread-closed"><span>✓</span><div><strong>${ticket.status === "resolved" ? "This ticket is resolved" : "This ticket is closed"}</strong><p>Reopen it if more help is required.</p></div><button class="button secondary" type="button" data-reopen-support="${escapeHtml(ticket.id)}">Reopen ticket</button></div>`;
+  return `<section class="panel support-thread-panel">
+    <header class="support-thread-header">
+      <div><p class="eyebrow">${escapeHtml(ticket.reference)}</p><h2>${escapeHtml(ticket.subject)}</h2><p>${admin ? `${escapeHtml(ticket.customerName)} · ` : ""}${ticket.resourceName ? `${escapeHtml(ticket.resourceName)} · ${ticket.resourceType.toUpperCase()} ${ticket.vmid}` : "General support request"}</p></div>
+      <div class="support-thread-badges"><span class="support-status ${escapeHtml(ticket.status)}">${escapeHtml(supportStatusLabel(ticket.status))}</span><span class="support-priority ${escapeHtml(ticket.priority)}">${escapeHtml(supportPriorityLabel(ticket.priority))}</span></div>
+    </header>
+    ${management}
+    <div class="support-conversation">${conversation}</div>
+    ${reply}
+  </section>`;
+}
+
+function renderSupport() {
+  const result = state.support;
+  if (!result?.tickets) {
+    els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading support tickets</div>`;
+    loadSupport().then(renderSupport).catch((error) => showToast("error", "Could not load support tickets", friendlyError(error)));
+    return;
+  }
+  const query = state.search.trim().toLowerCase();
+  const tickets = query
+    ? result.tickets.items.filter((ticket) => [ticket.reference, ticket.subject, ticket.customerName, ticket.resourceName, ticket.status, ticket.priority].some((value) => String(value || "").toLowerCase().includes(query)))
+    : result.tickets.items;
+  const heroTitle = state.user.role === "admin"
+    ? result.tickets.waitingSupport ? `${plural(result.tickets.waitingSupport, "request")} waiting for support` : "Customer support queue is clear"
+    : result.tickets.active ? `${plural(result.tickets.active, "active support ticket")}` : "Your support inbox is clear";
+  els.viewRoot.innerHTML = `<section class="support-hero">
+      <span class="support-hero-icon">?</span>
+      <div><p class="eyebrow">${state.user.role === "admin" ? "Administrator queue" : "Private customer support"}</p><h2>${heroTitle}</h2><p>${state.user.role === "admin" ? "Every ticket is tenant-scoped, auditable, and assignable to one administrator." : "Only users in your customer account and Nimbus administrators can view these conversations."}</p></div>
+      <div class="support-summary"><span><strong>${result.tickets.active}</strong><small>Active</small></span><span><strong>${result.tickets.unread}</strong><small>Unread</small></span><span><strong>${result.tickets.resolved}</strong><small>Resolved</small></span></div>
+    </section>
+    ${supportCreateMarkup()}
+    <section class="support-workspace">
+      <article class="panel support-queue-panel">
+        <header class="panel-header"><div><h2>${state.user.role === "admin" ? "Ticket queue" : "Your tickets"}</h2><p>${plural(result.tickets.total, "conversation")} · newest activity first</p></div><span class="pill ${result.tickets.waitingSupport ? "warning" : "success"}">${state.user.role === "admin" ? `${result.tickets.waitingSupport} waiting` : `${result.tickets.unread} unread`}</span></header>
+        ${supportTicketListMarkup(tickets)}
+      </article>
+      ${supportConversationMarkup(result.selected)}
+    </section>`;
+}
+
 function sessionDevice(userAgent) {
   const value = String(userAgent || "");
   const browser = value.includes("Firefox/") ? "Firefox"
@@ -890,6 +1313,12 @@ function renderSettings() {
   const mfa = security.mfa || {};
   const sessions = security.sessions || [];
   const enrollment = state.mfaEnrollment;
+  const enrollmentRequired = Boolean(mfa.enrollmentRequired);
+  const policyBanner = enrollmentRequired ? `<section class="security-requirement-banner">
+    <span class="security-requirement-icon">◎</span>
+    <div><p class="eyebrow">Action required</p><h2>Protect this account with two-factor authentication</h2><p>Your platform security policy requires an authenticator before infrastructure, customer, or administrator data can be accessed.</p></div>
+    <span class="pill warning">Access restricted</span>
+  </section>` : "";
   const recoveryPanel = state.recoveryCodes?.length ? `<section class="panel recovery-panel">
     <header class="panel-header"><div><p class="eyebrow">Save these now</p><h2>Recovery codes</h2><p>Each code works once. They will not be shown again.</p></div><button class="button secondary small" type="button" data-copy-recovery>Copy all</button></header>
     <div class="recovery-code-grid">${state.recoveryCodes.map((code) => `<code>${escapeHtml(code)}</code>`).join("")}</div>
@@ -904,23 +1333,29 @@ function renderSettings() {
     </div>
     <form id="mfaConfirmForm">
       <div class="field"><label for="mfaConfirmCode">Six-digit code</label><input id="mfaConfirmCode" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required placeholder="123456"></div>
-      <div class="form-actions"><button class="button primary" type="submit">Enable 2FA</button><button class="button secondary" type="button" data-cancel-mfa-setup>Cancel</button><p class="form-message"></p></div>
+      <div class="form-actions"><button class="button primary" type="submit">Enable 2FA</button>${enrollmentRequired ? "" : `<button class="button secondary" type="button" data-cancel-mfa-setup>Cancel</button>`}<p class="form-message"></p></div>
     </form>
   </section>` : mfa.enabled ? `<section class="panel form-panel security-panel">
     <div class="security-heading"><span class="security-icon enabled">✓</span><span><h2>Two-factor authentication</h2><p>Authenticator protection is enabled for this account.</p></span><span class="pill success">Enabled</span></div>
     <div class="security-facts"><span><small>Recovery codes remaining</small><strong>${Number(mfa.recoveryCodesRemaining || 0)}</strong></span><span><small>Enabled</small><strong>${formatDate(mfa.confirmedAt, { dateOnly: true })}</strong></span></div>
     <details class="security-details"><summary>Generate new recovery codes</summary><form id="mfaRecoveryForm"><div class="form-grid"><div class="field"><label>Current password</label><input type="password" name="currentPassword" required autocomplete="current-password"></div><div class="field"><label>Authenticator code</label><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></div></div><div class="form-actions"><button class="button secondary" type="submit">Replace recovery codes</button><p class="form-message"></p></div></form></details>
-    <details class="security-details danger-zone"><summary>Disable two-factor authentication</summary><form id="mfaDisableForm"><div class="form-grid"><div class="field"><label>Current password</label><input type="password" name="currentPassword" required autocomplete="current-password"></div><div class="field"><label>Authenticator or recovery code</label><input name="code" autocomplete="one-time-code" maxlength="16" required></div></div><div class="form-actions"><button class="button danger" type="submit">Disable 2FA</button><p class="form-message"></p></div></form></details>
+    ${mfa.requiredByPolicy
+      ? `<div class="notice"><span>✓</span><span>Two-factor authentication is required by the current platform policy and cannot be disabled.</span></div>`
+      : `<details class="security-details danger-zone"><summary>Disable two-factor authentication</summary><form id="mfaDisableForm"><div class="form-grid"><div class="field"><label>Current password</label><input type="password" name="currentPassword" required autocomplete="current-password"></div><div class="field"><label>Authenticator or recovery code</label><input name="code" autocomplete="one-time-code" maxlength="16" required></div></div><div class="form-actions"><button class="button danger" type="submit">Disable 2FA</button><p class="form-message"></p></div></form></details>`}
   </section>` : `<form class="panel form-panel security-panel" id="mfaSetupForm">
-    <div class="security-heading"><span class="security-icon">◎</span><span><h2>Two-factor authentication</h2><p>Add an authenticator app code after your password at sign-in.</p></span><span class="pill warning">Not enabled</span></div>
+    <div class="security-heading"><span class="security-icon">◎</span><span><h2>Two-factor authentication</h2><p>${enrollmentRequired ? "Connect an authenticator to unlock the rest of Nimbus." : "Add an authenticator app code after your password at sign-in."}</p></span><span class="pill warning">${enrollmentRequired ? "Required" : "Not enabled"}</span></div>
     <div class="field"><label for="mfaSetupPassword">Current password</label><input id="mfaSetupPassword" type="password" name="currentPassword" required autocomplete="current-password"></div>
-    <div class="form-actions"><button class="button primary" type="submit">Set up authenticator</button><p class="form-message"></p></div>
+    <div class="form-actions"><button class="button primary" type="submit">${enrollmentRequired ? "Set up required 2FA" : "Set up authenticator"}</button><p class="form-message"></p></div>
   </form>`;
   const sessionRows = sessions.map((item) => `<article class="session-row">
     <span class="session-icon">${item.current ? "●" : "◉"}</span>
     <span class="session-copy"><strong>${escapeHtml(sessionDevice(item.userAgent))}${item.current ? ` <em>Current</em>` : ""}</strong><small>${escapeHtml(item.ipAddress)} · Last active ${formatRelative(item.lastSeenAt)} · Expires ${formatDate(item.expiresAt)}</small></span>
     <button class="row-button ${item.current ? "danger" : ""}" type="button" data-revoke-session="${escapeHtml(item.id)}">${item.current ? "Sign out" : "Revoke"}</button>
   </article>`).join("");
+  if (enrollmentRequired) {
+    els.viewRoot.innerHTML = `${policyBanner}${mfaPanel}`;
+    return;
+  }
   els.viewRoot.innerHTML = `${recoveryPanel}<section class="layout-grid equal">
     <form class="panel form-panel" id="profileForm"><h2>Profile</h2><p>Update your display name.</p><div class="form-grid"><div class="field full"><label for="settingsName">Display name</label><input id="settingsName" name="displayName" maxlength="100" required value="${escapeHtml(state.user.displayName)}"></div><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(state.user.email)}"></div></div><div class="form-actions"><button class="button primary">Save profile</button><p class="form-message"></p></div></form>
     <form class="panel form-panel" id="passwordForm"><h2>Password</h2><p>Changing your password revokes all active sessions.</p><div class="form-grid"><div class="field full"><label for="currentPassword">Current password</label><input id="currentPassword" type="password" name="currentPassword" required autocomplete="current-password"></div><div class="field full"><label for="newPassword">New password</label><input id="newPassword" type="password" name="password" minlength="12" required autocomplete="new-password"></div></div><div class="form-actions"><button class="button primary">Change password</button><p class="form-message"></p></div></form>
@@ -930,9 +1365,263 @@ function renderSettings() {
   </div>`;
 }
 
+function operationsStatusPill(value) {
+  const labels = {
+    healthy: "Healthy",
+    warning: "Warning",
+    critical: "Critical",
+    pending: "Pending",
+    disabled: "Disabled",
+    online: "Online",
+    available: "Available",
+    active: "Active",
+    unknown: "Unknown",
+  };
+  const style = ["healthy", "online", "available", "active"].includes(value)
+    ? "success"
+    : ["warning", "pending", "unknown", "disabled"].includes(value) ? "warning" : "critical";
+  return `<span class="operations-status ${style}"><i></i>${escapeHtml(labels[value] || value || "Unknown")}</span>`;
+}
+
+function operationsUsage(percentValue, { compact = false } = {}) {
+  const value = Math.max(0, Math.min(100, Number(percentValue) || 0));
+  const level = value >= 95 ? "critical" : value >= 85 ? "warning" : "healthy";
+  return `<div class="operations-usage ${compact ? "compact" : ""}">
+    <div class="operations-usage-head"><strong>${Math.round(value)}%</strong><small>${level === "healthy" ? "Normal" : level === "warning" ? "Pressure" : "Critical"}</small></div>
+    <div class="operations-usage-track"><span class="${level}" style="width:${pct(value)}"></span></div>
+  </div>`;
+}
+
+function renderAdminOperations() {
+  const operations = state.admin.operations || {
+    summary: {}, clusters: [], nodes: [], storages: [], incidents: [], recentResolved: [], tasks: [],
+  };
+  const summary = operations.summary || {};
+  const query = state.search.trim().toLowerCase();
+  const matches = (...values) => !query || values.some((value) => String(value || "").toLowerCase().includes(query));
+  const nodes = (operations.nodes || []).filter((node) => matches(node.node, node.clusterName, node.status));
+  const storages = (operations.storages || []).filter((storage) =>
+    matches(storage.storageId, storage.node, storage.clusterName, storage.type, storage.status));
+  const incidents = (operations.incidents || []).filter((incident) =>
+    matches(incident.title, incident.message, incident.clusterName, incident.sourceId, incident.severity, incident.status));
+  const tasks = (operations.tasks || []).filter((task) =>
+    matches(task.resourceName, task.resourceId, task.clusterName, task.node, task.action, task.exitStatus));
+  const critical = Number(summary.criticalIncidents || 0);
+  const active = Number(summary.activeIncidents || 0);
+  const overall = critical ? {
+    style: "critical", icon: "!", title: "Immediate attention required",
+    copy: `${plural(critical, "critical incident")} across the connected infrastructure.`,
+  } : active ? {
+    style: "warning", icon: "◇", title: "Infrastructure needs review",
+    copy: `${plural(active, "active incident")} detected. Acknowledgements do not suppress automatic recovery.`,
+  } : {
+    style: "healthy", icon: "✓", title: "All monitored systems operational",
+    copy: "No active cluster, node, storage, task, or assignment incidents are currently detected.",
+  };
+  const storagePercent = summary.storageTotalBytes
+    ? Number(summary.storageUsedBytes || 0) / Number(summary.storageTotalBytes) * 100
+    : 0;
+  const clusterRows = (operations.clusters || []).map((cluster) => {
+    const coverage = [
+      cluster.telemetry?.nodesAvailable ? `${cluster.telemetryNodes} node metrics` : "Node metrics unavailable",
+      cluster.telemetry?.storagesAvailable ? `${cluster.telemetryStorages} storage paths` : "Storage metrics unavailable",
+    ];
+    return `<tr>
+      <td><div class="server-copy"><strong>${escapeHtml(cluster.name)}</strong><small>${escapeHtml(cluster.apiUrl)}</small></div></td>
+      <td>${operationsStatusPill(cluster.health)}</td>
+      <td><div class="server-copy"><strong>${cluster.onlineNodes} / ${cluster.telemetryNodes || cluster.nodeCount} online</strong><small>${escapeHtml(coverage.join(" · "))}</small></div></td>
+      <td><div class="server-copy"><strong>${cluster.lastSyncAt ? escapeHtml(formatRelative(cluster.lastSyncAt)) : "Never"}</strong><small>${cluster.telemetry?.collectedAt ? `Health sampled ${escapeHtml(formatRelative(cluster.telemetry.collectedAt))}` : "Run a full health refresh"}</small></div></td>
+      <td><span class="incident-count ${cluster.criticalIncidentCount ? "critical" : cluster.incidentCount ? "warning" : ""}">${cluster.incidentCount}</span></td>
+    </tr>`;
+  }).join("");
+  const incidentRows = incidents.map((incident) => `<article class="operations-incident ${escapeHtml(incident.severity)}">
+    <span class="operations-incident-icon">${incident.severity === "critical" ? "!" : "◇"}</span>
+    <span class="operations-incident-copy">
+      <span class="operations-incident-meta"><strong>${escapeHtml(incident.severity)}</strong><small>${escapeHtml(incident.clusterName)} · ${escapeHtml(incident.sourceType)} · ${escapeHtml(incident.sourceId)}</small></span>
+      <h3>${escapeHtml(incident.title)}</h3>
+      <p>${escapeHtml(incident.message)}</p>
+      <small>First detected ${escapeHtml(formatDate(incident.firstSeenAt))} · Checked ${escapeHtml(formatRelative(incident.lastSeenAt))}</small>
+    </span>
+    <span class="operations-incident-action">
+      ${incident.status === "acknowledged"
+        ? `<span class="acknowledged-mark">✓ Acknowledged${incident.acknowledgedByName ? ` by ${escapeHtml(incident.acknowledgedByName)}` : ""}</span>`
+        : `<button class="button secondary small" type="button" data-ack-incident="${escapeHtml(incident.id)}">Acknowledge</button>`}
+    </span>
+  </article>`).join("");
+  const nodeRows = nodes.map((node) => `<tr>
+    <td><div class="server-copy"><strong>${escapeHtml(node.node)}</strong><small>${escapeHtml(node.clusterName)} · ${Number(node.cpuCores)} cores · ${formatUptime(node.uptime)} uptime</small></div></td>
+    <td>${operationsStatusPill(node.status)}</td>
+    <td>${operationsUsage(node.cpuPercent, { compact: true })}</td>
+    <td><div class="operations-capacity"><span><strong>${escapeHtml(formatBytes(node.memoryUsedBytes))}</strong><small>of ${escapeHtml(formatBytes(node.memoryTotalBytes))}</small></span>${operationsUsage(node.memoryPercent, { compact: true })}</div></td>
+    <td><div class="operations-capacity"><span><strong>${escapeHtml(formatBytes(node.rootUsedBytes))}</strong><small>of ${escapeHtml(formatBytes(node.rootTotalBytes))}</small></span>${operationsUsage(node.rootPercent, { compact: true })}</div></td>
+  </tr>`).join("");
+  const storageRows = storages.slice().sort((left, right) => right.usagePercent - left.usagePercent).map((storage) => `<tr>
+    <td><div class="server-copy"><strong>${escapeHtml(storage.storageId)}</strong><small>${escapeHtml(storage.type)} · ${storage.shared ? "shared" : "node-local"}${storage.content.length ? ` · ${escapeHtml(storage.content.join(", "))}` : ""}</small></div></td>
+    <td><div class="server-copy"><strong>${escapeHtml(storage.node)}</strong><small>${escapeHtml(storage.clusterName)}</small></div></td>
+    <td>${operationsStatusPill(storage.status)}</td>
+    <td><div class="operations-capacity wide"><span><strong>${escapeHtml(formatBytes(storage.usedBytes))}</strong><small>${escapeHtml(formatBytes(storage.availableBytes))} available · ${escapeHtml(formatBytes(storage.totalBytes))} total</small></span>${operationsUsage(storage.usagePercent, { compact: true })}</div></td>
+  </tr>`).join("");
+  const taskRows = tasks.map((task) => {
+    const stuck = !task.completed && task.durationMs >= Number(operations.thresholds?.stuckTaskMinutes || 15) * 60_000;
+    const label = task.completed ? "Failed" : stuck ? "Stuck" : "Running";
+    const style = task.completed || stuck ? "critical" : "warning";
+    return `<tr>
+      <td><div class="server-copy"><strong>${escapeHtml(actionName(task.action))}</strong><small>${escapeHtml(task.clusterName)} · ${escapeHtml(task.node)}</small></div></td>
+      <td><div class="server-copy"><strong>${escapeHtml(task.resourceName)}</strong><small>${task.resourceType ? `${escapeHtml(task.resourceType.toUpperCase())} ${task.vmid}` : escapeHtml(task.resourceId)}</small></div></td>
+      <td><span class="operations-status ${style}"><i></i>${label}</span></td>
+      <td><div class="server-copy"><strong>${escapeHtml(formatDuration(task.durationMs))}</strong><small>${escapeHtml(task.exitStatus || "Awaiting Proxmox")}</small></div></td>
+      <td>${escapeHtml(formatDate(task.completedAt || task.createdAt))}</td>
+    </tr>`;
+  }).join("");
+  const coverageGaps = (operations.clusters || []).filter((cluster) =>
+    cluster.status !== "disabled" && (!cluster.telemetry?.nodesAvailable || !cluster.telemetry?.storagesAvailable));
+  const resolvedRows = (operations.recentResolved || []).slice(0, 8).map((incident) => `<div class="operations-resolved-item">
+    <span class="operations-resolved-check">✓</span>
+    <span><strong>${escapeHtml(incident.title)}</strong><small>${escapeHtml(incident.clusterName)} · Resolved ${escapeHtml(formatRelative(incident.resolvedAt))}</small></span>
+  </div>`).join("");
+
+  return `<section class="operations-hero ${overall.style}">
+      <span class="operations-hero-icon">${overall.icon}</span>
+      <div><p class="eyebrow">Live operations</p><h2>${escapeHtml(overall.title)}</h2><p>${escapeHtml(overall.copy)}</p></div>
+      <div class="operations-hero-actions"><small>Generated ${escapeHtml(formatRelative(operations.generatedAt))}</small><button class="button primary" type="button" data-refresh-operations>Run full health refresh</button></div>
+    </section>
+    <section class="operations-kpi-grid">
+      <article><span class="operations-kpi-icon cluster">◇</span><span><small>Clusters healthy</small><strong>${Number(summary.healthyClusters || 0)} <em>/ ${Number(summary.clusters || 0)}</em></strong><p>${summary.clusters ? "Based on synchronization and incidents" : "Add a cluster to begin"}</p></span></article>
+      <article><span class="operations-kpi-icon node">⌘</span><span><small>Nodes online</small><strong>${Number(summary.onlineNodes || 0)} <em>/ ${Number(summary.nodes || 0)}</em></strong><p>${summary.nodes ? "Live Proxmox node telemetry" : "No node telemetry collected"}</p></span></article>
+      <article><span class="operations-kpi-icon storage">◫</span><span><small>Storage capacity</small><strong>${Math.round(storagePercent)}<em>% used</em></strong><p>${escapeHtml(formatBytes(summary.storageUsedBytes || 0))} of ${escapeHtml(formatBytes(summary.storageTotalBytes || 0))}</p></span></article>
+      <article><span class="operations-kpi-icon incident">!</span><span><small>Needs attention</small><strong>${active} <em>active</em></strong><p>${Number(summary.failedTasks24h || 0)} failed tasks · ${Number(summary.stuckTasks || 0)} stuck</p></span></article>
+    </section>
+    <section class="operations-primary-grid">
+      <article class="panel operations-incidents-panel">
+        <header class="panel-header"><div><h2>Active incidents</h2><p>Automatically opened and resolved from normalized Proxmox telemetry.</p></div><span class="pill ${critical ? "warning" : active ? "warning" : "success"}">${active ? `${active} active` : "All clear"}</span></header>
+        <div class="operations-incident-list">${incidentRows || emptyState("✓", query ? "No matching incidents" : "No active incidents", query ? "Try another filter." : "Nimbus will open an incident when monitored infrastructure needs attention.")}</div>
+      </article>
+      <aside class="panel operations-resolved-panel">
+        <header class="panel-header"><div><h2>Recently recovered</h2><p>Automatically resolved conditions.</p></div></header>
+        <div class="operations-resolved-list">${resolvedRows || `<div class="detail-empty compact"><span>✓</span><strong>No recent recoveries</strong><small>Resolved incidents will appear here.</small></div>`}</div>
+      </aside>
+    </section>
+    <section class="panel operations-cluster-panel">
+      <header class="panel-header"><div><h2>Cluster health</h2><p>Connectivity, telemetry coverage, synchronization age, and open incidents.</p></div><span class="pill">${plural((operations.clusters || []).length, "cluster")}</span></header>
+      ${(operations.clusters || []).length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Cluster</th><th>Health</th><th>Coverage</th><th>Last sync</th><th>Incidents</th></tr></thead><tbody>${clusterRows}</tbody></table></div>` : emptyState("◇", "No clusters configured", "Add a Proxmox cluster from the Clusters tab.")}
+      ${coverageGaps.length ? `<div class="operations-permission-note"><span>i</span><span><strong>Partial telemetry on ${plural(coverageGaps.length, "cluster")}.</strong> Node health requires <code>Sys.Audit</code>; storage capacity requires <code>Datastore.Audit</code>. Resource synchronization continues even when optional telemetry is unavailable.</span></div>` : ""}
+    </section>
+    <section class="panel operations-node-panel">
+      <header class="panel-header"><div><h2>Node pressure</h2><p>CPU, memory, root storage, uptime, and availability.</p></div><span class="pill">${plural(nodes.length, "node")}</span></header>
+      ${nodeRows ? `<div class="table-wrap"><table class="data-table operations-table"><thead><tr><th>Node</th><th>Status</th><th>CPU</th><th>Memory</th><th>Root storage</th></tr></thead><tbody>${nodeRows}</tbody></table></div>` : emptyState("⌘", query ? "No matching nodes" : "Node telemetry unavailable", query ? "Try another filter." : "Run a full health refresh and grant Sys.Audit to the panel service account.")}
+    </section>
+    <section class="panel operations-storage-panel">
+      <header class="panel-header"><div><h2>Storage capacity</h2><p>All storage paths visible to the Proxmox API service account.</p></div><span class="pill">${plural(storages.length, "storage path")}</span></header>
+      ${storageRows ? `<div class="table-wrap"><table class="data-table operations-table"><thead><tr><th>Storage</th><th>Node</th><th>Status</th><th>Capacity</th></tr></thead><tbody>${storageRows}</tbody></table></div>` : emptyState("◫", query ? "No matching storage" : "Storage telemetry unavailable", query ? "Try another filter." : "Run a full health refresh and grant Datastore.Audit only for storage that should be monitored.")}
+    </section>
+    <section class="panel operations-task-panel">
+      <header class="panel-header"><div><h2>Tasks needing attention</h2><p>Incomplete actions plus Proxmox failures from the last 24 hours.</p></div><span class="pill ${tasks.length ? "warning" : "success"}">${tasks.length ? plural(tasks.length, "task") : "Clear"}</span></header>
+      ${taskRows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Action</th><th>Resource</th><th>State</th><th>Duration</th><th>Started / completed</th></tr></thead><tbody>${taskRows}</tbody></table></div>` : emptyState("✓", query ? "No matching tasks" : "No tasks need attention", query ? "Try another filter." : "Failed and unusually long-running actions will appear here.")}
+    </section>`;
+}
+
 function adminTabs() {
-  const tabs = [["inventory", "Inventory"], ["customers", "Customers"], ["clusters", "Clusters"], ["media", "ISO storage"], ["alerts", "Alerts"], ["email", "Email"], ["users", "Users"], ["audit", "Audit log"]];
+  const tabs = [["operations", "Operations"], ["maintenance", "Maintenance"], ["inventory", "Inventory"], ["customers", "Customers"], ["clusters", "Clusters"], ["media", "ISO storage"], ["alerts", "Alerts"], ["email", "Email"], ["security", "Security"], ["users", "Users"], ["audit", "Audit log"]];
   return `<section class="panel admin-tab-shell"><div class="admin-tabs" role="tablist">${tabs.map(([id, label]) => `<button class="admin-tab ${state.adminTab === id ? "active" : ""}" data-admin-tab="${id}">${label}</button>`).join("")}</div></section>`;
+}
+
+function datetimeLocalValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function maintenanceTargetsFor(type) {
+  if (type === "cluster") return (state.admin.clusters || []).map((cluster) => ({ id: cluster.id, label: cluster.name }));
+  if (type === "node") {
+    const nodes = state.admin.nodes || [];
+    return nodes.map((node) => ({ id: `${node.clusterId}:${node.node}`, label: `${node.node} · ${node.clusterName}` }));
+  }
+  if (type === "resource") {
+    return (state.admin.resources || []).filter((resource) => resource.customerId).map((resource) => ({
+      id: resource.id,
+      label: `${resource.displayName || resource.name} · ${resource.type.toUpperCase()} ${resource.vmid} · ${resource.customerName}`,
+    }));
+  }
+  if (type === "customer") return (state.admin.customers || []).filter((customer) => customer.status === "active").map((customer) => ({ id: customer.id, label: customer.name }));
+  return [{ id: "*", label: "Every active customer user" }];
+}
+
+function maintenanceTargetOptions(type, selectedIds = []) {
+  const selected = new Set(selectedIds);
+  return maintenanceTargetsFor(type).map((target) =>
+    `<option value="${escapeHtml(target.id)}" ${selected.has(target.id) ? "selected" : ""}>${escapeHtml(target.label)}</option>`).join("");
+}
+
+function maintenanceFormMarkup(item = null) {
+  const prefix = item ? "editMaintenance" : "maintenance";
+  const targetType = item?.targets?.[0]?.type || "all";
+  const selectedIds = (item?.targets || []).map((target) => target.id);
+  const defaultStart = Math.ceil((Date.now() + 60 * 60_000) / (15 * 60_000)) * 15 * 60_000;
+  const emailReady = Boolean(state.admin.emailSettings?.enabled);
+  return `<div class="form-grid">
+      <div class="field"><label for="${prefix}Kind">Notice type</label><select id="${prefix}Kind" name="kind"><option value="maintenance" ${item?.kind !== "incident" ? "selected" : ""}>Planned maintenance</option><option value="incident" ${item?.kind === "incident" ? "selected" : ""}>Service incident</option></select></div>
+      <div class="field"><label for="${prefix}Severity">Severity</label><select id="${prefix}Severity" name="severity"><option value="info" ${item?.severity === "info" || !item ? "selected" : ""}>Information</option><option value="warning" ${item?.severity === "warning" ? "selected" : ""}>Warning</option><option value="critical" ${item?.severity === "critical" ? "selected" : ""}>Critical</option></select></div>
+      <div class="field full"><label for="${prefix}Title">Title</label><input id="${prefix}Title" name="title" required maxlength="160" value="${escapeHtml(item?.title || "")}" placeholder="Network maintenance in Frankfurt"></div>
+      <div class="field full"><label for="${prefix}Message">Customer message</label><textarea id="${prefix}Message" name="message" required maxlength="4000" rows="5" placeholder="Explain the expected impact and what customers should expect.">${escapeHtml(item?.message || "")}</textarea></div>
+      <div class="field"><label for="${prefix}StartsAt">Starts</label><input id="${prefix}StartsAt" name="startsAt" type="datetime-local" required value="${escapeHtml(datetimeLocalValue(item?.startsAt || defaultStart))}"></div>
+      <div class="field"><label for="${prefix}EndsAt">Ends <span class="optional">(optional)</span></label><input id="${prefix}EndsAt" name="endsAt" type="datetime-local" value="${escapeHtml(datetimeLocalValue(item?.endsAt))}"><small>Leave empty for an open-ended incident.</small></div>
+      <div class="field"><label for="${prefix}Audience">Affected audience</label><select id="${prefix}Audience" name="targetType" data-maintenance-audience><option value="all" ${targetType === "all" ? "selected" : ""}>All customers</option><option value="cluster" ${targetType === "cluster" ? "selected" : ""}>Clusters</option><option value="node" ${targetType === "node" ? "selected" : ""}>Nodes</option><option value="resource" ${targetType === "resource" ? "selected" : ""}>Individual resources</option><option value="customer" ${targetType === "customer" ? "selected" : ""}>Customer accounts</option></select></div>
+      <div class="field"><label for="${prefix}TargetIds">Targets</label><select id="${prefix}TargetIds" name="targetIds" multiple size="5" ${targetType === "all" ? "disabled" : "required"}>${maintenanceTargetOptions(targetType, selectedIds)}</select><small>${targetType === "all" ? "Every active customer user receives the notice." : "Hold Ctrl or Command to choose multiple targets."}</small></div>
+      <label class="policy-checkbox full"><input name="notifyEmail" type="checkbox" ${item?.notifyEmail === false ? "" : "checked"}><span><strong>Queue email for opted-in users</strong><small>${emailReady ? "Uses the branded Email Center template when this notice is published." : "SMTP is disabled; the notice will still appear inside the panel."}</small></span></label>
+      ${item ? "" : `<div class="field full"><label for="${prefix}Publication">Publication</label><select id="${prefix}Publication" name="publication"><option value="publish">Create and publish now</option><option value="draft">Save as editable draft</option></select><small>Publishing freezes the recipient list from current assignments. Drafts remain private to administrators.</small></div>`}
+    </div>`;
+}
+
+function maintenanceFormPayload(form) {
+  const data = new FormData(form);
+  const targetType = String(data.get("targetType") || "all");
+  const startsAt = new Date(String(data.get("startsAt") || "")).getTime();
+  const rawEnd = String(data.get("endsAt") || "").trim();
+  const targetIds = targetType === "all" ? ["*"] : data.getAll("targetIds").map(String);
+  return {
+    kind: data.get("kind"),
+    severity: data.get("severity"),
+    title: data.get("title"),
+    message: data.get("message"),
+    startsAt,
+    endsAt: rawEnd ? new Date(rawEnd).getTime() : null,
+    notifyEmail: data.has("notifyEmail"),
+    publication: data.get("publication") || undefined,
+    targets: targetIds.map((id) => ({ type: targetType, id })),
+  };
+}
+
+function renderAdminMaintenance() {
+  const notices = state.admin.maintenanceEvents?.items || [];
+  const active = notices.filter((item) => item.status === "active").length;
+  const scheduled = notices.filter((item) => item.status === "scheduled").length;
+  const drafts = notices.filter((item) => item.status === "draft").length;
+  const publishedRecipients = notices.reduce((sum, item) => sum + Number(item.recipientCount || 0), 0);
+  return `<section class="admin-summary-grid">
+      <article><strong>${active}</strong><span>active notices</span></article>
+      <article><strong>${scheduled}</strong><span>scheduled windows</span></article>
+      <article><strong>${drafts}</strong><span>private drafts</span></article>
+      <article class="safe"><strong>${publishedRecipients}</strong><span>frozen user deliveries</span></article>
+    </section>
+    <section class="layout-grid maintenance-admin-layout">
+      <form class="panel form-panel maintenance-create-form" id="createMaintenanceForm" data-admin-create="maintenance">
+        <h2>Create service notice</h2><p>Target the whole platform, a cluster, nodes, assigned resources, or customer accounts.</p>
+        ${maintenanceFormMarkup()}
+        <div class="form-actions"><button class="button primary" type="submit">Create notice</button><p class="form-message" role="status"></p></div>
+      </form>
+      <article class="panel policy-card">
+        <header class="panel-header"><div><h2>Frozen audience</h2><p>Ownership is resolved only when you publish.</p></div></header>
+        <div class="notice"><span>⌁</span><span>Nimbus converts the selected infrastructure targets into customer-user deliveries using its local assignment database.</span></div>
+        <div class="notice"><span>✓</span><span>Later assignment changes cannot expose an old notice to a different customer.</span></div>
+        <div class="notice warning"><span>✉</span><span>Email is opt-in per login. Every affected user still sees the notice in the private Maintenance Center.</span></div>
+      </article>
+    </section>
+    <section class="panel maintenance-admin-panel">
+      <header class="panel-header"><div><h2>Maintenance timeline</h2><p>Draft, schedule, incident, and resolution history.</p></div><span class="pill">${state.admin.maintenanceEvents?.total || 0} notices</span></header>
+      <div class="maintenance-list">${notices.length ? notices.map((item) => maintenanceItemMarkup(item, { admin: true })).join("") : emptyState("△", "No maintenance notices", "Create the first targeted service notice above.")}</div>
+    </section>`;
 }
 
 function renderAdminInventory() {
@@ -1105,6 +1794,82 @@ function customerOptions(selected = "") {
   return `<option value="">No customer</option>${state.admin.customers.map((customer) => `<option value="${escapeHtml(customer.id)}" ${customer.id === selected ? "selected" : ""}>${escapeHtml(customer.name)}</option>`).join("")}`;
 }
 
+function securityEventTone(action) {
+  if (String(action).includes("failed")) return "warning";
+  if (action === "auth.login" || action === "security.mfa_enabled") return "success";
+  if (String(action).includes("reset") || String(action).includes("disabled")) return "critical";
+  return "neutral";
+}
+
+function renderAdminSecurity() {
+  const security = state.admin.security || { policy: {}, summary: {}, events: { items: [], total: 0 } };
+  const policy = security.policy || {};
+  const summary = security.summary || {};
+  const query = state.search.trim().toLowerCase();
+  const matches = (...values) => !query || values.some((value) => String(value || "").toLowerCase().includes(query));
+  const users = (state.admin.users || []).filter((user) => matches(user.displayName, user.email, user.role, user.customerName, user.status));
+  const events = (security.events?.items || []).filter((event) =>
+    matches(event.action, event.displayName, event.email, event.customerName, event.ipAddress, event.actorRole));
+  const postureRows = users.map((user) => {
+    const required = user.role === "admin" ? policy.requireAdminMfa : policy.requireCustomerMfa;
+    const protectedAccount = Boolean(user.mfaEnabled);
+    return `<tr>
+      <td><div class="server-name"><span class="server-avatar">${escapeHtml(initials(user.displayName))}</span><span class="server-copy"><strong>${escapeHtml(user.displayName)}</strong><small>${escapeHtml(user.email)}</small></span></div></td>
+      <td>${escapeHtml(user.role === "admin" ? "Administrator" : user.customerName || "Customer")}</td>
+      <td><span class="status-badge ${protectedAccount ? "" : "disabled"}">${protectedAccount ? "Protected" : "Not enabled"}</span></td>
+      <td><span class="status-badge ${required ? "pending" : "disabled"}">${required ? "Required" : "Optional"}</span></td>
+      <td><span class="status-badge ${user.status === "disabled" ? "disabled" : ""}">${escapeHtml(user.status)}</span></td>
+    </tr>`;
+  }).join("");
+  const eventRows = events.map((event) => {
+    const tone = securityEventTone(event.action);
+    return `<tr>
+      <td><span class="security-event-type ${tone}"><i></i>${escapeHtml(activityLabel(event.action))}</span></td>
+      <td><div class="server-copy"><strong>${escapeHtml(event.displayName || "Unknown account")}</strong><small>${escapeHtml(event.email || event.customerName || "Platform event")}</small></div></td>
+      <td>${escapeHtml(event.ipAddress || "Not recorded")}</td>
+      <td>${escapeHtml(formatDate(event.createdAt))}</td>
+    </tr>`;
+  }).join("");
+  const coverage = Number(summary.mfaCoverage ?? 100);
+  return `<section class="security-center-hero">
+      <span class="security-center-icon">⌁</span>
+      <div><p class="eyebrow">Account protection</p><h2>${coverage}% of active accounts use 2FA</h2><p>Authentication policy is enforced by the backend before customer, infrastructure, or administrator data is returned.</p></div>
+      <span class="security-coverage ${coverage === 100 ? "complete" : ""}"><strong>${Number(summary.mfaProtected || 0)}</strong><small>of ${Number(summary.activeAccounts || 0)} protected</small></span>
+    </section>
+    <section class="security-summary-grid">
+      <article><small>Required enrollment</small><strong>${Number(summary.requiredPending || 0)}</strong><span>${summary.requiredPending ? "Accounts awaiting setup" : "Policy requirements satisfied"}</span></article>
+      <article><small>Active sessions</small><strong>${Number(summary.activeSessions || 0)}</strong><span>Across enabled accounts</span></article>
+      <article><small>Successful logins</small><strong>${Number(summary.successfulLogins24h || 0)}</strong><span>During the last 24 hours</span></article>
+      <article class="${summary.failedLogins24h ? "warning" : ""}"><small>Failed logins</small><strong>${Number(summary.failedLogins24h || 0)}</strong><span>During the last 24 hours</span></article>
+    </section>
+    <section class="layout-grid security-center-layout">
+      <form class="panel form-panel" id="securityPolicyForm">
+        <header class="panel-header"><div><h2>Security policy</h2><p>Changes apply immediately to active and newly created accounts.</p></div><span class="pill">Backend enforced</span></header>
+        <div class="security-policy-list">
+          <label class="policy-checkbox"><input type="checkbox" name="requireAdminMfa" ${policy.requireAdminMfa ? "checked" : ""}><span><strong>Require 2FA for administrators</strong><small>Administrators without 2FA can access only the enrollment screen.</small></span></label>
+          <label class="policy-checkbox"><input type="checkbox" name="requireCustomerMfa" ${policy.requireCustomerMfa ? "checked" : ""}><span><strong>Require 2FA for customers</strong><small>Customer resources remain hidden until enrollment is complete.</small></span></label>
+          <label class="policy-checkbox"><input type="checkbox" name="newLoginEmail" ${policy.newLoginEmail ? "checked" : ""}><span><strong>Email successful sign-in alerts</strong><small>Send an account-security email after every completed password or 2FA login.</small></span></label>
+        </div>
+        ${state.admin.emailSettings?.enabled ? "" : `<div class="notice warning"><span>!</span><span>Sign-in emails begin only after Email Center delivery is enabled. The 2FA policy works independently of email.</span></div>`}
+        <div class="form-actions"><button class="button primary" type="submit">Save security policy</button><p class="form-message" role="status"></p></div>
+      </form>
+      <article class="panel security-guidance">
+        <header class="panel-header"><div><h2>Safe enforcement</h2><p>Nimbus prevents policy changes from becoming a lockout.</p></div></header>
+        <div class="notice"><span>1</span><span>A password remains sufficient to reach the restricted 2FA enrollment screen.</span></div>
+        <div class="notice"><span>2</span><span>All normal APIs fail closed with no customer or infrastructure data until setup finishes.</span></div>
+        <div class="notice"><span>3</span><span>Administrator-assisted 2FA reset remains available for account recovery and signs out the affected user.</span></div>
+      </article>
+    </section>
+    <section class="panel security-posture-panel">
+      <header class="panel-header"><div><h2>Account posture</h2><p>2FA coverage and enforcement status for every Nimbus login.</p></div><span class="pill">${plural(users.length, "account")}</span></header>
+      ${postureRows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Account</th><th>Scope</th><th>2FA</th><th>Policy</th><th>Status</th></tr></thead><tbody>${postureRows}</tbody></table></div>` : emptyState("◎", "No matching accounts", "Try another filter.")}
+    </section>
+    <section class="panel security-events-panel">
+      <header class="panel-header"><div><h2>Security events</h2><p>Successful and failed authentication, password, MFA, session, and policy actions.</p></div><span class="pill">${Number(security.events?.total || 0)} events</span></header>
+      ${eventRows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Event</th><th>Account</th><th>IP address</th><th>Time</th></tr></thead><tbody>${eventRows}</tbody></table></div>` : emptyState("⌁", query ? "No matching security events" : "No security events yet", query ? "Try another filter." : "Authentication and account-security actions will appear here.")}
+    </section>`;
+}
+
 function renderAdminUsers() {
   const users = state.admin.users;
   const invitationReady = Boolean(state.admin.emailSettings?.enabled && state.admin.emailSettings?.appUrl);
@@ -1161,23 +1926,32 @@ function renderAdminAudit() {
 }
 
 function renderAdmin() {
-  const renderers = { inventory: renderAdminInventory, customers: renderAdminCustomers, clusters: renderAdminClusters, media: renderAdminMedia, alerts: renderAdminAlerts, email: renderAdminEmail, users: renderAdminUsers, audit: renderAdminAudit };
+  const renderers = { operations: renderAdminOperations, maintenance: renderAdminMaintenance, inventory: renderAdminInventory, customers: renderAdminCustomers, clusters: renderAdminClusters, media: renderAdminMedia, alerts: renderAdminAlerts, email: renderAdminEmail, security: renderAdminSecurity, users: renderAdminUsers, audit: renderAdminAudit };
   els.viewRoot.innerHTML = `${adminTabs()}<div class="admin-section">${renderers[state.adminTab]()}</div>`;
 }
 
-const renderers = { overview: renderOverview, instances: renderInstances, network: renderNetwork, activity: renderActivity, notifications: renderNotifications, settings: renderSettings, admin: renderAdmin };
+const renderers = { overview: renderOverview, instances: renderInstances, network: renderNetwork, activity: renderActivity, notifications: renderNotifications, maintenance: renderMaintenance, support: renderSupport, settings: renderSettings, admin: renderAdmin };
 
 function route() {
   if (!state.user || !state.dashboard) return;
   const rawRoute = location.hash.replace(/^#/, "") || "overview";
   const instanceMatch = rawRoute.match(/^instance\/(.+)$/);
+  const supportMatch = rawRoute.match(/^support\/(.+)$/);
   let resourceId = null;
+  let supportTicketId = null;
   if (instanceMatch) {
     try { resourceId = decodeURIComponent(instanceMatch[1]); } catch { resourceId = null; }
   }
-  let view = resourceId ? "instance" : rawRoute;
+  if (supportMatch) {
+    try { supportTicketId = decodeURIComponent(supportMatch[1]); } catch { supportTicketId = null; }
+  }
+  let view = resourceId ? "instance" : supportTicketId ? "support" : rawRoute;
   if (!views[view]) view = "overview";
   if (view === "admin" && state.user.role !== "admin") view = "overview";
+  if (state.dashboard.security?.mfa?.enrollmentRequired && view !== "settings") {
+    location.hash = "#settings";
+    return;
+  }
   state.currentView = view;
   if (view !== "instance" && mediaPollTimer) {
     clearTimeout(mediaPollTimer);
@@ -1200,6 +1974,20 @@ function route() {
   else if (view === "notifications" && !state.notifications) {
     els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading notifications</div>`;
     loadNotifications().then(renderNotifications).catch((error) => showToast("error", "Could not load notifications", friendlyError(error)));
+  } else if (view === "network" && !state.network) {
+    els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Discovering guest addresses</div>`;
+    loadNetwork().then(renderNetwork).catch((error) => {
+      state.network = { networks: {}, error: error.code || "network_unavailable" };
+      renderNetwork();
+      showToast("error", "Could not discover addresses", friendlyError(error));
+    });
+  } else if (view === "maintenance" && !state.maintenance) {
+    els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading maintenance notices</div>`;
+    loadMaintenance().then(renderMaintenance).catch((error) => showToast("error", "Could not load maintenance", friendlyError(error)));
+  }
+  else if (view === "support" && (!state.support || (supportTicketId && state.support.selected?.ticket?.id !== supportTicketId) || (!supportTicketId && state.support.selected))) {
+    els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading support tickets</div>`;
+    loadSupport(supportTicketId).then(renderSupport).catch((error) => showToast("error", "Could not load support tickets", friendlyError(error)));
   }
   else renderers[view]();
   closeSidebar();
@@ -1297,6 +2085,18 @@ function openIsoPolicyEditor(policyId) {
     <div class="field"><label for="editIsoQuota">Quota per customer (GB)</label><input id="editIsoQuota" name="quotaGb" type="number" min="1" step="1" required value="${Math.round(policy.customerQuotaBytes / 1024 ** 3)}"></div>
     <label class="policy-checkbox full"><input name="allowDelete" type="checkbox" ${policy.allowDelete ? "checked" : ""}><span><strong>Allow customer deletion</strong><small>Requires Datastore.Allocate on this storage in Proxmox.</small></span></label>
   </div><div class="notice warning"><span>!</span><span>Disabling the policy blocks new uploads, mounts, and deletions but preserves every ownership record.</span></div>`;
+  els.editDialogError.textContent = "";
+  els.editDialog.showModal();
+}
+
+function openMaintenanceEditor(maintenanceId) {
+  const item = state.admin.maintenanceEvents?.items?.find((entry) => entry.id === maintenanceId);
+  if (!item || item.status !== "draft") return;
+  els.editForm.dataset.kind = "maintenance";
+  els.editForm.dataset.id = item.id;
+  els.editDialogTitle.textContent = "Edit maintenance draft";
+  els.editDialogBody.innerHTML = `${maintenanceFormMarkup(item)}
+    <div class="notice"><span>⌁</span><span>The affected recipient list is resolved only when this draft is published.</span></div>`;
   els.editDialogError.textContent = "";
   els.editDialog.showModal();
 }
@@ -1603,7 +2403,10 @@ async function refresh({ quiet = false } = {}) {
   try {
     await loadDashboard();
     if (state.currentView === "admin") await loadAdmin();
+    if (state.currentView === "network") await loadNetwork();
     if (state.currentView === "notifications") await loadNotifications();
+    if (state.currentView === "maintenance") await loadMaintenance();
+    if (state.currentView === "support") await loadSupport();
     if (state.currentView === "instance" && state.instance.resourceId) await loadInstanceDetails(state.instance.resourceId, { quiet: true });
     else route();
     if (!quiet) showToast("success", "Refreshed", "Latest panel data loaded.");
@@ -1618,6 +2421,7 @@ function closeSidebar() {
 }
 
 async function completeAuthentication(result) {
+  setDemoReadOnly(result.demoReadOnly);
   state.user = result.user;
   state.csrfToken = result.csrfToken;
   state.mfaChallenge = null;
@@ -1902,6 +2706,10 @@ els.editForm.addEventListener("submit", async (event) => {
       delete payload.maxUploadGb;
       delete payload.quotaGb;
       await apiFetch(`/api/admin/iso-policies/${encodeURIComponent(id)}`, { method: "PATCH", body: payload });
+    } else if (kind === "maintenance") {
+      const payload = maintenanceFormPayload(form);
+      delete payload.publication;
+      await apiFetch(`/api/admin/maintenance-events/${encodeURIComponent(id)}`, { method: "PATCH", body: payload });
     } else return;
     els.editDialog.close();
     await refresh({ quiet: true });
@@ -1963,6 +2771,45 @@ els.viewRoot.addEventListener("click", async (event) => {
       renderNotifications();
       showToast("success", "Notifications cleared", "Every visible notification is now marked as read.");
     } catch (error) { showToast("error", "Could not update notifications", friendlyError(error)); }
+    return;
+  }
+  if (target.dataset.readMaintenance) {
+    try {
+      await apiFetch(`/api/v1/maintenance/${encodeURIComponent(target.dataset.readMaintenance)}/read`, { method: "POST", body: {} });
+      await Promise.all([loadDashboard(), loadMaintenance()]);
+      renderMaintenance();
+    } catch (error) { showToast("error", "Could not update maintenance notice", friendlyError(error)); }
+    return;
+  }
+  if (target.dataset.openSupport) {
+    location.hash = `#support/${encodeURIComponent(target.dataset.openSupport)}`;
+    return;
+  }
+  if (target.dataset.closeSupport) {
+    if (!confirm("Close this support ticket? You can reopen it later if the issue returns.")) return;
+    target.disabled = true;
+    try {
+      await apiFetch(`/api/v1/support/tickets/${encodeURIComponent(target.dataset.closeSupport)}/close`, { method: "POST", body: {} });
+      await Promise.all([loadDashboard(), loadSupport(target.dataset.closeSupport)]);
+      renderSupport();
+      showToast("success", "Support ticket closed", "The conversation remains available in your ticket history.");
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Could not close ticket", friendlyError(error));
+    }
+    return;
+  }
+  if (target.dataset.reopenSupport) {
+    target.disabled = true;
+    try {
+      await apiFetch(`/api/v1/support/tickets/${encodeURIComponent(target.dataset.reopenSupport)}/reopen`, { method: "POST", body: {} });
+      await Promise.all([loadDashboard(), loadSupport(target.dataset.reopenSupport)]);
+      renderSupport();
+      showToast("success", "Support ticket reopened", "The ticket is waiting for the support team.");
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Could not reopen ticket", friendlyError(error));
+    }
     return;
   }
   if (target.dataset.copy !== undefined) {
@@ -2034,6 +2881,59 @@ els.viewRoot.addEventListener("click", async (event) => {
   if (target.dataset.editUser) { openUserEditor(target.dataset.editUser); return; }
   if (target.dataset.editCluster) { openClusterEditor(target.dataset.editCluster); return; }
   if (target.dataset.editIsoPolicy) { openIsoPolicyEditor(target.dataset.editIsoPolicy); return; }
+  if (target.dataset.editMaintenance) { openMaintenanceEditor(target.dataset.editMaintenance); return; }
+  if (target.dataset.publishMaintenance) {
+    if (!confirm("Publish this notice now? Nimbus will freeze the currently affected customer-user audience and optionally queue email.")) return;
+    target.disabled = true;
+    try {
+      const result = await apiFetch(`/api/admin/maintenance-events/${encodeURIComponent(target.dataset.publishMaintenance)}/publish`, { method: "POST", body: {} });
+      await loadAdmin();
+      renderAdmin();
+      showToast("success", "Maintenance notice published", `${plural(result.event.recipientCount || 0, "user")} can now see it${result.queuedEmails ? ` · ${plural(result.queuedEmails, "email")} queued` : ""}.`);
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Could not publish notice", friendlyError(error));
+    }
+    return;
+  }
+  if (target.dataset.resolveMaintenance) {
+    if (!confirm("Mark this notice as resolved? A recovery email will be queued for affected users who opted in.")) return;
+    target.disabled = true;
+    try {
+      const result = await apiFetch(`/api/admin/maintenance-events/${encodeURIComponent(target.dataset.resolveMaintenance)}/resolve`, { method: "POST", body: {} });
+      await loadAdmin();
+      renderAdmin();
+      showToast("success", "Maintenance resolved", result.queuedEmails ? `${plural(result.queuedEmails, "recovery email")} queued.` : "The resolved state is visible in customer maintenance history.");
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Could not resolve notice", friendlyError(error));
+    }
+    return;
+  }
+  if (target.dataset.cancelMaintenance) {
+    if (!confirm("Cancel this scheduled notice? Affected users will see the cancelled state in their maintenance history.")) return;
+    target.disabled = true;
+    try {
+      await apiFetch(`/api/admin/maintenance-events/${encodeURIComponent(target.dataset.cancelMaintenance)}/cancel`, { method: "POST", body: {} });
+      await loadAdmin();
+      renderAdmin();
+      showToast("success", "Maintenance cancelled", "The published notice now shows as cancelled.");
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Could not cancel notice", friendlyError(error));
+    }
+    return;
+  }
+  if (target.dataset.deleteMaintenance) {
+    if (!confirm("Delete this unpublished draft?")) return;
+    try {
+      await apiFetch(`/api/admin/maintenance-events/${encodeURIComponent(target.dataset.deleteMaintenance)}`, { method: "DELETE", body: {} });
+      await loadAdmin();
+      renderAdmin();
+      showToast("success", "Draft deleted", "No customer ever received this notice.");
+    } catch (error) { showToast("error", "Could not delete draft", friendlyError(error)); }
+    return;
+  }
   if (target.dataset.testEmailConnection !== undefined) {
     target.disabled = true;
     try {
@@ -2103,6 +3003,46 @@ els.viewRoot.addEventListener("click", async (event) => {
     return;
   }
   if (target.dataset.adminTab) { state.adminTab = target.dataset.adminTab; renderAdmin(); return; }
+  if (target.dataset.refreshOperations !== undefined) {
+    target.disabled = true;
+    const original = target.textContent;
+    target.textContent = "Checking infrastructure…";
+    try {
+      const result = await apiFetch("/api/admin/operations/refresh", { method: "POST", body: {}, timeoutMs: 180_000 });
+      state.admin.operations = result.operations;
+      await loadAdmin();
+      renderAdmin();
+      const failed = (result.results || []).filter((item) => !item.success).length;
+      showToast(
+        failed ? "error" : "success",
+        failed ? "Health refresh completed with warnings" : "Infrastructure health refreshed",
+        failed
+          ? `${plural(failed, "cluster")} could not be synchronized. The Operations Center kept its last good telemetry.`
+          : "Cluster, node, storage, task, and assignment health are current.",
+      );
+    } catch (error) {
+      showToast("error", "Health refresh failed", friendlyError(error));
+      target.disabled = false;
+      target.textContent = original;
+    }
+    return;
+  }
+  if (target.dataset.ackIncident) {
+    target.disabled = true;
+    try {
+      await apiFetch(`/api/admin/operations/incidents/${encodeURIComponent(target.dataset.ackIncident)}/acknowledge`, {
+        method: "POST",
+        body: {},
+      });
+      await loadAdmin();
+      renderAdmin();
+      showToast("success", "Incident acknowledged", "Nimbus will continue monitoring and resolve it automatically when the condition clears.");
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Could not acknowledge incident", friendlyError(error));
+    }
+    return;
+  }
   if (target.dataset.testCluster) {
     try { await apiFetch(`/api/admin/clusters/${encodeURIComponent(target.dataset.testCluster)}/test`, { method: "POST", body: {} }); showToast("success", "Connection verified", "The service account and API endpoint are working."); }
     catch (error) { showToast("error", "Connection failed", friendlyError(error)); }
@@ -2142,6 +3082,24 @@ els.viewRoot.addEventListener("change", (event) => {
     state.isoClusterId = target.value;
     renderAdmin();
   }
+  if (target.matches("[data-maintenance-audience]")) updateMaintenanceAudience(target);
+});
+
+function updateMaintenanceAudience(audience) {
+  const form = audience.closest("form");
+  const targetSelect = form?.elements.targetIds;
+  if (!targetSelect) return;
+  targetSelect.disabled = audience.value === "all";
+  targetSelect.required = audience.value !== "all";
+  targetSelect.innerHTML = maintenanceTargetOptions(audience.value, []);
+  const help = targetSelect.parentElement?.querySelector("small");
+  if (help) help.textContent = audience.value === "all"
+    ? "Every active customer user receives the notice."
+    : "Hold Ctrl or Command to choose multiple targets.";
+}
+
+els.editDialog.addEventListener("change", (event) => {
+  if (event.target.matches("[data-maintenance-audience]")) updateMaintenanceAudience(event.target);
 });
 
 els.viewRoot.addEventListener("invalid", (event) => {
@@ -2196,6 +3154,108 @@ els.viewRoot.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
   if (await submitSecurityForm(form)) return;
+  if (form.id === "securityPolicyForm") {
+    const data = new FormData(form);
+    const message = form.querySelector(".form-message");
+    const button = form.querySelector("button[type='submit']");
+    message.className = "form-message";
+    message.textContent = "Applying policy…";
+    button.disabled = true;
+    try {
+      const result = await apiFetch("/api/admin/security/policy", {
+        method: "PATCH",
+        body: {
+          requireAdminMfa: data.has("requireAdminMfa"),
+          requireCustomerMfa: data.has("requireCustomerMfa"),
+          newLoginEmail: data.has("newLoginEmail"),
+        },
+      });
+      state.admin.security = result.security;
+      await loadDashboard();
+      if (state.dashboard.security?.mfa?.enrollmentRequired) {
+        state.admin = null;
+        location.hash = "#settings";
+        route();
+        showToast("success", "Security policy enabled", "Set up two-factor authentication to unlock administrator access.");
+      } else {
+        renderAdmin();
+        showToast("success", "Security policy saved", "The new account-security rules are enforced immediately.");
+      }
+    } catch (error) {
+      message.className = "form-message error";
+      message.textContent = friendlyError(error);
+      button.disabled = false;
+    }
+    return;
+  }
+  if (form.id === "supportTicketForm") {
+    if (!form.checkValidity()) { form.reportValidity(); return; }
+    const message = form.querySelector(".form-message");
+    const button = form.querySelector("button[type='submit']");
+    message.className = "form-message";
+    message.textContent = "Creating your private support conversation…";
+    button.disabled = true;
+    try {
+      const result = await apiFetch("/api/v1/support/tickets", { method: "POST", body: formPayload(form) });
+      await loadDashboard();
+      state.support = null;
+      location.hash = `#support/${encodeURIComponent(result.ticket.id)}`;
+      await loadSupport(result.ticket.id);
+      renderSupport();
+      showToast("success", "Support ticket created", `${result.ticket.reference} is now waiting for support.`);
+    } catch (error) {
+      message.className = "form-message error";
+      message.textContent = friendlyError(error);
+      button.disabled = false;
+    }
+    return;
+  }
+  if (form.id === "supportReplyForm") {
+    if (!form.checkValidity()) { form.reportValidity(); return; }
+    const ticketId = form.dataset.ticketId;
+    const data = new FormData(form);
+    const message = form.querySelector(".form-message");
+    const button = form.querySelector("button[type='submit']");
+    message.className = "form-message";
+    message.textContent = data.has("internal") ? "Saving private administrator note…" : "Sending reply…";
+    button.disabled = true;
+    try {
+      await apiFetch(`/api/v1/support/tickets/${encodeURIComponent(ticketId)}/messages`, {
+        method: "POST",
+        body: { message: data.get("message"), internal: data.has("internal") },
+      });
+      await Promise.all([loadDashboard(), loadSupport(ticketId)]);
+      renderSupport();
+      showToast("success", data.has("internal") ? "Internal note saved" : "Reply sent", data.has("internal") ? "Only administrators can see this note." : "The support conversation has been updated.");
+    } catch (error) {
+      message.className = "form-message error";
+      message.textContent = friendlyError(error);
+      button.disabled = false;
+    }
+    return;
+  }
+  if (form.id === "supportManageForm") {
+    const ticketId = form.dataset.ticketId;
+    const message = form.querySelector(".form-message");
+    const button = form.querySelector("button[type='submit']");
+    button.disabled = true;
+    message.className = "form-message";
+    message.textContent = "Saving ticket ownership and status…";
+    try {
+      await apiFetch(`/api/v1/support/tickets/${encodeURIComponent(ticketId)}`, {
+        method: "PATCH",
+        body: formPayload(form),
+      });
+      await Promise.all([loadDashboard(), loadSupport(ticketId)]);
+      renderSupport();
+      showToast("success", "Ticket updated", "Status, priority, and ownership are current.");
+    } catch (error) {
+      message.className = "form-message error";
+      message.textContent = friendlyError(error);
+      button.disabled = false;
+    }
+    return;
+  }
   if (form.id === "isoUploadForm") {
     const file = form.elements.isoFile?.files?.[0];
     const policyId = form.elements.policyId?.value;
@@ -2291,6 +3351,21 @@ els.viewRoot.addEventListener("submit", async (event) => {
       delete payload.maxUploadGb;
       delete payload.quotaGb;
       await apiFetch("/api/admin/iso-policies", { method: "POST", body: payload });
+    } else if (createKind === "maintenance" || form.id === "createMaintenanceForm") {
+      const result = await apiFetch("/api/admin/maintenance-events", {
+        method: "POST",
+        body: maintenanceFormPayload(form),
+      });
+      await loadAdmin();
+      renderAdmin();
+      showToast(
+        "success",
+        result.event.status === "draft" ? "Maintenance draft saved" : "Maintenance notice published",
+        result.event.status === "draft"
+          ? "The notice remains private and editable."
+          : `${plural(result.event.recipientCount || 0, "user")} can now see it${result.queuedEmails ? ` · ${plural(result.queuedEmails, "email")} queued` : ""}.`,
+      );
+      return;
     } else if (form.id === "emailSettingsForm") {
       const payload = formPayload(form);
       payload.port = Number(payload.port);

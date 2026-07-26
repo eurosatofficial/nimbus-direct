@@ -7,6 +7,9 @@ Nimbus Direct is a modern, self-hosted customer control panel for Proxmox VE. Ad
 ## What is included
 
 - Administrator control center for clusters, customers, users, inventory, direct assignments, permissions, and audit logs.
+- Administrator Operations Center with cluster reachability, node pressure, storage capacity, failed/stuck tasks, stale assignments, persistent incident history, and acknowledgement.
+- Targeted Maintenance Center for planned work and service incidents, with drafts, scheduling, assignment-derived audiences, frozen per-user deliveries, customer banners/history, resolution, and optional branded email.
+- Tenant-safe Support Ticket Center with customer conversations, optional assigned-resource context, administrator ownership/status/priority controls, private internal notes, per-login unread state, audit history, and branded email updates.
 - Customer dashboard scoped to active local assignments.
 - Start, stop, shutdown, reboot, reset, suspend, and resume permission model.
 - Server-side ownership and permission validation before every Proxmox call.
@@ -19,13 +22,14 @@ Nimbus Direct is a modern, self-hosted customer control panel for Proxmox VE. Ad
 - Private customer Notification Center with unread state, per-login in-panel/email preferences, action results, infrastructure alerts, and recovery notices.
 - Per-assignment offline, CPU, memory, and storage alert policies with sustained-duration checks, cooldowns, first-seen baselining, and intentional power-off suppression.
 - Authenticator-app two-factor authentication with QR enrollment, one-use recovery codes, short-lived login challenges, active-session review/revocation, administrator-assisted reset, and security email notices.
+- Administrator Security & Access Center with MFA coverage, account posture, active-session totals, failed/successful login counts, focused security events, enforceable administrator/customer 2FA policies, and optional successful-login email alerts.
 - Passwordless administrator-issued invitations and self-service password recovery with 30-minute single-use links, hashed token storage, resend/revoke controls, non-enumerating responses, and session revocation after reset.
 - Selected configuration and short-lived console-ticket service methods.
 - Encrypted Proxmox token, SMTP password, and queued email-content storage with AES-256-GCM.
 - Scrypt passwords, encrypted TOTP secrets, opaque sessions, CSRF/origin checks, rate limits, security headers, and audit records.
 - Background resource synchronization that preserves assignments during Proxmox failures.
 - Docker deployment with a read-only, unprivileged container.
-- Interactive demo mode and 44 automated isolation/security/integration tests.
+- Interactive and public read-only demo modes with automated isolation/security/integration tests.
 
 The complete design—including schema, authorization sequence, API endpoints, least-privilege guidance, and phased MVP plan—is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -58,6 +62,60 @@ docker compose \
 
 Open `http://127.0.0.1:4173`. The demo creates five simulated resources across several nodes and directly assigns three to the first customer. Remove the bootstrap passwords from `.env` after setup.
 
+## Public read-only demo
+
+Use a separate Nimbus installation and a fresh Docker volume. Do not copy a live
+Nimbus database into the public instance. Configure:
+
+```env
+ALLOW_DEMO_DATA=true
+DEMO_READ_ONLY=true
+
+BOOTSTRAP_ADMIN_EMAIL=admin-demo@example.com
+BOOTSTRAP_ADMIN_PASSWORD=choose-a-shared-demo-password
+BOOTSTRAP_CUSTOMER_ID=demo-customer
+BOOTSTRAP_CUSTOMER_NAME=Nimbus Demo Customer
+BOOTSTRAP_CUSTOMER_EMAIL=customer-demo@example.com
+BOOTSTRAP_CUSTOMER_PASSWORD=choose-another-shared-demo-password
+BOOTSTRAP_CUSTOMER_DISPLAY_NAME=Demo Customer
+```
+
+Initialize and deploy with the same two Compose files:
+
+```bash
+docker compose \
+  -f compose.yaml \
+  -f compose.internal.yaml \
+  run --rm panel node scripts/setup.mjs
+
+docker compose \
+  -f compose.yaml \
+  -f compose.internal.yaml \
+  up -d --build --force-recreate panel
+```
+
+In this mode, sign-in, sign-out, browsing, filtering, refreshes, resource details,
+usage history, network information, support history, and administrator tabs
+remain available. Every other `POST`, `PUT`, `PATCH`, and `DELETE` API request is
+rejected centrally with `403 demo_read_only`, including power actions, console
+tickets, snapshots, ISO changes, support replies, account/security changes, and
+all administrator mutations. The interface labels the instance as read-only and
+disables those controls.
+
+Nimbus also refuses to start this mode if the database contains a non-demo
+Proxmox cluster or stored SMTP configuration. Background synchronization,
+maintenance advancement, and email delivery are stopped. Use the interactive
+demo instead by leaving `DEMO_READ_ONLY=false`.
+
+Mode combinations:
+
+| `ALLOW_DEMO_DATA` | `DEMO_READ_ONLY` | Result |
+| --- | --- | --- |
+| `false` | `false` | Normal live panel |
+| `true` | `false` | Interactive simulated demo |
+| `true` | `true` | Public read-only demo |
+| `false` | `true` | Invalid; Nimbus refuses startup |
+
 ## Production setup
 
 ### 1. Configure Nimbus
@@ -70,6 +128,7 @@ APP_SECRET=generate-a-unique-random-secret-of-at-least-32-characters
 SESSION_COOKIE_SECURE=true
 TRUST_PROXY=true
 ALLOW_DEMO_DATA=false
+DEMO_READ_ONLY=false
 
 BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 BOOTSTRAP_ADMIN_PASSWORD=use-a-unique-password-of-at-least-12-characters
@@ -99,11 +158,17 @@ Add only the permissions required by enabled optional features:
 VM.Snapshot VM.Snapshot.Rollback
 VM.Config.CPU VM.Config.Memory VM.Config.Options
 VM.GuestAgent.Audit
+Sys.Audit
+Datastore.Audit
 ```
 
 Apply the custom role to `/vms` when Nimbus should discover and manage all guests, or to explicit `/vms/{vmid}` paths for a smaller allowlist. Apply the intended role to both the backing user and the privilege-separated token so the token remains the intersection of both ACLs.
 
-Do not grant `Administrator`, `Sys.Modify`, user management, host-shell access, or unrelated configuration permissions. Storage privileges are not needed unless the ISO feature is enabled as described below.
+Do not grant `Administrator`, `Sys.Modify`, user management, host-shell access, or unrelated configuration permissions. Beyond the read-only `Datastore.Audit` used for selected Operations Center capacity telemetry, storage mutation privileges are not needed unless the ISO feature is enabled as described below.
+
+`Sys.Audit` enables node CPU, memory, uptime, and root-storage health in the Operations Center. `Datastore.Audit` enables capacity monitoring only for storage paths where it is granted. Nimbus treats these telemetry reads as optional: missing permission is shown as partial coverage and cannot erase the last good reading or break normal VM/LXC synchronization.
+
+`VM.GuestAgent.Audit` lets the Network page retrieve live QEMU addresses through the official Guest Agent API. Nimbus falls back to static Cloud-Init `ipconfig` values for QEMU and static LXC network configuration when live discovery is unavailable. A QEMU VM using DHCP without a running QEMU Guest Agent has no address available through the Proxmox API, so Nimbus reports that specific condition instead of presenting the cached inventory value as an IP.
 
 ### 3. Initialize and start
 
@@ -264,7 +329,11 @@ The same Settings page lists active sessions with their last-seen time, IP addre
 
 Administrators can see whether 2FA is enabled in **Control center → Users**. If a user loses both the authenticator and recovery codes, an administrator can edit that user and perform a password-confirmed 2FA reset. This signs the affected user out everywhere and sends a security email when SMTP delivery is enabled. Administrators must use their own Settings page for self-service disablement; the assisted-reset route cannot reset the currently signed-in administrator.
 
-Existing accounts are not forced into enrollment during this upgrade, so deploying the release cannot lock out the current administrator. Enable 2FA for administrators first, store the recovery codes safely, and then roll it out to customers.
+Open **Control center → Security** to review MFA coverage, accounts still requiring enrollment, active-session totals, successful and failed login activity, and a focused security-event timeline with account and source-IP context. Failed password attempts are recorded without storing the guessed email address for unknown accounts.
+
+Security policies default to off, so deploying the release cannot lock out the current administrator. You can independently require 2FA for administrators and customers. When a protected group policy is enabled, an account without 2FA receives a restricted session that can access only the enrollment screen; resources, customer data, and administrative APIs remain unavailable until setup is confirmed. Required 2FA cannot be disabled while the policy applies. Enable 2FA for administrators first, store the recovery codes safely, and then enforce the administrator policy.
+
+The same Security tab can enable an email after every successful sign-in. These account-security emails, password-change notices, and administrator-reset notices use the Email Center and do not contain passwords or Proxmox credentials. They are unavailable until SMTP delivery is enabled.
 
 ### 11. Invite users and recover passwords
 
@@ -278,6 +347,48 @@ Account links are a Nimbus feature and require no additional Proxmox permission.
 The sign-in page now includes **Forgot your password?**. Nimbus always shows the same response whether the submitted address exists, is disabled, or cannot use recovery. Eligible accounts receive a 30-minute, single-use reset link. Completing the reset revokes every active session but preserves configured 2FA, so the next sign-in still requires the authenticator or a recovery code.
 
 Only an `APP_SECRET`-keyed hash of each account token is stored in `account_tokens`. The raw token exists only in the encrypted queued email until delivery and in the link received by the user. The browser removes it from the address bar before validation, API logs omit query strings, requests are rate-limited, and every request/completion/resend/revoke action is audited.
+
+### 12. Use the Operations Center
+
+Open **Control center → Operations** as an administrator. Nimbus updates health telemetry during the normal Proxmox synchronization cycle and exposes a rate-limited **Run full health refresh** action when an immediate check is needed.
+
+The center monitors:
+
+- Cluster reachability and stale/never-completed synchronization.
+- Node online state, CPU pressure, memory pressure, root-storage usage, and uptime.
+- Proxmox storage availability and percentage capacity.
+- Assigned resources missing from the latest successful inventory without deleting their local assignments.
+- Incomplete tasks that exceed 15 minutes and failed tasks from the last 24 hours.
+
+Conditions open persistent administrator-only incidents. Acknowledging an incident records the administrator and timestamp but does not disable monitoring. Nimbus resolves it automatically when a later successful reading returns to normal and keeps the recent recovery in the center.
+
+Optional node and storage requests are isolated from the primary inventory request. If `Sys.Audit` or `Datastore.Audit` is missing, the center shows partial telemetry coverage and retains its last good metrics. No Operations Center route is available to customer accounts.
+
+### 13. Publish maintenance and incident notices
+
+The Maintenance Center is a Nimbus-only feature and requires no additional Proxmox permission.
+
+1. Open **Control center → Maintenance**.
+2. Choose **Planned maintenance** or **Service incident**, enter the customer-facing title/message, severity, start time, and optional end time.
+3. Target all customers, one or more clusters, nodes, assigned resources, or customer accounts.
+4. Publish immediately or save an editable administrator-only draft.
+5. Resolve active work when complete, or cancel a scheduled window that will no longer happen.
+
+At publication, Nimbus resolves the selected infrastructure through its own active assignment database and creates an immutable delivery for each currently affected active customer user. Reassigning a VM later cannot expose the old notice to its new customer. Drafts have no deliveries and are never visible outside the administrator control center.
+
+Affected users see active/upcoming notices on the dashboard and a complete private timeline under **Maintenance**. Read state is scoped to the individual login. When Email Center delivery is enabled and the notice requests email, Nimbus queues the branded message only for users who opted into email infrastructure notices. Resolving a notice can likewise queue a recovery email for users who enabled recovery messages. In-panel maintenance remains visible even when email is disabled.
+
+### 14. Use the Support Ticket Center
+
+The ticket center is stored entirely in Nimbus and requires no additional Proxmox permission.
+
+1. A customer opens **Support → New ticket**, chooses a category and priority, optionally links one of its assigned servers, and writes the initial message.
+2. Nimbus verifies the customer and active resource assignment server-side before creating the ticket. A changed or foreign resource ID returns the same customer-safe not-found response.
+3. Administrators open **Support** to see the global queue, assign an active administrator, change priority/status, send customer-visible replies, or add an internal note.
+4. Customer replies place the ticket in **Waiting for support**; administrator replies place it in **Waiting for customer**. Resolved or closed tickets must be reopened before another public reply.
+5. Customers may close and later reopen their own customer-scoped tickets. Every action is CSRF-protected, rate-limited where appropriate, and audited without copying message contents into the audit log.
+
+All active users belonging to the same customer account can see that customer's tickets, which supports teams without exposing another customer. Unread state remains individual to each login. Internal notes and their count are visible only to administrators. When Email Center delivery is enabled, ticket creation notifies the assigned administrator—or all active administrators when unassigned—and administrator replies/status changes notify active users in the affected customer. Emails link back to the private Nimbus thread and never include Proxmox credentials.
 
 ## Internal Proxmox addresses and private CAs
 
@@ -296,7 +407,7 @@ Mount only the public CA certificate. Never copy a private CA key into Nimbus an
 
 SQLite data is stored in the `nimbus-data` volume. Stop Nimbus before copying it, or use a SQLite-aware backup process. Back up both the database and `APP_SECRET`, store them separately, and test restoration.
 
-The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, and account invitation/recovery state in `migrations/009_account_lifecycle.sql`. Runtime startup creates the new table and adds the account/email columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
+The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, and durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
 
 ## Operations
 
@@ -311,7 +422,11 @@ The numbered schema is in `migrations/001_initial.sql`, with additive task index
 - One-time boot restoration is tied to a successful Nimbus-tracked start, reboot, or reset task. If an administrator powers the VM directly in Proxmox instead, use **Cancel** in Nimbus to restore the saved order.
 - Email delivery polls its SQLite queue every five seconds by default. Temporary failures retry with increasing delays; authentication, sender, and recipient errors fail without repeated attempts. Adjust only the worker cadence and SMTP timeout with `EMAIL_QUEUE_INTERVAL_SECONDS` and `EMAIL_SMTP_TIMEOUT_SECONDS`.
 - Resource alert conditions are evaluated after successful inventory synchronization. Alert policies and incident state survive restarts; assignment removal or reassignment resets incident state.
+- Operations telemetry is normalized and stored locally. Optional node/storage permission failures retain the last good readings, while cluster, stale-assignment, and stuck-task incidents continue to evaluate.
+- Maintenance audiences are resolved from active local assignments at publication and stored as per-user delivery snapshots. Scheduled notices activate automatically; notices with an end time resolve automatically even when no browser is open.
+- Support tickets are customer-account scoped, while unread markers are user scoped. Internal notes never appear in customer queries, email, or customer-visible counts.
 - TOTP enrollment windows last ten minutes and pre-authentication login challenges last five minutes. Verification and security-setting changes have independent rate limits.
+- Security policy changes are administrator-only, CSRF-protected, rate-limited, and audited. Enforcement is repeated on every request rather than relying on the current page state.
 - Invitation and password-reset links last 30 minutes, are single-use, and are invalidated by resending, revocation, successful use, or an administrator-set password.
 
 ## Console security
@@ -324,6 +439,6 @@ The panel pins the official noVNC 1.7 client. A console launch creates an encryp
 npm run check
 ```
 
-The suite verifies credential, TOTP-secret, and queued-content encryption; hashed single-use invitations and password-reset links; non-enumerating recovery responses; account-link revocation and expiry; password-reset session revocation with 2FA preservation; RFC-compatible TOTP generation; one-use recovery codes; MFA login challenges; scoped session revocation; SMTP message/queue behavior; notification isolation and deduplication; sustained alert/recovery state; direct customer/resource/permission authorization; cross-customer denial; tampered-resource denial; assignment preservation across synchronization; token handling; password/session security; Proxmox request mapping; customer-scoped task/audit access; snapshot normalization/limits/confirmations; ISO ownership/quota isolation; streamed multipart upload; guarded CD-ROM mount/eject behavior; and exact one-time boot-order restoration.
+The suite verifies credential, TOTP-secret, and queued-content encryption; hashed single-use invitations and password-reset links; non-enumerating recovery responses; account-link revocation and expiry; password-reset session revocation with 2FA preservation; RFC-compatible TOTP generation; one-use recovery codes; MFA login challenges; scoped session revocation; durable security policy, forced-enrollment restriction, required-2FA disablement denial, failed-login events, account posture, and password/login security emails; SMTP message/queue behavior; notification isolation and deduplication; sustained alert/recovery state; maintenance target resolution, immutable recipient snapshots, customer isolation, read state, scheduling, branded email, and administrator/customer routes; support-ticket customer isolation, foreign-resource rejection, unread state, internal-note secrecy, administrator assignment/status workflows, branded email, and API auditing; direct customer/resource/permission authorization; cross-customer denial; tampered-resource denial; assignment preservation across synchronization; token handling; password/session security; Proxmox request mapping; normalized node/storage operations telemetry; partial-permission preservation; incident acknowledgement and automatic resolution; customer denial of Operations Center routes; customer-scoped task/audit access; snapshot normalization/limits/confirmations; ISO ownership/quota isolation; streamed multipart upload; guarded CD-ROM mount/eject behavior; and exact one-time boot-order restoration.
 
 Before serving external customers, complete the Phase 2 hardening work in the architecture document, run a penetration test, validate least-privilege ACLs on your exact Proxmox release, and perform backup/restore drills.

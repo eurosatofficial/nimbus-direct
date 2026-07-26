@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
   decryptSecret,
   encryptSecret,
@@ -65,4 +66,34 @@ test("security headers deny framing and unnecessary browser capabilities", () =>
   assert.match(headers["permissions-policy"], /camera=\(\)/);
   assert.match(headers["strict-transport-security"], /includeSubDomains/);
   assert.equal(normalizeEmail("  Admin@Example.COM "), "admin@example.com");
+});
+
+test("the Security control-center renderer returns markup to the shared tab shell", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = source.indexOf("function renderAdminSecurity()");
+  const end = source.indexOf("function renderAdminUsers()", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const renderer = source.slice(start, end);
+  assert.match(renderer, /return `<section class="security-center-hero">/);
+  assert.doesNotMatch(renderer, /els\.viewRoot\.innerHTML\s*=/);
+  assert.match(source, /security:\s*renderAdminSecurity/);
+});
+
+test("the public demo UI is labeled and disables mutation controls without hiding browsing", async () => {
+  const [source, html, css] = await Promise.all([
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /function setDemoReadOnly\(enabled\)/);
+  assert.match(source, /function applyDemoReadOnlyUi\(root = els\.viewRoot\)/);
+  assert.match(source, /new MutationObserver\(\(\) => applyDemoReadOnlyUi\(\)\)/);
+  assert.match(source, /\[data-admin-tab\]/);
+  assert.match(source, /\[data-details\]/);
+  assert.match(source, /demo_read_only: "This public demo is read-only/);
+  assert.match(html, /id="demoReadOnlyBanner"/);
+  assert.match(html, /id="demoLoginNotice"/);
+  assert.match(css, /\.demo-read-only-banner/);
+  assert.match(css, /\.demo-form-disabled/);
 });

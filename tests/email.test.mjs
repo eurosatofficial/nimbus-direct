@@ -7,9 +7,11 @@ import {
   buildMimeMessage,
   createEmailService,
   invitationEmailTemplate,
+  maintenanceEmailTemplate,
   normalizeMailbox,
   passwordResetEmailTemplate,
   securityEmailTemplate,
+  supportTicketEmailTemplate,
 } from "../server/email.mjs";
 import { openStore } from "../server/store.mjs";
 
@@ -149,6 +151,65 @@ test("security notices use the branded template without trusting user content", 
   assert.match(content.html, /Account security/);
   assert.equal(content.html.includes("<Operator>"), false);
   assert.match(content.html, /&lt;Operator&gt;/);
+});
+
+test("maintenance emails escape customer-facing content and describe the service window", () => {
+  const content = maintenanceEmailTemplate({
+    displayName: "<Customer>",
+    event: {
+      kind: "maintenance",
+      status: "scheduled",
+      severity: "warning",
+      title: "Network maintenance <Berlin>",
+      message: "A brief interruption is possible.\nNo action is required.",
+      startsAt: Date.parse("2026-07-26T22:00:00.000Z"),
+      endsAt: Date.parse("2026-07-26T23:00:00.000Z"),
+    },
+    appUrl: "https://panel.example.test/#maintenance",
+  });
+  assert.equal(content.subject, "Scheduled: Network maintenance <Berlin>");
+  assert.match(content.text, /2026-07-26T22:00:00\.000Z/);
+  assert.match(content.text, /View maintenance status/);
+  assert.match(content.html, /Planned maintenance · Scheduled/);
+  assert.match(content.html, /Network maintenance &lt;Berlin&gt;/);
+  assert.equal(content.html.includes("<Customer>"), false);
+  assert.match(content.html, /A brief interruption is possible\.<br>No action is required\./);
+});
+
+test("support emails escape conversation content and link to the private ticket", () => {
+  const content = supportTicketEmailTemplate({
+    displayName: "<Customer>",
+    ticket: {
+      reference: "ND-20260726-ABC123",
+      subject: "Network issue <VM>",
+      status: "waiting_customer",
+    },
+    message: "The route was repaired.\nPlease test again <now>.",
+    actorName: "<Support Admin>",
+    eventType: "reply",
+    appUrl: "https://panel.example.test/#support/private-ticket-id",
+  });
+  assert.equal(content.subject, "[ND-20260726-ABC123] New reply: Network issue <VM>");
+  assert.match(content.text, /Open this support ticket/);
+  assert.match(content.html, /Open support ticket/);
+  assert.match(content.html, /Network issue &lt;VM&gt;/);
+  assert.match(content.html, /Please test again &lt;now&gt;\./);
+  assert.equal(content.html.includes("<Customer>"), false);
+  assert.equal(content.html.includes("<Support Admin>"), false);
+
+  const status = supportTicketEmailTemplate({
+    displayName: "Customer",
+    ticket: {
+      reference: "ND-20260726-ABC123",
+      subject: "Network issue",
+      status: "resolved",
+    },
+    message: "The ticket status changed to resolved.",
+    actorName: "Support Admin",
+    eventType: "status",
+  });
+  assert.match(status.subject, /Ticket updated/);
+  assert.match(status.html, /support ticket was updated/i);
 });
 
 test("account-action emails contain only escaped, expiring single-use links", () => {

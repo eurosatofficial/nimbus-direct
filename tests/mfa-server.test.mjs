@@ -68,6 +68,11 @@ test("authenticator enrollment protects login and one-time recovery codes", asyn
 
   try {
     await waitForServer(baseUrl, child, logs);
+    await request("/api/auth/login", {
+      method: "POST",
+      body: { email: "operator@example.test", password: "definitely the wrong password" },
+      expectedStatus: 401,
+    });
     const login = await request("/api/auth/login", {
       method: "POST",
       body: { email: "operator@example.test", password: "operator password for mfa test" },
@@ -78,6 +83,21 @@ test("authenticator enrollment protects login and one-time recovery codes", asyn
     assert.equal(initialDashboard.security.mfa.enabled, false);
     assert.equal(initialDashboard.security.sessions.length, 1);
     assert.equal(initialDashboard.security.sessions[0].current, true);
+    const initialSecurityCenter = (await request("/api/admin/state")).payload.security;
+    assert.equal(initialSecurityCenter.policy.requireAdminMfa, false);
+    assert.equal(initialSecurityCenter.summary.failedLogins24h, 1);
+    assert.ok(initialSecurityCenter.events.items.some((item) => item.action === "auth.login_failed"));
+
+    const enforced = (await request("/api/admin/security/policy", {
+      method: "PATCH",
+      body: { requireAdminMfa: true },
+    })).payload.policy;
+    assert.equal(enforced.requireAdminMfa, true);
+    await request("/api/admin/state", { expectedStatus: 403 });
+    const restrictedDashboard = (await request("/api/v1/dashboard")).payload;
+    assert.equal(restrictedDashboard.security.mfa.enrollmentRequired, true);
+    assert.deepEqual(restrictedDashboard.resources, []);
+    assert.deepEqual(restrictedDashboard.activity.items, []);
 
     const setup = (await request("/api/v1/security/mfa/setup", {
       method: "POST",
@@ -94,6 +114,20 @@ test("authenticator enrollment protects login and one-time recovery codes", asyn
     assert.equal(confirmed.recoveryCodes.length, 10);
     const recoveryCode = confirmed.recoveryCodes[0];
     assert.equal((await request("/api/v1/dashboard")).payload.security.mfa.recoveryCodesRemaining, 10);
+    assert.equal((await request("/api/admin/state")).payload.security.summary.requiredPending, 0);
+    await request("/api/v1/security/mfa/disable", {
+      method: "POST",
+      body: {
+        currentPassword: "operator password for mfa test",
+        code: generateTotp(setup.secret),
+      },
+      expectedStatus: 409,
+    });
+    const relaxed = (await request("/api/admin/security/policy", {
+      method: "PATCH",
+      body: { requireAdminMfa: false },
+    })).payload.policy;
+    assert.equal(relaxed.requireAdminMfa, false);
 
     await request("/api/auth/logout", { method: "POST", body: {} });
     cookie = "";

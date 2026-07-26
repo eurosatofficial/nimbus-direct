@@ -129,6 +129,140 @@ export function securityEmailTemplate({ displayName, title, message, ipAddress =
   return { subject: `Nimbus Direct: ${safeTitle}`, text, html };
 }
 
+export function maintenanceEmailTemplate({ displayName, event, appUrl = "" }) {
+  const name = String(displayName || "there").trim();
+  const title = oneLine(event?.title, "Maintenance title", 160);
+  const message = String(event?.message || "").trim();
+  if (!message || message.length > 4000) throw problem("Maintenance message is invalid", "invalid_email_message", 400);
+  const kind = event?.kind === "incident" ? "Service incident" : "Planned maintenance";
+  const status = ["scheduled", "active", "resolved", "cancelled"].includes(event?.status) ? event.status : "scheduled";
+  const startsAt = new Date(event?.startsAt);
+  const endsAt = status === "resolved" && event?.resolvedAt
+    ? new Date(event.resolvedAt)
+    : event?.endsAt ? new Date(event.endsAt) : null;
+  if (!Number.isFinite(startsAt.getTime()) || (endsAt && !Number.isFinite(endsAt.getTime()))) {
+    throw problem("Maintenance schedule is invalid", "invalid_email_message", 400);
+  }
+  const safeAppUrl = appUrl ? oneLine(appUrl, "Panel URL", 2048) : "";
+  const statusLabel = status === "resolved" ? "Resolved"
+    : status === "active" ? "In progress"
+      : status === "cancelled" ? "Cancelled"
+        : "Scheduled";
+  const subject = `${statusLabel}: ${title}`;
+  const text = [
+    `Hello ${name},`,
+    "",
+    `${kind} — ${statusLabel}`,
+    title,
+    message,
+    "",
+    `Starts: ${startsAt.toISOString()}`,
+    endsAt ? `${status === "resolved" ? "Resolved" : "Ends"}: ${endsAt.toISOString()}` : "Ends: Until further notice",
+    safeAppUrl ? `View maintenance status: ${safeAppUrl}` : null,
+    "",
+    "This notice applies only to infrastructure assigned to your Nimbus Direct customer account.",
+  ].filter((line) => line !== null).join("\n");
+  const accent = status === "resolved" ? "#16865f"
+    : event?.severity === "critical" ? "#c94747"
+      : event?.severity === "warning" ? "#a56825"
+        : "#5662dc";
+  const soft = status === "resolved" ? "#eaf8f2"
+    : event?.severity === "critical" ? "#fff0f0"
+      : event?.severity === "warning" ? "#fff4e8"
+        : "#eef0ff";
+  const htmlMessage = escapeHtml(message).replace(/\r?\n/g, "<br>");
+  const action = safeAppUrl
+    ? `<table role="presentation" cellspacing="0" cellpadding="0" style="margin-top:22px"><tr><td style="border-radius:10px;background:#5b67e8"><a href="${escapeHtml(safeAppUrl)}" style="padding:13px 20px;display:inline-block;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700">View maintenance status</a></td></tr></table>`
+    : "";
+  const html = `<!doctype html>
+<html lang="en"><body style="margin:0;background:#f4f6fb;color:#1d2740;font-family:Arial,sans-serif">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 14px;background:#f4f6fb">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;overflow:hidden;border:1px solid #e0e4ef;border-radius:18px;background:#ffffff">
+        <tr><td style="padding:24px 28px;background:#11182a;color:#ffffff;font-size:20px;font-weight:700">nimbus <span style="color:#7580ff">direct</span></td></tr>
+        <tr><td style="padding:34px 28px">
+          <div style="display:inline-block;padding:7px 11px;border-radius:999px;background:${soft};color:${accent};font-size:12px;font-weight:700">${escapeHtml(kind)} · ${escapeHtml(statusLabel)}</div>
+          <h1 style="margin:18px 0 10px;font-size:26px;line-height:1.25">${escapeHtml(title)}</h1>
+          <p style="margin:0 0 22px;color:#667087;font-size:15px;line-height:1.65">Hello ${escapeHtml(name)},<br>${htmlMessage}</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0 8px">
+            <tr><td style="color:#8a93a8;font-size:12px">Starts</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(startsAt.toISOString())}</td></tr>
+            <tr><td style="color:#8a93a8;font-size:12px">${status === "resolved" ? "Resolved" : "Ends"}</td><td align="right" style="font-size:13px;font-weight:700">${endsAt ? escapeHtml(endsAt.toISOString()) : "Until further notice"}</td></tr>
+          </table>
+          ${action}
+          <div style="margin-top:22px;padding:14px 16px;border-radius:12px;background:#f7f8fb;color:#717b90;font-size:12px;line-height:1.55">This notice applies only to infrastructure assigned to your Nimbus Direct customer account.</div>
+        </td></tr>
+        <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">Automatic maintenance message from Nimbus Direct</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+  return { subject, text, html };
+}
+
+export function supportTicketEmailTemplate({
+  displayName,
+  ticket,
+  message,
+  actorName,
+  eventType = "reply",
+  appUrl = "",
+}) {
+  const name = String(displayName || "there").trim();
+  const reference = oneLine(ticket?.reference, "Ticket reference", 80);
+  const ticketSubject = oneLine(ticket?.subject, "Ticket subject", 160);
+  const actor = oneLine(actorName || "Nimbus Direct support", "Ticket author", 160);
+  const body = String(message || "").trim();
+  if (!body || body.length > 8000) throw problem("Ticket message is invalid", "invalid_email_message", 400);
+  const safeAppUrl = appUrl ? oneLine(appUrl, "Panel URL", 2048) : "";
+  const isNew = eventType === "created";
+  const isStatus = eventType === "status";
+  const heading = isNew
+    ? "A new support request is waiting."
+    : isStatus ? "Your support ticket was updated." : "Your support ticket has a new reply.";
+  const subject = `[${reference}] ${isNew ? "New support request" : isStatus ? "Ticket updated" : "New reply"}: ${ticketSubject}`;
+  const text = [
+    `Hello ${name},`,
+    "",
+    heading,
+    `${reference} — ${ticketSubject}`,
+    `${actor}:`,
+    body,
+    "",
+    `Status: ${String(ticket?.status || "open").replaceAll("_", " ")}`,
+    safeAppUrl ? `Open this support ticket: ${safeAppUrl}` : null,
+    "",
+    "Reply inside Nimbus Direct so the complete conversation remains protected and auditable.",
+  ].filter((line) => line !== null).join("\n");
+  const action = safeAppUrl
+    ? `<table role="presentation" cellspacing="0" cellpadding="0" style="margin-top:22px"><tr><td style="border-radius:10px;background:#5b67e8"><a href="${escapeHtml(safeAppUrl)}" style="padding:13px 20px;display:inline-block;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700">Open support ticket</a></td></tr></table>`
+    : "";
+  const htmlBody = escapeHtml(body).replace(/\r?\n/g, "<br>");
+  const html = `<!doctype html>
+<html lang="en"><body style="margin:0;background:#f4f6fb;color:#1d2740;font-family:Arial,sans-serif">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 14px;background:#f4f6fb">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;overflow:hidden;border:1px solid #e0e4ef;border-radius:18px;background:#ffffff">
+        <tr><td style="padding:24px 28px;background:#11182a;color:#ffffff;font-size:20px;font-weight:700">nimbus <span style="color:#7580ff">direct</span></td></tr>
+        <tr><td style="padding:34px 28px">
+          <div style="display:inline-block;padding:7px 11px;border-radius:999px;background:#eef0ff;color:#5662dc;font-size:12px;font-weight:700">Support · ${escapeHtml(reference)}</div>
+          <h1 style="margin:18px 0 10px;font-size:26px;line-height:1.25">${escapeHtml(heading)}</h1>
+          <p style="margin:0;color:#667087;font-size:15px;line-height:1.65">Hello ${escapeHtml(name)},</p>
+          <div style="margin-top:20px;padding:18px;border:1px solid #e5e8f0;border-radius:12px;background:#f9fafe">
+            <strong style="display:block;margin-bottom:8px;color:#323c54;font-size:14px">${escapeHtml(ticketSubject)}</strong>
+            <span style="display:block;margin-bottom:8px;color:#8a93a8;font-size:11px;font-weight:700">${escapeHtml(actor)}</span>
+            <div style="color:#566078;font-size:14px;line-height:1.65">${htmlBody}</div>
+          </div>
+          ${action}
+          <div style="margin-top:22px;padding:14px 16px;border-radius:12px;background:#f7f8fb;color:#717b90;font-size:12px;line-height:1.55">Reply inside Nimbus Direct so the complete conversation remains protected and auditable. Do not send Proxmox credentials in a ticket.</div>
+        </td></tr>
+        <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">Automatic support message from Nimbus Direct</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+  return { subject, text, html };
+}
+
 function accountActionEmailTemplate({
   displayName,
   subject,

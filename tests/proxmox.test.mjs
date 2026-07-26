@@ -88,6 +88,133 @@ test("guest inventory uses cluster resources without any Proxmox pool lookup", a
   assert.equal(calls.some((call) => call.key.startsWith("/pools")), false);
 });
 
+test("operations telemetry normalizes node pressure and storage capacity with partial-failure isolation", async () => {
+  const calls = [];
+  const client = mockClient({
+    "/cluster/resources?type=node": jsonResponse([
+      {
+        type: "node",
+        node: "pve-a",
+        status: "online",
+        cpu: 0.425,
+        maxcpu: 16,
+        mem: 48 * 1024 ** 3,
+        maxmem: 64 * 1024 ** 3,
+        disk: 50 * 1024 ** 3,
+        maxdisk: 100 * 1024 ** 3,
+        uptime: 86400,
+      },
+    ]),
+    "/cluster/resources?type=storage": jsonResponse([
+      {
+        type: "storage",
+        node: "pve-a",
+        storage: "local",
+        status: "available",
+        plugintype: "dir",
+        content: "iso,vztmpl",
+        disk: 100,
+        maxdisk: 1000,
+      },
+    ]),
+    "/nodes/pve-a/storage?enabled=1": jsonResponse([
+      {
+        storage: "local-zfs",
+        type: "zfspool",
+        active: 1,
+        shared: 0,
+        content: "images,rootdir",
+        used: 750,
+        total: 1000,
+        avail: 250,
+      },
+      {
+        storage: "local-lvm",
+        type: "lvmthin",
+        active: 1,
+        shared: 0,
+        content: "images,rootdir",
+        used: 400,
+        total: 1000,
+        avail: 600,
+      },
+      {
+        storage: "offsite",
+        type: "pbs",
+        enabled: 0,
+        active: 0,
+        content: "backup",
+      },
+    ]),
+  }, calls);
+  const metrics = await client.getOperationsMetrics();
+  assert.deepEqual(metrics.nodes, [{
+    node: "pve-a",
+    status: "online",
+    cpuPercent: 42.5,
+    cpuCores: 16,
+    memoryUsedBytes: 48 * 1024 ** 3,
+    memoryTotalBytes: 64 * 1024 ** 3,
+    memoryPercent: 75,
+    rootUsedBytes: 50 * 1024 ** 3,
+    rootTotalBytes: 100 * 1024 ** 3,
+    rootPercent: 50,
+    uptime: 86400,
+  }]);
+  assert.deepEqual(metrics.storages, [
+    {
+      node: "pve-a",
+      storageId: "local-zfs",
+      status: "available",
+      type: "zfspool",
+      shared: false,
+      content: ["images", "rootdir"],
+      usedBytes: 750,
+      totalBytes: 1000,
+      availableBytes: 250,
+      usagePercent: 75,
+    },
+    {
+      node: "pve-a",
+      storageId: "local-lvm",
+      status: "available",
+      type: "lvmthin",
+      shared: false,
+      content: ["images", "rootdir"],
+      usedBytes: 400,
+      totalBytes: 1000,
+      availableBytes: 600,
+      usagePercent: 40,
+    },
+  ]);
+  assert.equal(metrics.storagesAuthoritative, true);
+  assert.deepEqual(metrics.errors, {});
+  assert.equal(calls.some((call) => call.key === "/nodes/pve-a/storage?enabled=1"), true);
+  assert.equal(metrics.storages.some((storage) => storage.storageId === "offsite"), false);
+
+  const fallbackClient = mockClient({
+    "/cluster/resources?type=node": jsonResponse([{ node: "pve-a", status: "online" }]),
+    "/cluster/resources?type=storage": jsonResponse([
+      { node: "pve-a", storage: "local", status: "available", plugintype: "dir", disk: 100, maxdisk: 500 },
+    ]),
+    "/nodes/pve-a/storage?enabled=1": jsonResponse(null, 403),
+  });
+  const fallback = await fallbackClient.getOperationsMetrics();
+  assert.equal(fallback.storages[0].storageId, "local");
+  assert.equal(fallback.storagesAuthoritative, false);
+  assert.deepEqual(fallback.errors, {});
+
+  const partialClient = mockClient({
+    "/cluster/resources?type=node": jsonResponse([{ node: "pve-a", status: "online", cpu: 0.1, maxcpu: 4 }]),
+    "/cluster/resources?type=storage": jsonResponse(null, 403),
+  });
+  const partial = await partialClient.getOperationsMetrics();
+  assert.equal(partial.nodes[0].cpuPercent, 10);
+  assert.equal(partial.storages, null);
+  assert.equal(partial.storagesAuthoritative, false);
+  assert.equal(partial.errors.storages, "proxmox_permission_denied");
+});
+
 test("network inspection normalizes QEMU and LXC data and removes local addresses", async () => {
   const client = mockClient({
     "/nodes/pve-a/qemu/100/agent/network-get-interfaces": jsonResponse({
@@ -114,7 +241,30 @@ test("network inspection normalizes QEMU and LXC data and removes local addresse
   assert.equal(lxc.primaryIp, "10.0.0.21");
   assert.deepEqual(new Set(lxc.addresses.map((entry) => entry.address)), new Set(["10.0.0.21", "2001:db8::21"]));
 
-  assert.equal((await client.getNetwork({ status: "stopped" })).status, "stopped");
+  const fallbackClient = mockClient({
+    "/nodes/pve-c/qemu/300/agent/network-get-interfaces": jsonResponse(null, 500),
+    "/nodes/pve-c/qemu/300/config?current=1": jsonResponse({
+      ipconfig0: "ip=192.0.2.30/24,gw=192.0.2.1",
+      ipconfig1: "ip=dhcp,ip6=auto",
+    }),
+    "/nodes/pve-c/lxc/400/config?current=1": jsonResponse({
+      net0: "name=eth0,bridge=vmbr0,ip=198.51.100.40/24,gw=198.51.100.1",
+    }),
+  });
+  const configuredQemu = await fallbackClient.getNetwork({ type: "qemu", vmid: 300, node: "pve-c", status: "running" });
+  assert.equal(configuredQemu.status, "configured");
+  assert.equal(configuredQemu.source, "configuration");
+  assert.equal(configuredQemu.primaryIp, "192.0.2.30");
+  assert.equal(configuredQemu.addresses.some((entry) => entry.address === "dhcp"), false);
+  const stoppedLxc = await fallbackClient.getNetwork({ type: "lxc", vmid: 400, node: "pve-c", status: "stopped" });
+  assert.equal(stoppedLxc.status, "stopped");
+  assert.equal(stoppedLxc.primaryIp, "198.51.100.40");
+
+  const deniedClient = mockClient({
+    "/nodes/pve-d/qemu/500/agent/network-get-interfaces": jsonResponse(null, 403),
+    "/nodes/pve-d/qemu/500/config?current=1": jsonResponse(null, 403),
+  });
+  assert.equal((await deniedClient.getNetwork({ type: "qemu", vmid: 500, node: "pve-d", status: "running" })).status, "permission_required");
 });
 
 test("history aggregates CPU by vCPU weight and memory by total capacity", async () => {
