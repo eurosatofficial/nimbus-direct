@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/screenshots/overview.png" alt="Nimbus Dashboard" width="800">
+</p>
+
 # Nimbus Direct
 
 Nimbus Direct is a modern, self-hosted customer control panel for Proxmox VE. Administrators assign individual QEMU virtual machines and LXC containers to customer accounts in Nimbus's own database.
