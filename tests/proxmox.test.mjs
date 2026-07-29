@@ -88,6 +88,47 @@ test("guest inventory uses cluster resources without any Proxmox pool lookup", a
   assert.equal(calls.some((call) => call.key.startsWith("/pools")), false);
 });
 
+test("QEMU inventory uses Guest Agent filesystem usage and ignores pseudo filesystems", async () => {
+  const gib = 1024 ** 3;
+  const calls = [];
+  const client = mockClient({
+    "/cluster/resources?type=vm": jsonResponse([
+      { type: "qemu", vmid: 100, node: "pve-a", name: "web", status: "running", maxdisk: 100 * gib, disk: 0 },
+      { type: "qemu", vmid: 101, node: "pve-a", name: "agent-denied", status: "running", maxdisk: 64 * gib, disk: 0 },
+      { type: "lxc", vmid: 200, node: "pve-b", name: "worker", status: "running", maxdisk: 32 * gib, disk: 12 * gib },
+    ]),
+    "/nodes/pve-a/qemu/100/agent/get-fsinfo": jsonResponse({
+      result: [
+        { name: "/dev/sda1", mountpoint: "/", type: "ext4", "used-bytes": 32 * gib, "total-bytes": 64 * gib, disk: [{ dev: "/dev/sda" }] },
+        { name: "/dev/sda1", mountpoint: "/srv/root-bind", type: "ext4", "used-bytes": 32 * gib, "total-bytes": 64 * gib, disk: [{ dev: "/dev/sda" }] },
+        { name: "/dev/sdb1", mountpoint: "/data", type: "xfs", "used-bytes": 10 * gib, "total-bytes": 20 * gib, disk: [{ dev: "/dev/sdb" }] },
+        { name: "tmpfs", mountpoint: "/run", type: "tmpfs", "used-bytes": 7 * gib, "total-bytes": 8 * gib, disk: [{ dev: "tmpfs" }] },
+        { name: "/dev/loop0", mountpoint: "/snap/base", type: "squashfs", "used-bytes": 2 * gib, "total-bytes": 2 * gib, disk: [{ dev: "/dev/loop0" }] },
+      ],
+    }),
+    "/nodes/pve-a/qemu/101/agent/get-fsinfo": jsonResponse(null, 403),
+  }, calls);
+
+  const instances = await client.listVirtualMachines();
+  const web = instances.find((instance) => instance.vmid === 100);
+  assert.equal(web.storage, 100);
+  assert.equal(web.storageUsed, 42);
+  assert.deepEqual(web.metadata.storageUsage, {
+    available: true,
+    source: "qemu_guest_agent",
+    filesystems: 2,
+    collectedAt: web.metadata.storageUsage.collectedAt,
+  });
+  const denied = instances.find((instance) => instance.vmid === 101);
+  assert.equal(denied.storageUsed, null);
+  assert.equal(denied.metadata.storageUsage.available, false);
+  assert.equal(denied.metadata.storageUsage.reason, "permission_required");
+  const container = instances.find((instance) => instance.vmid === 200);
+  assert.equal(container.storageUsed, 12);
+  assert.equal(container.metadata.storageUsage.source, "proxmox_lxc");
+  assert.equal(calls.some((call) => call.key.includes("/lxc/200/agent/")), false);
+});
+
 test("operations telemetry normalizes node pressure and storage capacity with partial-failure isolation", async () => {
   const calls = [];
   const client = mockClient({

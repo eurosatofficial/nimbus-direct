@@ -172,7 +172,7 @@ Do not grant `Administrator`, `Sys.Modify`, user management, host-shell access, 
 
 `Sys.Audit` enables node CPU, memory, uptime, and root-storage health in the Operations Center. `Datastore.Audit` enables capacity monitoring only for storage paths where it is granted. Nimbus treats these telemetry reads as optional: missing permission is shown as partial coverage and cannot erase the last good reading or break normal VM/LXC synchronization.
 
-`VM.GuestAgent.Audit` lets the Network page retrieve live QEMU addresses through the official Guest Agent API. Nimbus falls back to static Cloud-Init `ipconfig` values for QEMU and static LXC network configuration when live discovery is unavailable. A QEMU VM using DHCP without a running QEMU Guest Agent has no address available through the Proxmox API, so Nimbus reports that specific condition instead of presenting the cached inventory value as an IP.
+`VM.GuestAgent.Audit` lets Nimbus retrieve live QEMU addresses and filesystem usage through the official Guest Agent API. Nimbus filters temporary, pseudo, read-only image, and duplicate mounts before totaling persistent filesystems, and preserves the last valid usage reading while a VM is stopped or the Guest Agent is temporarily unavailable. It falls back to static Cloud-Init `ipconfig` values for QEMU and static LXC network configuration when live address discovery is unavailable. A QEMU VM without a running Guest Agent cannot expose its in-guest filesystem usage through Proxmox, so Nimbus reports the metric as unavailable instead of presenting `0 GB` as real usage. Nimbus does not install an agent on the Proxmox node or inside a guest; it only reads an already configured QEMU Guest Agent through the official Proxmox API.
 
 ### 3. Initialize and start
 

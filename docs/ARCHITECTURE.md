@@ -199,7 +199,7 @@ Administrators use the shared **Support** workspace for the global customer queu
 
 ## 6. Customer dashboard
 
-The dashboard returns only resources with an active assignment to the authenticated customer and `view_status` permission. It shows status, cluster, node, type/VMID, CPU, RAM, storage, uptime, IP, and recent activity.
+The dashboard returns only resources with an active assignment to the authenticated customer and `view_status` permission. It shows status, cluster, node, type/VMID, CPU, RAM, storage, uptime, IP, and recent activity. LXC storage usage comes from the cluster inventory. Because Proxmox normally reports QEMU filesystem usage as zero in that inventory, synchronization enriches running QEMU guests through the official `get-fsinfo` Guest Agent endpoint, filters non-persistent and duplicate mounts, and stores one normalized value used by cards, details, and storage alerts. A failed Guest Agent read preserves the last valid value; a guest with no valid reading is labeled unavailable rather than zero.
 
 Each resource opens a full detail workspace with status-aware power controls, normalized Proxmox RRD history, allowlisted configuration, guest-reported network addresses, and recent tasks. The Network workspace lazily discovers addresses only for resources visible to the current session, prefers live QEMU Guest Agent/LXC data, and falls back to configured static addresses without returning raw guest configuration. Buttons are generated from assignment permissions for usability, but the same permission is checked again on the server.
 

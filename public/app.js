@@ -134,6 +134,12 @@ function initials(value) {
 function plural(value, word) { return `${value} ${word}${value === 1 ? "" : "s"}`; }
 function pct(value) { return `${Math.max(0, Math.min(100, Number(value) || 0))}%`; }
 function percent(value, total) { return total > 0 ? Math.max(0, Math.min(100, value / total * 100)) : 0; }
+function storageUsageKnown(resource) { return resource?.storageUsageAvailable !== false; }
+function storageSummary(resource) {
+  return storageUsageKnown(resource)
+    ? `${resource.storageUsed} / ${resource.storage} GB`
+    : `Unavailable / ${resource.storage} GB`;
+}
 function formatUptime(seconds) {
   if (!seconds) return "—";
   const days = Math.floor(seconds / 86400);
@@ -632,7 +638,7 @@ function renderOverview() {
 
 function renderInstances() {
   const resources = filteredResources();
-  els.viewRoot.innerHTML = resources.length ? `<section class="instance-grid">${resources.map((resource) => `<article class="instance-card"><div class="card-title">${resourceIdentity(resource)}${statusMarkup(resource)}</div><div class="instance-stats"><div class="mini-stat"><small>CPU</small><strong>${pct(resource.cpu)}</strong></div><div class="mini-stat"><small>Memory</small><strong>${resource.memoryUsed} / ${resource.memory} GB</strong></div><div class="mini-stat"><small>Storage</small><strong>${resource.storageUsed} / ${resource.storage} GB</strong></div><div class="mini-stat"><small>Address</small><strong>${escapeHtml(resourceAddressLabel(resource))}</strong></div></div><div class="instance-actions">${actionButtons(resource)}</div></article>`).join("")}</section>` : emptyState("▤", "No resources assigned", "Ask an administrator to assign a VM or container directly to your customer account.");
+  els.viewRoot.innerHTML = resources.length ? `<section class="instance-grid">${resources.map((resource) => `<article class="instance-card"><div class="card-title">${resourceIdentity(resource)}${statusMarkup(resource)}</div><div class="instance-stats"><div class="mini-stat"><small>CPU</small><strong>${pct(resource.cpu)}</strong></div><div class="mini-stat"><small>Memory</small><strong>${resource.memoryUsed} / ${resource.memory} GB</strong></div><div class="mini-stat"><small>Storage</small><strong>${escapeHtml(storageSummary(resource))}</strong></div><div class="mini-stat"><small>Address</small><strong>${escapeHtml(resourceAddressLabel(resource))}</strong></div></div><div class="instance-actions">${actionButtons(resource)}</div></article>`).join("")}</section>` : emptyState("▤", "No resources assigned", "Ask an administrator to assign a VM or container directly to your customer account.");
 }
 
 function detailSkeleton() {
@@ -840,7 +846,8 @@ function renderInstanceDetail(resourceId) {
   const tasks = resourceTasks(resourceId);
   const pending = activeTask(resourceId);
   const memoryPercent = percent(resource.memoryUsed, resource.memory);
-  const storagePercent = percent(resource.storageUsed, resource.storage);
+  const storageKnown = storageUsageKnown(resource);
+  const storagePercent = storageKnown ? percent(resource.storageUsed, resource.storage) : 0;
   const primaryIp = network.primaryIp || resource.ip;
   const networkLatest = state.instance.history?.points?.at(-1) || {};
   els.viewRoot.innerHTML = `<div class="instance-detail">
@@ -857,7 +864,7 @@ function renderInstanceDetail(resourceId) {
     <section class="instance-metric-grid">
       <article><span class="detail-metric-icon cpu">⌁</span><span><small>CPU usage</small><strong>${Math.round(resource.cpu)}%</strong><em>${resource.vcpu} vCPU</em></span><div class="detail-meter"><i style="width:${pct(resource.cpu)}"></i></div></article>
       <article><span class="detail-metric-icon memory">◫</span><span><small>Memory</small><strong>${resource.memoryUsed} GB</strong><em>of ${resource.memory} GB</em></span><div class="detail-meter memory"><i style="width:${pct(memoryPercent)}"></i></div></article>
-      <article><span class="detail-metric-icon storage">▰</span><span><small>Storage</small><strong>${resource.storageUsed} GB</strong><em>of ${resource.storage} GB</em></span><div class="detail-meter storage"><i style="width:${pct(storagePercent)}"></i></div></article>
+      <article><span class="detail-metric-icon storage">▰</span><span><small>Storage</small><strong>${storageKnown ? `${resource.storageUsed} GB` : "Unavailable"}</strong><em>${storageKnown ? `of ${resource.storage} GB${resource.storageUsageStale ? " · last known" : ""}` : `${resource.storage} GB assigned · Guest Agent access required`}</em></span><div class="detail-meter storage"><i style="width:${pct(storagePercent)}"></i></div></article>
       <article><span class="detail-metric-icon uptime">◷</span><span><small>Uptime</small><strong>${escapeHtml(formatUptime(resource.uptime))}</strong><em>${resource.status === "running" ? "Currently online" : escapeHtml(resource.status)}</em></span></article>
     </section>
 

@@ -62,6 +62,46 @@ function uniqueOperationsStorages(storages) {
   return [...new Map(storages.filter(Boolean).map((storage) => [`${storage.node}\0${storage.storageId}`, storage])).values()];
 }
 
+const nonPersistentFilesystemTypes = new Set([
+  "autofs", "binfmt_misc", "cgroup", "cgroup2", "configfs", "debugfs",
+  "devpts", "devtmpfs", "efivarfs", "fusectl", "hugetlbfs", "iso9660",
+  "mqueue", "nsfs", "overlay", "proc", "pstore", "rpc_pipefs",
+  "securityfs", "squashfs", "sysfs", "tmpfs", "tracefs",
+]);
+
+function normalizeQemuFilesystemUsage(payload) {
+  const filesystems = Array.isArray(payload?.result) ? payload.result : Array.isArray(payload) ? payload : [];
+  const persistent = new Map();
+  for (const filesystem of filesystems) {
+    const type = String(filesystem?.type || "").toLowerCase();
+    if (nonPersistentFilesystemTypes.has(type) || type.startsWith("cgroup")) continue;
+    const disks = Array.isArray(filesystem?.disk) ? filesystem.disk : [];
+    if (!disks.length) continue;
+    const totalBytes = Number(filesystem?.["total-bytes"]);
+    const rawUsedBytes = Number(filesystem?.["used-bytes"]);
+    if (!Number.isFinite(totalBytes) || totalBytes <= 0 || !Number.isFinite(rawUsedBytes)) continue;
+    const usedBytes = Math.min(totalBytes, Math.max(0, rawUsedBytes));
+    const name = String(filesystem?.name || "").trim();
+    const diskIdentity = disks.map((disk) =>
+      [disk?.serial, disk?.dev, disk?.["bus-type"], disk?.bus, disk?.target, disk?.unit]
+        .filter((part) => part !== null && part !== undefined && String(part).length)
+        .join(":"))
+      .filter(Boolean)
+      .sort()
+      .join("|");
+    const identity = name || diskIdentity || String(filesystem?.mountpoint || "").trim();
+    if (!identity) continue;
+    const current = persistent.get(identity);
+    if (!current || totalBytes > current.totalBytes) persistent.set(identity, { usedBytes, totalBytes });
+  }
+  if (!persistent.size) return null;
+  const totals = [...persistent.values()].reduce((sum, filesystem) => ({
+    usedBytes: sum.usedBytes + filesystem.usedBytes,
+    totalBytes: sum.totalBytes + filesystem.totalBytes,
+  }), { usedBytes: 0, totalBytes: 0 });
+  return { ...totals, filesystems: persistent.size };
+}
+
 function safeIsoFilename(value) {
   const name = String(value || "").replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 180);
   if (!name.toLowerCase().endsWith(".iso")) throw new ProxmoxError("ISO filename must end in .iso", { code: "invalid_iso_filename", status: 400 });
@@ -282,24 +322,73 @@ export class ProxmoxClient {
   async listVirtualMachines() {
     const resources = await this.request("/cluster/resources?type=vm");
     if (!Array.isArray(resources)) throw new ProxmoxError("Proxmox returned an invalid resource list", { code: "proxmox_invalid_response" });
-    return resources.filter((vm) => ["qemu", "lxc"].includes(vm?.type) && vm?.vmid !== undefined && vm?.node).map((vm) => ({
-      id: `${vm.type}-${vm.vmid}`,
-      vmid: vm.vmid,
-      name: vm.name || `vm-${vm.vmid}`,
-      node: vm.node,
-      type: vm.type,
-      status: vm.status,
-      vcpu: finite(vm.maxcpu),
-      memory: round(finite(vm.maxmem) / 1024 / 1024 / 1024, 1),
-      memoryUsed: round(finite(vm.mem) / 1024 / 1024 / 1024, 1),
-      cpu: Math.round(finite(vm.cpu) * 100),
-      uptime: finite(vm.uptime),
-      storage: round(finite(vm.maxdisk) / 1024 / 1024 / 1024, 1),
-      storageUsed: round(finite(vm.disk) / 1024 / 1024 / 1024, 1),
-      ip: null,
-      metadata: { haState: vm.hastate || null, template: Boolean(vm.template), tags: vm.tags || "" },
-      color: "purple",
-    }));
+    const checkedAt = Date.now();
+    const inventory = resources
+      .filter((vm) => ["qemu", "lxc"].includes(vm?.type) && vm?.vmid !== undefined && vm?.node)
+      .map((vm) => {
+        const reportedUsedBytes = finite(vm.disk);
+        const storageUsageAvailable = vm.type === "lxc" || reportedUsedBytes > 0;
+        return {
+          id: `${vm.type}-${vm.vmid}`,
+          vmid: vm.vmid,
+          name: vm.name || `vm-${vm.vmid}`,
+          node: vm.node,
+          type: vm.type,
+          status: vm.status,
+          vcpu: finite(vm.maxcpu),
+          memory: round(finite(vm.maxmem) / 1024 / 1024 / 1024, 1),
+          memoryUsed: round(finite(vm.mem) / 1024 / 1024 / 1024, 1),
+          cpu: Math.round(finite(vm.cpu) * 100),
+          uptime: finite(vm.uptime),
+          storage: round(finite(vm.maxdisk) / 1024 / 1024 / 1024, 1),
+          storageUsed: storageUsageAvailable ? round(reportedUsedBytes / 1024 / 1024 / 1024, 1) : null,
+          ip: null,
+          metadata: {
+            haState: vm.hastate || null,
+            template: Boolean(vm.template),
+            tags: vm.tags || "",
+            storageUsage: storageUsageAvailable
+              ? { available: true, source: vm.type === "lxc" ? "proxmox_lxc" : "proxmox_inventory", collectedAt: checkedAt }
+              : { available: false, source: null, checkedAt, reason: vm.status === "running" ? "guest_agent_unavailable" : "guest_stopped" },
+          },
+          color: "purple",
+        };
+      });
+    return mapLimit(inventory, 4, async (vm) => {
+      if (vm.type !== "qemu" || vm.status !== "running") return vm;
+      try {
+        const payload = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/agent/get-fsinfo`);
+        const usage = normalizeQemuFilesystemUsage(payload);
+        if (!usage) return vm;
+        return {
+          ...vm,
+          storage: Math.max(vm.storage, round(usage.totalBytes / 1024 / 1024 / 1024, 1)),
+          storageUsed: round(usage.usedBytes / 1024 / 1024 / 1024, 1),
+          metadata: {
+            ...vm.metadata,
+            storageUsage: {
+              available: true,
+              source: "qemu_guest_agent",
+              filesystems: usage.filesystems,
+              collectedAt: checkedAt,
+            },
+          },
+        };
+      } catch (error) {
+        return {
+          ...vm,
+          metadata: {
+            ...vm.metadata,
+            storageUsage: {
+              available: false,
+              source: null,
+              checkedAt,
+              reason: error?.code === "proxmox_permission_denied" ? "permission_required" : "guest_agent_unavailable",
+            },
+          },
+        };
+      }
+    });
   }
 
   async getOperationsMetrics() {

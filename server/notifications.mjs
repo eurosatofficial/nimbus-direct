@@ -145,7 +145,10 @@ export function createNotificationService({
     const policy = resource.alertPolicy;
     const running = resource.status === "running";
     const memoryPercent = resource.memory > 0 ? Math.round(resource.memoryUsed / resource.memory * 100) : 0;
-    const storagePercent = resource.storage > 0 ? Math.round(resource.storageUsed / resource.storage * 100) : 0;
+    const storageUsageAvailable = resource.storageUsageAvailable !== false;
+    const storagePercent = storageUsageAvailable && resource.storage > 0
+      ? Math.round(resource.storageUsed / resource.storage * 100)
+      : 0;
     return [
       {
         type: "offline",
@@ -183,7 +186,8 @@ export function createNotificationService({
       {
         type: "storage",
         enabled: policy.storage,
-        condition: resource.storage > 0 && storagePercent >= policy.storageThreshold,
+        observable: storageUsageAvailable,
+        condition: storageUsageAvailable && resource.storage > 0 && storagePercent >= policy.storageThreshold,
         value: storagePercent,
         threshold: policy.storageThreshold,
         firingTitle: `Storage is filling up on ${resourceLabel(resource)}`,
@@ -204,6 +208,9 @@ export function createNotificationService({
         firstObservedAt: null,
         lastValue: definition.value,
       });
+      return { fired: false, resolved: false };
+    }
+    if (definition.observable === false) {
       return { fired: false, resolved: false };
     }
 

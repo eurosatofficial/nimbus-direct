@@ -170,3 +170,28 @@ test("sustained alerts fire once, recover once, and baseline an already stopped 
     assert.equal(summary.fired, 0);
   });
 });
+
+test("an unavailable QEMU storage reading never creates a false recovery", async () => {
+  await fixture(async ({ store, user }) => {
+    let timestamp = 1_900_000_000_000;
+    const service = createNotificationService({
+      store,
+      email: { async processDue() {} },
+      now: () => timestamp,
+    });
+    await service.evaluateResourceAlerts({ clusterId: "production" });
+    timestamp += 60_000;
+    assert.equal((await service.evaluateResourceAlerts({ clusterId: "production" })).fired, 3);
+
+    store.syncResources("production", [{
+      type: "qemu", vmid: 101, node: "pve-a", name: "web", status: "running",
+      cpu: 20, memory: 8, memoryUsed: 3, storage: 100, storageUsed: null,
+      metadata: { storageUsage: { available: false, reason: "guest_agent_unavailable", checkedAt: timestamp } },
+    }]);
+    timestamp += 60_000;
+    const summary = await service.evaluateResourceAlerts({ clusterId: "production" });
+    assert.equal(summary.resolved, 2);
+    assert.equal(store.listNotifications(user.id).total, 5);
+    assert.equal(store.listNotifications(user.id).items.some((item) => item.type === "alert.storage.resolved"), false);
+  });
+});

@@ -149,6 +149,10 @@ function publicResource(row) {
     memoryUsed: Number(row.memory_used || 0),
     storage: Number(row.storage || 0),
     storageUsed: Number(row.storage_used || 0),
+    storageUsageAvailable: metadata.storageUsage?.available !== false,
+    storageUsageStale: Boolean(metadata.storageUsage?.lastKnown),
+    storageUsageSource: metadata.storageUsage?.source || null,
+    storageUsageUpdatedAt: metadata.storageUsage?.collectedAt || null,
     cpu: Number(row.cpu || 0),
     uptime: Number(row.uptime || 0),
     ip: row.ip || null,
@@ -1718,17 +1722,36 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
           memory_used=excluded.memory_used,storage=excluded.storage,storage_used=excluded.storage_used,cpu=excluded.cpu,
           uptime=excluded.uptime,ip=COALESCE(excluded.ip,resources.ip),metadata=excluded.metadata,stale=0,
           last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`);
+      const getExistingUsage = database.prepare("SELECT storage_used,metadata FROM resources WHERE id=?");
       database.exec("BEGIN IMMEDIATE");
       try {
         for (const resource of resources) {
           if (!["qemu", "lxc"].includes(resource.type) || !Number.isInteger(Number(resource.vmid)) || !resource.node) continue;
           const id = `${clusterId}:${resource.type}:${resource.vmid}`;
+          const existing = getExistingUsage.get(id);
+          const incomingStorageUsed = resource.storageUsed === null || resource.storageUsed === undefined
+            ? null
+            : Number(resource.storageUsed);
+          const hasCurrentStorageUsage = Number.isFinite(incomingStorageUsed);
+          const metadata = { ...(resource.metadata || {}) };
+          if (!hasCurrentStorageUsage && existing) {
+            const previousUsage = parseJson(existing.metadata, {}).storageUsage;
+            if (previousUsage?.available) {
+              metadata.storageUsage = {
+                ...previousUsage,
+                lastKnown: true,
+                checkedAt: metadata.storageUsage?.checkedAt || now,
+                reason: metadata.storageUsage?.reason || "temporarily_unavailable",
+              };
+            }
+          }
+          const storageUsed = hasCurrentStorageUsage ? incomingStorageUsed : Number(existing?.storage_used || 0);
           upsertNode.run(clusterId, resource.node, now);
           upsert.run(
             id, clusterId, resource.node, resource.type, Number(resource.vmid), resource.name || `${resource.type}-${resource.vmid}`,
             resource.status || "unknown", Number(resource.vcpu || 0), Number(resource.memory || 0), Number(resource.memoryUsed || 0),
-            Number(resource.storage || 0), Number(resource.storageUsed || 0), Number(resource.cpu || 0), Number(resource.uptime || 0),
-            resource.ip || null, JSON.stringify(resource.metadata || {}), now, now, now,
+            Number(resource.storage || 0), storageUsed, Number(resource.cpu || 0), Number(resource.uptime || 0),
+            resource.ip || null, JSON.stringify(metadata), now, now, now,
           );
         }
         database.prepare("UPDATE proxmox_clusters SET status='active',last_sync_at=?,last_error=NULL,updated_at=? WHERE id=?").run(now, now, clusterId);

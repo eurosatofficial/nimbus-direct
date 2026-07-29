@@ -125,6 +125,53 @@ test("direct assignments authorize by customer, resource, and permission", async
   });
 });
 
+test("resource synchronization preserves last-known QEMU filesystem usage", async () => {
+  await temporaryDirectory("nimbus-direct-storage-usage-", async (directory) => {
+    const store = await openStore(directory, { appSecret: APP_SECRET });
+    try {
+      store.createCluster({
+        id: "production", name: "Production", apiUrl: "https://pve.example.test:8006",
+        tokenId: "nimbus@pve!panel", tokenSecret: "proxmox-secret-value",
+      });
+      const base = {
+        type: "qemu", node: "pve-a", name: "web", status: "running",
+        vcpu: 4, memory: 8, memoryUsed: 2, storage: 64, cpu: 10,
+      };
+      store.syncResources("production", [{
+        ...base,
+        vmid: 101,
+        storageUsed: 31.5,
+        metadata: { storageUsage: { available: true, source: "qemu_guest_agent", collectedAt: 1_700_000_000_000 } },
+      }]);
+      assert.equal(store.getResource("production:qemu:101").storageUsed, 31.5);
+      assert.equal(store.getResource("production:qemu:101").storageUsageAvailable, true);
+
+      store.syncResources("production", [{
+        ...base,
+        vmid: 101,
+        storageUsed: null,
+        metadata: { storageUsage: { available: false, source: null, checkedAt: 1_700_000_060_000, reason: "guest_agent_unavailable" } },
+      }, {
+        ...base,
+        vmid: 102,
+        storageUsed: null,
+        metadata: { storageUsage: { available: false, source: null, checkedAt: 1_700_000_060_000, reason: "guest_agent_unavailable" } },
+      }]);
+
+      const preserved = store.getResource("production:qemu:101");
+      assert.equal(preserved.storageUsed, 31.5);
+      assert.equal(preserved.storageUsageAvailable, true);
+      assert.equal(preserved.storageUsageStale, true);
+      assert.equal(preserved.storageUsageSource, "qemu_guest_agent");
+      const unavailable = store.getResource("production:qemu:102");
+      assert.equal(unavailable.storageUsed, 0);
+      assert.equal(unavailable.storageUsageAvailable, false);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 test("bootstrap creates an independent administrator and optional first customer", async () => {
   await temporaryDirectory("nimbus-direct-bootstrap-", async (directory) => {
     const store = await openStore(directory, { appSecret: APP_SECRET });
