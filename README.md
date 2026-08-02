@@ -27,15 +27,18 @@ Nimbus Direct is a modern, self-hosted customer control panel for Proxmox VE. Ad
 - Per-assignment offline, CPU, memory, and storage alert policies with sustained-duration checks, cooldowns, first-seen baselining, and intentional power-off suppression.
 - Authenticator-app two-factor authentication with QR enrollment, one-use recovery codes, short-lived login challenges, active-session review/revocation, administrator-assisted reset, and security email notices.
 - Administrator Security & Access Center with MFA coverage, account posture, active-session totals, failed/successful login counts, focused security events, enforceable administrator/customer 2FA policies, and optional successful-login email alerts.
+- Mobile-ready Nimbus API v1 with short-lived bearer access tokens, single-use rotating refresh tokens, device-session review/revocation, refresh-reuse detection, existing 2FA support, and a built-in OpenAPI 3.1 contract.
+- User-managed integration API keys with administrator-defined grouped permission ceilings, per-key VM/LXC allowlists, expiry and active-key limits, one-time secret display, live effective-action previews, hash-only storage, immediate revocation, and assignment-aware authorization on every request.
 - Passwordless administrator-issued invitations and self-service password recovery with 30-minute single-use links, hashed token storage, resend/revoke controls, non-enumerating responses, and session revocation after reset.
-- Selected configuration and short-lived console-ticket service methods.
+- Selected configuration and a short-lived hybrid console gateway: termproxy/xterm.js for LXC and serial-display QEMU guests, with noVNC retained for graphical QEMU guests.
 - Encrypted Proxmox token, SMTP password, and queued email-content storage with AES-256-GCM.
 - Scrypt passwords, encrypted TOTP secrets, opaque sessions, CSRF/origin checks, rate limits, security headers, and audit records.
 - Background resource synchronization that preserves assignments during Proxmox failures.
 - Docker deployment with a read-only, unprivileged container.
 - Interactive and public read-only demo modes with automated isolation/security/integration tests.
+- Persistent System, Light, and Dark appearance modes across sign-in, customer, and administrator screens.
 
-The complete design—including schema, authorization sequence, API endpoints, least-privilege guidance, and phased MVP plan—is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The complete design—including schema, authorization sequence, API endpoints, least-privilege guidance, and phased MVP plan—is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The mobile/client contract, examples, token lifecycle, and route catalog are in [docs/API.md](docs/API.md).
 
 ## Requirements
 
@@ -131,6 +134,9 @@ NODE_ENV=production
 APP_SECRET=generate-a-unique-random-secret-of-at-least-32-characters
 SESSION_COOKIE_SECURE=true
 TRUST_PROXY=true
+API_ACCESS_TOKEN_MINUTES=15
+API_REFRESH_TOKEN_DAYS=30
+API_MAX_DEVICE_SESSIONS=10
 ALLOW_DEMO_DATA=false
 DEMO_READ_ONLY=false
 
@@ -394,6 +400,52 @@ The ticket center is stored entirely in Nimbus and requires no additional Proxmo
 
 All active users belonging to the same customer account can see that customer's tickets, which supports teams without exposing another customer. Unread state remains individual to each login. Internal notes and their count are visible only to administrators. When Email Center delivery is enabled, ticket creation notifies the assigned administrator—or all active administrators when unassigned—and administrator replies/status changes notify active users in the affected customer. Emails link back to the private Nimbus thread and never include Proxmox credentials.
 
+### 15. Use the Nimbus API
+
+Nimbus publishes its stable API discovery document at `GET /api/v1` and its
+OpenAPI 3.1 contract at `GET /api/v1/openapi.json`. Native clients authenticate
+through `/api/v1/auth/token`, complete the existing 2FA flow when required, and
+use short-lived bearer access tokens plus single-use rotating refresh tokens.
+
+All existing customer assignment, permission, resource-state, rate-limit, task,
+and audit checks remain server-side. The mobile app never receives a Proxmox
+credential and cannot supply Proxmox coordinates for an action. Administrator
+sessions receive effective control permissions for every currently discovered
+VM and container, including guests that are not assigned to a customer.
+Customer sessions remain limited to their live direct assignments.
+Administrator operations are also available through the versioned
+`/api/v1/admin/...` namespace.
+
+See [docs/API.md](docs/API.md) for the complete token lifecycle, secure mobile
+storage requirements, examples, route families, error model, and deployment
+notes. The API itself requires no additional Proxmox privilege; it can invoke
+only the features already granted to Nimbus's central service account.
+
+### 16. Enable native iOS push notifications (optional)
+
+Push is disabled unless every APNs value is configured. The panel and iOS app
+continue to work without it.
+
+Create an Apple APNs `.p8` key, record the Key ID and Team ID, and set:
+
+```env
+APNS_KEY_ID=XXXXXXXXXX
+APNS_TEAM_ID=YOURTEAMID
+APNS_TOPIC=de.liamjayden.nimbusdirect
+APNS_PRIVATE_KEY_BASE64=BASE64_ENCODED_P8_FILE
+```
+
+Generate the one-line private-key value with:
+
+```bash
+base64 < AuthKey_XXXXXXXXXX.p8 | tr -d '\n'
+```
+
+The APNs topic must exactly match the iOS bundle identifier. Device tokens are
+stored as `APP_SECRET`-bound hashes plus AES-256-GCM encrypted delivery values.
+Invalid or unregistered tokens are disabled automatically after an APNs
+response. The Apple private key and Proxmox credentials never reach the app.
+
 ## Internal Proxmox addresses and private CAs
 
 Keep the TLS certificate hostname in the cluster API URL. To resolve it to an internal address only inside the container, configure the variables at the end of `.env.example` and use:
@@ -411,7 +463,7 @@ Mount only the public CA certificate. Never copy a private CA key into Nimbus an
 
 SQLite data is stored in the `nimbus-data` volume. Stop Nimbus before copying it, or use a SQLite-aware backup process. Back up both the database and `APP_SECRET`, store them separately, and test restoration.
 
-The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, and durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
+The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`, native Nimbus API device/refresh-token state in `migrations/014_nimbus_api.sql`, administrator-governed user integration keys in `migrations/015_user_api_keys.sql`, and encrypted native push-device registrations in `migrations/016_mobile_push.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
 
 ## Operations
 
@@ -419,7 +471,7 @@ The numbered schema is in `migrations/001_initial.sql`, with additive task index
 - `GET /api/ready`: initial setup status.
 - JSON logs are written to stdout/stderr.
 - Inventory synchronization defaults to 60 seconds (`RESOURCE_SYNC_SECONDS`).
-- Missing guests are marked stale; their customer assignments are preserved.
+- Guests missing from a successful Proxmox inventory are marked stale and immediately excluded from active inventories, customer dashboards, API-key resource lists, counts, and action authorization. Their local assignments remain preserved for outage safety and are restored only if the same cluster/type/VMID identity returns. A failed Proxmox request never marks an existing guest stale.
 - Proxmox tasks are stored using their UPID, but browser APIs return only normalized customer-safe task records. The instance page polls active tasks for immediate feedback, while the server synchronization cycle also completes tasks and notifications when the browser is closed.
 - Snapshot limits are stored per assignment and enforced server-side against the current Proxmox snapshot inventory.
 - ISO upload ceilings are controlled by `ISO_MAX_UPLOAD_MB` and `ISO_UPLOAD_TIMEOUT_MINUTES`; storage policies can impose lower limits and customer quotas.
@@ -432,10 +484,13 @@ The numbered schema is in `migrations/001_initial.sql`, with additive task index
 - TOTP enrollment windows last ten minutes and pre-authentication login challenges last five minutes. Verification and security-setting changes have independent rate limits.
 - Security policy changes are administrator-only, CSRF-protected, rate-limited, and audited. Enforcement is repeated on every request rather than relying on the current page state.
 - Invitation and password-reset links last 30 minutes, are single-use, and are invalidated by resending, revocation, successful use, or an administrator-set password.
+- Native API access tokens are short lived; refresh tokens rotate after every use. Reuse of an old refresh token revokes that entire device session.
+- Integration API key secrets are shown once and stored only as `APP_SECRET`-bound hashes. Their effective groups and resources are intersected with the live administrator policy and direct assignment on every request; keys cannot manage credentials or account security.
+- Native APNs registrations require a normal rotating mobile bearer session. Device tokens are encrypted at rest, removed on sign-out, and never accepted from integration API keys.
 
 ## Console security
 
-The panel pins the official noVNC 1.7 client. A console launch creates an encrypted, short-lived, single-use Proxmox `vncproxy` ticket. noVNC connects only to a same-origin Nimbus WebSocket URL; Nimbus consumes the local launch token, authenticates the upstream Proxmox `vncwebsocket` upgrade with the encrypted service-account credential, and pipes framebuffer data. Proxmox requires the short-lived VNC ticket as the noVNC password, so it is released only to the authenticated, still-authorized console page over HTTPS and held in browser memory for the handshake. The long-lived Proxmox API token never reaches the browser.
+The panel pins noVNC 1.7 and xterm.js 6.0. A console launch checks the local assignment and permission before automatically selecting Proxmox `termproxy` for LXC and serial-display QEMU guests or `vncproxy` for graphical QEMU guests. The resulting ticket is encrypted in a short-lived, single-use Nimbus session. Both clients connect only to a same-origin Nimbus WebSocket URL; Nimbus consumes the local launch token, authenticates the upstream Proxmox `vncwebsocket` upgrade with the encrypted service-account credential, and pipes binary data. The scoped Proxmox ticket and termproxy username are released only to the authenticated, still-authorized console page over HTTPS and held in browser memory for the handshake. Native clients exchange the same 45-second launch token for a path-restricted, HttpOnly console cookie; the normal mobile bearer and refresh token never enter the web view. The long-lived Proxmox API token never reaches the browser or app. Both console types use the existing `VM.Console` privilege.
 
 ## Verification
 

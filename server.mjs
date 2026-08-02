@@ -17,9 +17,16 @@ import {
 } from "./server/email.mjs";
 import { createTotpEnrollment, generateRecoveryCodes, verifyTotp } from "./server/mfa.mjs";
 import { createNotificationService } from "./server/notifications.mjs";
+import { createPushService } from "./server/push.mjs";
+import { nimbusOpenApi } from "./server/openapi.mjs";
 import { ProxmoxRegistry } from "./server/proxmox-registry.mjs";
 import { RateLimiter } from "./server/rate-limit.mjs";
-import { bootstrapStore, DEFAULT_PERMISSIONS, openStore } from "./server/store.mjs";
+import {
+  ASSIGNMENT_PERMISSIONS,
+  bootstrapStore,
+  DEFAULT_PERMISSIONS,
+  openStore,
+} from "./server/store.mjs";
 import { assertDemoReadOnlyStore, isDemoReadOnlyRequestAllowed } from "./server/demo-mode.mjs";
 import {
   parseCookies,
@@ -41,6 +48,7 @@ const proxmox = new ProxmoxRegistry({
 });
 const loginLimiter = new RateLimiter({ limit: 8, windowMs: 15 * 60 * 1000 });
 const mfaLimiter = new RateLimiter({ limit: 8, windowMs: 10 * 60 * 1000 });
+const apiRefreshLimiter = new RateLimiter({ limit: 30, windowMs: 10 * 60 * 1000 });
 const securityActionLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
 const forgotPasswordLimiter = new RateLimiter({ limit: 5, windowMs: 15 * 60 * 1000 });
 const forgotAccountLimiter = new RateLimiter({ limit: 3, windowMs: 60 * 60 * 1000 });
@@ -56,8 +64,11 @@ const supportTicketCreateLimiter = new RateLimiter({ limit: 10, windowMs: 60 * 6
 const supportTicketMessageLimiter = new RateLimiter({ limit: 60, windowMs: 60 * 60 * 1000 });
 const root = fileURLToPath(new URL("./public", import.meta.url));
 const noVncRoot = fileURLToPath(new URL("./node_modules/@novnc/novnc", import.meta.url));
+const xtermRoot = fileURLToPath(new URL("./node_modules/@xterm/xterm", import.meta.url));
+const xtermFitRoot = fileURLToPath(new URL("./node_modules/@xterm/addon-fit", import.meta.url));
 const headers = securityHeaders();
 const cookieName = sessionCookieName(config.secureCookies);
+const consoleCookieName = config.secureCookies ? "__Secure-nimbus_console" : "nimbus_console";
 
 const demoResources = [
   { vmid: 101, type: "qemu", name: "atlas-web-01", node: "pve-ber-01", status: "running", vcpu: 4, memory: 8, memoryUsed: 3.8, storage: 80, storageUsed: 42, ip: "10.24.1.31", cpu: 38, uptime: 834223 },
@@ -115,7 +126,8 @@ const email = createEmailService({
   transport: createSmtpTransport({ timeoutMs: config.emailSmtpTimeoutMs }),
   queueIntervalMs: config.emailQueueIntervalMs,
 });
-const notifications = createNotificationService({ store, email, log });
+const push = createPushService({ store, config: config.apns, log });
+const notifications = createNotificationService({ store, email, push, log });
 
 function sendJson(response, status, payload, extraHeaders = {}) {
   response.writeHead(status, { ...headers, "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extraHeaders });
@@ -151,10 +163,98 @@ function securityUser(user) {
   };
 }
 
+function bearerToken(request) {
+  const authorization = String(request.headers.authorization || "");
+  const match = authorization.match(/^Bearer ([A-Za-z0-9_-]{20,260})$/);
+  return match?.[1] || null;
+}
+
 function currentSession(request) {
-  const session = store.getSession(parseCookies(request.headers.cookie)[cookieName]);
+  const hasAuthorization = Boolean(request.headers.authorization);
+  const accessToken = bearerToken(request);
+  const session = hasAuthorization
+    ? (accessToken
+        ? (accessToken.startsWith("nmb_key_")
+            ? store.getIntegrationApiSession(accessToken, { ipAddress: clientIp(request) })
+            : store.getApiAccessSession(accessToken))
+        : null)
+    : store.getSession(parseCookies(request.headers.cookie)[cookieName]);
+  if (session && !session.authType) session.authType = "browser";
   if (session) session.user = securityUser(session.user);
   return session;
+}
+
+function consoleCookie(value, maxAge) {
+  const attributes = [
+    `${consoleCookieName}=${encodeURIComponent(value)}`,
+    "Path=/api/v1/console",
+    "HttpOnly",
+    "SameSite=Strict",
+    `Max-Age=${Math.max(0, Math.floor(maxAge / 1000))}`,
+  ];
+  if (config.secureCookies) attributes.push("Secure");
+  return attributes.join("; ");
+}
+
+function nativeConsoleContext(request, token) {
+  const cookieToken = parseCookies(request.headers.cookie)[consoleCookieName];
+  if (!cookieToken || !safeEqual(cookieToken, token)) return null;
+  const pending = store.getConsoleSessionByToken(token);
+  const user = pending ? store.getUser(pending.userId) : null;
+  if (!pending || !user || user.status !== "active"
+    || !resourceFor(user, pending.resourceId, "console")) return null;
+  return { pending, user };
+}
+
+function sendConsoleSession(response, token, consoleSession) {
+  sendJson(response, 200, {
+    resource: {
+      name: consoleSession.name,
+      node: consoleSession.node,
+      type: consoleSession.type,
+      vmid: consoleSession.vmid,
+    },
+    expiresAt: consoleSession.expiresAt,
+    demo: config.allowDemoData && consoleSession.clusterId === "demo-eu",
+    console: {
+      type: consoleSession.consoleType || "graphical",
+      label: consoleSession.consoleType === "terminal" ? "Terminal console" : "Graphical console",
+    },
+    websocketUrl: `/api/v1/console/ws/${encodeURIComponent(token)}`,
+    credentials: { password: consoleSession.password, user: consoleSession.consoleUser || null },
+  });
+}
+
+function routeNativeConsole(request, response, pathname) {
+  let match = pathname.match(/^\/api\/v1\/console\/native-launch\/([^/]+)$/);
+  if (match && request.method === "GET") {
+    const token = decodeURIComponent(match[1]);
+    const pending = store.getConsoleSessionByToken(token);
+    const user = pending ? store.getUser(pending.userId) : null;
+    if (!pending || !user || user.status !== "active"
+      || !resourceFor(user, pending.resourceId, "console")) {
+      sendJson(response, 404, { error: "console_session_not_found" });
+      return true;
+    }
+    response.writeHead(303, {
+      ...headers,
+      "cache-control": "no-store",
+      location: `/console.html?token=${encodeURIComponent(token)}`,
+      "set-cookie": consoleCookie(token, pending.expiresAt - Date.now()),
+    });
+    response.end();
+    return true;
+  }
+
+  match = pathname.match(/^\/api\/v1\/console\/session\/([^/]+)$/);
+  if (match && request.method === "GET") {
+    const token = decodeURIComponent(match[1]);
+    const context = nativeConsoleContext(request, token);
+    if (!context) return false;
+    sendConsoleSession(response, token, context.pending);
+    return true;
+  }
+  return false;
 }
 
 function requireSession(request, response) {
@@ -164,6 +264,7 @@ function requireSession(request, response) {
 }
 
 function requireCsrf(request, response, session) {
+  if (session.authType !== "browser") return true;
   if (!safeEqual(request.headers["x-csrf-token"], session.csrfToken)) {
     sendJson(response, 403, { error: "invalid_csrf_token" });
     return false;
@@ -179,6 +280,83 @@ function requireCsrf(request, response, session) {
   return true;
 }
 
+function apiKeyHasGroup(session, group) {
+  return session?.authType !== "api_key" || session.apiKeyGroups?.includes(group);
+}
+
+function apiKeyHasResource(session, resourceId) {
+  return session?.authType !== "api_key" || session.apiKeyResourceIds?.includes(resourceId);
+}
+
+function filterApiKeyResources(session, resources) {
+  return session?.authType === "api_key"
+    ? resources.filter((resource) => apiKeyHasResource(session, resource.id))
+    : resources;
+}
+
+function authorizeIntegrationKeyRequest(request, response, pathname, session) {
+  if (session?.authType !== "api_key") return true;
+  const method = String(request.method || "GET").toUpperCase();
+  const deny = (error = "api_key_scope_denied") => {
+    sendJson(response, 403, { error });
+    return false;
+  };
+  if (pathname.startsWith("/api/v1/auth/")
+    || pathname.startsWith("/api/v1/security/")
+    || pathname.startsWith("/api/v1/api-keys")
+    || pathname === "/api/v1/me"
+    || pathname === "/api/v1/dashboard"
+    || pathname === "/api/v1/profile"
+    || pathname === "/api/v1/password") return deny("api_key_route_forbidden");
+
+  const adminPath = pathname.replace(/^\/api\/v1\/admin/, "/api/admin");
+  if (adminPath.startsWith("/api/admin/")) {
+    if (session.user.role !== "admin") return deny("admin_required");
+    if (/^\/api\/admin\/users\/[^/]+\/(?:api-access|api-keys)/.test(adminPath)) return deny("api_key_route_forbidden");
+    const required = adminPath === "/api/admin/state"
+      ? null
+      : adminPath.startsWith("/api/admin/customers") ? "admin_customers"
+        : adminPath.startsWith("/api/admin/users") || adminPath === "/api/admin/invitations" ? "admin_users"
+          : adminPath.startsWith("/api/admin/clusters") ? "admin_clusters"
+            : adminPath.startsWith("/api/admin/assignments") || /^\/api\/admin\/resources\/.+\/assignment$/.test(adminPath) ? "admin_assignments"
+              : adminPath.startsWith("/api/admin/operations") ? "admin_operations"
+                : adminPath.startsWith("/api/admin/maintenance-events") ? "admin_maintenance"
+                  : adminPath.startsWith("/api/admin/email") ? "admin_email"
+                    : adminPath.startsWith("/api/admin/security") ? "admin_security"
+                      : adminPath.startsWith("/api/admin/iso-policies") ? "admin_iso_policies"
+                        : null;
+    if (adminPath === "/api/admin/state") {
+      return session.apiKeyGroups.some((group) => group.startsWith("admin_")) || deny();
+    }
+    return required ? (apiKeyHasGroup(session, required) || deny()) : deny("api_key_route_forbidden");
+  }
+
+  let required = null;
+  if (pathname === "/api/v1/resources" || pathname === "/api/v1/network"
+    || pathname === "/api/v1/tasks" || /^\/api\/v1\/tasks\/[^/]+$/.test(pathname)) required = "server_overview";
+  else if (/^\/api\/v1\/console\/session\/[^/]+$/.test(pathname)) required = "console_access";
+  else if (pathname.startsWith("/api/v1/notifications")) required = "notifications";
+  else if (pathname.startsWith("/api/v1/maintenance")) required = "maintenance_information";
+  else if (pathname.startsWith("/api/v1/support/")) required = session.user.role === "admin" ? "admin_support" : "support_tickets";
+  else {
+    const resourceMatch = pathname.match(/^\/api\/v1\/resources\/(.+?)(?:\/(network|history|actions|console|snapshots|media|config)(?:\/.*)?)?$/);
+    if (resourceMatch) {
+      const resourceId = decodeURIComponent(resourceMatch[1]);
+      if (!apiKeyHasResource(session, resourceId)) return deny("api_key_resource_denied");
+      const section = resourceMatch[2] || "details";
+      required = section === "actions" ? "power_management"
+        : section === "console" ? "console_access"
+          : section === "snapshots" ? "snapshot_management"
+            : section === "media" ? "installation_media"
+              : section === "config" ? null
+                : "server_overview";
+      if (section === "config") return deny("api_key_route_forbidden");
+    }
+  }
+  if (!required) return deny("api_key_route_forbidden");
+  return apiKeyHasGroup(session, required) || deny();
+}
+
 function requireAdmin(response, session) {
   if (session.user.role !== "admin") {
     sendJson(response, 403, { error: "admin_required" });
@@ -190,7 +368,15 @@ function requireAdmin(response, session) {
 function audit(request, session, action, { customerId = session.user.customerId, resourceId = null, detail = {} } = {}) {
   if (config.demoReadOnly) return;
   store.writeAudit({
-    customerId, userId: session.user.id, actorRole: session.user.role, action, resourceId, detail, ipAddress: clientIp(request),
+    customerId,
+    userId: session.user.id,
+    actorRole: session.user.role,
+    action,
+    resourceId,
+    detail: session.authType === "api_key"
+      ? { ...detail, apiKeyId: session.apiKeyId, apiKeyName: session.apiKeyName }
+      : detail,
+    ipAddress: clientIp(request),
   });
 }
 
@@ -217,6 +403,20 @@ function createLoginSession(request, userId) {
   });
 }
 
+function createApiLoginSession(request, userId, input = {}) {
+  return store.createApiDeviceSession({
+    userId,
+    accessTtlMs: config.apiAccessTokenTtlMs,
+    refreshTtlMs: config.apiRefreshTokenTtlMs,
+    deviceName: input.deviceName,
+    platform: input.platform,
+    appVersion: input.appVersion,
+    ipAddress: clientIp(request),
+    userAgent: request.headers["user-agent"],
+    maxSessions: config.demoReadOnly ? 200 : config.apiMaxDeviceSessions,
+  });
+}
+
 function sendAuthenticated(response, session) {
   const activeSession = store.getSession(session.token);
   sendJson(response, 200, {
@@ -230,6 +430,16 @@ function sendAuthenticated(response, session) {
       maxAge: config.sessionTtlMs,
       name: cookieName,
     }),
+  });
+}
+
+function sendApiAuthenticated(response, tokenSession) {
+  const activeSession = store.getApiAccessSession(tokenSession.accessToken);
+  sendJson(response, 200, {
+    ...tokenSession,
+    apiVersion: "v1",
+    user: securityUser(activeSession?.user),
+    demoReadOnly: config.demoReadOnly,
   });
 }
 
@@ -446,8 +656,24 @@ async function requireCurrentPassword(response, userId, value) {
 }
 
 function resourceFor(user, resourceId, permission) {
-  if (user.role === "admin") return store.getResource(resourceId);
+  if (user.role === "admin") {
+    const resource = store.getResource(resourceId);
+    return resource && !resource.stale
+      ? { ...resource, permissions: [...ASSIGNMENT_PERMISSIONS] }
+      : null;
+  }
   return store.authorizeResource(user.customerId, resourceId, permission);
+}
+
+function resourcesFor(user) {
+  if (user.role === "admin") {
+    return store.listResources().map((resource) => ({
+      ...resource,
+      permissions: [...ASSIGNMENT_PERMISSIONS],
+    }));
+  }
+  return store.listResources({ customerId: user.customerId })
+    .filter((resource) => resource.permissions.includes("view_status"));
 }
 
 function requireResource(response, user, resourceId, permission) {
@@ -1028,6 +1254,14 @@ async function routeAuth(request, response, pathname) {
   if (pathname === "/api/auth/logout" && request.method === "POST") {
     const session = requireSession(request, response);
     if (!session || !requireCsrf(request, response, session)) return true;
+    if (session.authType === "bearer") {
+      audit(request, session, "auth.api_logout", {
+        detail: { deviceSessionId: session.mobileSessionId, compatibilityRoute: true },
+      });
+      store.revokeApiDeviceSession(session.user.id, session.mobileSessionId, "logout");
+      sendJson(response, 204, null);
+      return true;
+    }
     store.deleteSession(parseCookies(request.headers.cookie)[cookieName]);
     audit(request, session, "auth.logout");
     sendJson(response, 204, null, { "set-cookie": sessionCookie("", { secure: config.secureCookies, maxAge: 0, name: cookieName }) });
@@ -1047,18 +1281,33 @@ async function routeAdmin(request, response, pathname) {
 
   if (pathname === "/api/admin/state" && request.method === "GET") {
     reconcileAllOperations();
-    sendJson(response, 200, {
+    const state = {
       mode: config.demoReadOnly ? "demo_read_only" : config.allowDemoData ? "demo" : "live",
       demoReadOnly: config.demoReadOnly,
       clusters: store.listClusters(), nodes: store.listProxmoxNodes(), customers: store.listCustomers(), users: store.listUsers(),
       resources: store.listResources(), isoPolicies: store.listIsoPolicies(),
+      apiPolicies: store.listUserApiPolicies(),
       emailSettings: store.getEmailSettings(), emailJobs: store.listEmailJobs({ limit: 30 }),
       notificationEvents: store.listNotificationEvents({ limit: 50 }),
       maintenanceEvents: store.listMaintenanceEvents({ limit: 100 }),
       operations: store.getOperationsCenter(),
       security: demoSafeSecurityCenter(store.getSecurityCenter({ limit: 100 })),
       audit: demoSafeEventPage(store.listAudit(null, { all: true, limit: 50 })),
-    });
+    };
+    if (session.authType === "api_key") {
+      const has = (group) => apiKeyHasGroup(session, group);
+      if (!has("admin_clusters")) { state.clusters = []; state.nodes = []; }
+      if (!has("admin_customers")) state.customers = [];
+      if (!has("admin_users")) { state.users = []; state.apiPolicies = []; }
+      if (!has("admin_assignments") && !has("admin_operations") && !has("admin_clusters")) state.resources = [];
+      if (!has("admin_iso_policies")) state.isoPolicies = [];
+      if (!has("admin_email")) { state.emailSettings = {}; state.emailJobs = []; }
+      if (!has("admin_operations")) { state.notificationEvents = []; state.operations = {}; }
+      if (!has("admin_maintenance")) state.maintenanceEvents = [];
+      if (!has("admin_security")) state.security = {};
+      if (!has("admin_audit")) state.audit = { items: [], total: 0, limit: 0, offset: 0 };
+    }
+    sendJson(response, 200, state);
     return true;
   }
   if (pathname === "/api/admin/security/policy" && request.method === "PATCH") {
@@ -1324,6 +1573,53 @@ async function routeAdmin(request, response, pathname) {
     store.deleteCustomer(id);
     sendJson(response, 204, null); return true;
   }
+  match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/api-access$/);
+  if (match && request.method === "GET") {
+    const targetUserId = decodeURIComponent(match[1]);
+    sendJson(response, 200, store.getUserApiKeyCenter(targetUserId, { includeAllVisible: true }));
+    return true;
+  }
+  if (match && request.method === "PATCH") {
+    if (!requireSecurityActionRate(request, response, session.user.id)) return true;
+    const targetUserId = decodeURIComponent(match[1]);
+    const policy = store.updateUserApiPolicy(targetUserId, await readBody(request), session.user.id);
+    audit(request, session, "admin.user.api_policy_updated", {
+      detail: {
+        targetUserId,
+        enabled: policy.enabled,
+        groups: policy.groups,
+        resourceIds: policy.resourceIds,
+        allVisibleResources: policy.allVisibleResources,
+        maxActiveKeys: policy.maxActiveKeys,
+        maxLifetimeDays: policy.maxLifetimeDays,
+        allowNoExpiry: policy.allowNoExpiry,
+      },
+    });
+    sendJson(response, 200, { policy, center: store.getUserApiKeyCenter(targetUserId, { includeAllVisible: true }) });
+    return true;
+  }
+  match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/api-keys\/([^/]+)$/);
+  if (match && request.method === "DELETE") {
+    if (!requireSecurityActionRate(request, response, session.user.id)) return true;
+    const targetUserId = decodeURIComponent(match[1]);
+    const keyId = decodeURIComponent(match[2]);
+    if (!store.revokeUserApiKey(targetUserId, keyId, { revokedBy: session.user.id, reason: "admin_revoked" })) {
+      sendJson(response, 404, { error: "api_key_not_found" });
+      return true;
+    }
+    audit(request, session, "admin.user.api_key_revoked", { detail: { targetUserId, keyId } });
+    sendJson(response, 204, null);
+    return true;
+  }
+  match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/api-keys\/revoke-all$/);
+  if (match && request.method === "POST") {
+    if (!requireSecurityActionRate(request, response, session.user.id)) return true;
+    const targetUserId = decodeURIComponent(match[1]);
+    const revoked = store.revokeAllUserApiKeys(targetUserId, { revokedBy: session.user.id });
+    audit(request, session, "admin.user.api_keys_revoked", { detail: { targetUserId, revoked } });
+    sendJson(response, 200, { revoked });
+    return true;
+  }
   match = pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
   if (match && request.method === "PATCH") {
     const user = store.updateUser(decodeURIComponent(match[1]), await readBody(request));
@@ -1483,23 +1779,377 @@ async function routeAdmin(request, response, pathname) {
   return true;
 }
 
+async function routeApiAuth(request, response, pathname) {
+  if (pathname === "/api/v1/auth/token" && request.method === "POST") {
+    const ip = clientIp(request);
+    const limit = loginLimiter.consume(ip);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_attempts" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const input = await readBody(request);
+    const user = store.findUserForLogin(input.email);
+    if (!user || user.status !== "active" || !user.password_set
+      || (user.role === "customer" && user.customer_status !== "active")
+      || !(await verifyPassword(String(input.password || ""), user.password_hash))) {
+      if (!config.demoReadOnly) {
+        store.writeAudit({
+          customerId: user?.customer_id || null,
+          userId: user?.id || null,
+          actorRole: user?.role || "system",
+          action: "auth.login_failed",
+          detail: { stage: "password", client: "api" },
+          ipAddress: ip,
+        });
+      }
+      sendJson(response, 401, { error: "invalid_credentials" });
+      return true;
+    }
+    loginLimiter.clear(ip);
+    if (user.mfa_enabled) {
+      const challenge = store.createMfaChallenge({ userId: user.id });
+      if (!config.demoReadOnly) {
+        store.writeAudit({
+          customerId: user.customer_id,
+          userId: user.id,
+          actorRole: user.role,
+          action: "auth.mfa_challenge",
+          detail: { client: "api" },
+          ipAddress: ip,
+        });
+      }
+      sendJson(response, 202, {
+        mfaRequired: true,
+        challengeToken: challenge.token,
+        expiresAt: challenge.expiresAt,
+      });
+      return true;
+    }
+    const tokenSession = createApiLoginSession(request, user.id, input);
+    if (!config.demoReadOnly) {
+      store.writeAudit({
+        customerId: user.customer_id,
+        userId: user.id,
+        actorRole: user.role,
+        action: "auth.api_login",
+        detail: { deviceName: tokenSession.session.deviceName, platform: tokenSession.session.platform },
+        ipAddress: ip,
+      });
+      queueNewLoginNotice(user, request);
+    }
+    sendApiAuthenticated(response, tokenSession);
+    return true;
+  }
+
+  if (pathname === "/api/v1/auth/mfa" && request.method === "POST") {
+    const ip = clientIp(request);
+    const limit = mfaLimiter.consume(ip);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_mfa_attempts" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const input = await readBody(request);
+    const challenge = store.getMfaChallenge(String(input.challengeToken || ""));
+    const user = challenge ? store.getUserForAuth(challenge.user_id) : null;
+    if (!challenge || !user || user.status !== "active"
+      || (user.role === "customer" && user.customer_status !== "active") || !user.mfa_enabled) {
+      sendJson(response, 401, { error: "invalid_mfa_challenge" });
+      return true;
+    }
+    const verification = verifyMfaCredential(user.id, input.code);
+    if (!verification.valid) {
+      store.failMfaChallenge(input.challengeToken);
+      if (!config.demoReadOnly) {
+        store.writeAudit({
+          customerId: user.customer_id,
+          userId: user.id,
+          actorRole: user.role,
+          action: "auth.mfa_failed",
+          detail: { client: "api" },
+          ipAddress: ip,
+        });
+      }
+      sendJson(response, 401, { error: "invalid_mfa_code" });
+      return true;
+    }
+    if (!store.consumeMfaChallenge(input.challengeToken)) {
+      sendJson(response, 401, { error: "invalid_mfa_challenge" });
+      return true;
+    }
+    mfaLimiter.clear(ip);
+    const tokenSession = createApiLoginSession(request, user.id, input);
+    if (!config.demoReadOnly) {
+      store.writeAudit({
+        customerId: user.customer_id,
+        userId: user.id,
+        actorRole: user.role,
+        action: "auth.api_login",
+        detail: {
+          mfa: true,
+          recoveryCode: verification.recoveryCode,
+          deviceName: tokenSession.session.deviceName,
+          platform: tokenSession.session.platform,
+        },
+        ipAddress: ip,
+      });
+      if (verification.recoveryCode) {
+        queueSecurityNotice(user, {
+          title: "A recovery code was used",
+          message: "A one-time recovery code was used to sign in. Review your active sessions and regenerate codes if this was unexpected.",
+          ipAddress: ip,
+        });
+      }
+      queueNewLoginNotice(user, request);
+    }
+    sendApiAuthenticated(response, tokenSession);
+    return true;
+  }
+
+  if (pathname === "/api/v1/auth/refresh" && request.method === "POST") {
+    const ip = clientIp(request);
+    const limit = apiRefreshLimiter.consume(ip);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_refresh_attempts" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const { refreshToken } = await readBody(request);
+    const tokenSession = store.rotateApiRefreshToken(refreshToken, {
+      accessTtlMs: config.apiAccessTokenTtlMs,
+      ipAddress: ip,
+      userAgent: request.headers["user-agent"],
+    });
+    sendApiAuthenticated(response, tokenSession);
+    return true;
+  }
+
+  if (pathname === "/api/v1/auth/logout" && request.method === "POST") {
+    const session = requireSession(request, response);
+    if (!session) return true;
+    if (session.authType !== "bearer") {
+      sendJson(response, 400, { error: "api_bearer_required" });
+      return true;
+    }
+    audit(request, session, "auth.api_logout", {
+      detail: { deviceSessionId: session.mobileSessionId },
+    });
+    store.revokeApiDeviceSession(session.user.id, session.mobileSessionId, "logout");
+    sendJson(response, 204, null);
+    return true;
+  }
+
+  if (pathname === "/api/v1/auth/session" && request.method === "GET") {
+    const session = requireSession(request, response);
+    if (!session) return true;
+    if (session.authType !== "bearer") {
+      sendJson(response, 400, { error: "api_bearer_required" });
+      return true;
+    }
+    const device = store.listApiDeviceSessions(session.user.id, { currentIdHash: session.idHash })
+      .find((entry) => entry.current);
+    sendJson(response, 200, {
+      apiVersion: "v1",
+      user: session.user,
+      session: device,
+      accessTokenExpiresAt: session.expiresAt,
+      refreshTokenExpiresAt: session.refreshExpiresAt,
+      demoReadOnly: config.demoReadOnly,
+    });
+    return true;
+  }
+
+  if (pathname === "/api/v1/auth/devices" && request.method === "GET") {
+    const session = requireSession(request, response);
+    if (!session) return true;
+    sendJson(response, 200, {
+      devices: store.listApiDeviceSessions(session.user.id, { currentIdHash: session.idHash }),
+    });
+    return true;
+  }
+
+  const deviceMatch = pathname.match(/^\/api\/v1\/auth\/devices\/([^/]+)$/);
+  if (deviceMatch && request.method === "DELETE") {
+    const session = requireSession(request, response);
+    if (!session || !requireCsrf(request, response, session)
+      || !requireSecurityActionRate(request, response, session.user.id)) return true;
+    const sessionId = decodeURIComponent(deviceMatch[1]);
+    const current = sessionId === session.idHash || sessionId === session.mobileSessionId;
+    if (!store.revokeApiDeviceSession(session.user.id, sessionId, "user_revoked")) {
+      sendJson(response, 404, { error: "device_session_not_found" });
+      return true;
+    }
+    audit(request, session, "security.api_device_revoked", { detail: { current, sessionId } });
+    sendJson(response, 204, null);
+    return true;
+  }
+
+  sendJson(response, 404, { error: "not_found" });
+  return true;
+}
+
 async function routeCustomer(request, response, pathname) {
   const session = requireSession(request, response);
   if (!session) return true;
   const user = session.user;
   const enrollmentRequired = Boolean(user.mfaEnrollmentRequired);
   const enrollmentPath = pathname === "/api/v1/security/mfa/setup" || pathname === "/api/v1/security/mfa/confirm";
-  if (enrollmentRequired && pathname !== "/api/v1/dashboard" && !enrollmentPath) {
+  if (enrollmentRequired && pathname !== "/api/v1/dashboard" && pathname !== "/api/v1/me" && !enrollmentPath) {
     sendJson(response, 403, { error: "mfa_enrollment_required" });
+    return true;
+  }
+
+  if (pathname === "/api/v1/me" && request.method === "GET") {
+    const accountSessions = store.listSessions(user.id, { currentIdHash: session.idHash });
+    sendJson(response, 200, {
+      apiVersion: "v1",
+      mode: config.demoReadOnly ? "demo_read_only" : config.allowDemoData ? "demo" : "live",
+      demoReadOnly: config.demoReadOnly,
+      user,
+      security: {
+        mfa: {
+          ...store.getMfaStatus(user.id),
+          requiredByPolicy: store.isMfaRequiredForUser(user),
+          enrollmentRequired,
+        },
+        sessions: config.demoReadOnly
+          ? accountSessions.filter((entry) => entry.current).map((entry) => ({
+              ...entry,
+              ipAddress: "Hidden in public demo",
+              userAgent: "Public demo client",
+            }))
+          : accountSessions,
+      },
+      capabilities: {
+        mobileApi: true,
+        rotatingRefreshTokens: true,
+        integrationApiKeys: true,
+        directAssignments: true,
+        proxmoxPools: false,
+        consoleTickets: true,
+        customerIsoMedia: true,
+        notificationCenter: true,
+        maintenanceCenter: true,
+        supportTicketCenter: true,
+        twoFactorAuthentication: true,
+        demoReadOnly: config.demoReadOnly,
+      },
+    });
+    return true;
+  }
+
+  if (pathname === "/api/v1/api-keys" && request.method === "GET") {
+    if (session.authType === "api_key") {
+      sendJson(response, 403, { error: "api_key_route_forbidden" });
+      return true;
+    }
+    sendJson(response, 200, store.getUserApiKeyCenter(user.id));
+    return true;
+  }
+  if (pathname === "/api/v1/api-keys/preview" && request.method === "POST") {
+    if (session.authType === "api_key" || !requireCsrf(request, response, session)) {
+      if (session.authType === "api_key") sendJson(response, 403, { error: "api_key_route_forbidden" });
+      return true;
+    }
+    sendJson(response, 200, { preview: store.previewUserApiKey(user.id, await readBody(request)) });
+    return true;
+  }
+  if (pathname === "/api/v1/api-keys" && request.method === "POST") {
+    if (session.authType === "api_key" || !requireCsrf(request, response, session)
+      || !requireSecurityActionRate(request, response, user.id)) {
+      if (session.authType === "api_key") sendJson(response, 403, { error: "api_key_route_forbidden" });
+      return true;
+    }
+    const input = await readBody(request);
+    const authUser = await requireCurrentPassword(response, user.id, input.currentPassword);
+    if (!authUser) return true;
+    if (authUser.mfa_enabled) {
+      const verification = verifyMfaCredential(user.id, input.code);
+      if (!verification.valid) {
+        sendJson(response, 400, { error: "invalid_mfa_code" });
+        return true;
+      }
+    }
+    const result = store.createUserApiKey(user.id, input);
+    audit(request, session, "security.api_key_created", {
+      detail: {
+        keyId: result.key.id,
+        name: result.key.name,
+        groups: result.key.groups,
+        resourceIds: result.key.resourceIds,
+        expiresAt: result.key.expiresAt,
+      },
+    });
+    queueSecurityNotice(authUser, {
+      title: "A new API key was created",
+      message: `The API key “${result.key.name}” was created for your Nimbus Direct account. Revoke it immediately if you did not create it.`,
+      ipAddress: clientIp(request),
+    });
+    sendJson(response, 201, result);
+    return true;
+  }
+  let apiKeyMatch = pathname.match(/^\/api\/v1\/api-keys\/([^/]+)$/);
+  if (apiKeyMatch && request.method === "GET") {
+    if (session.authType === "api_key") {
+      sendJson(response, 403, { error: "api_key_route_forbidden" });
+      return true;
+    }
+    const key = store.getUserApiKey(user.id, decodeURIComponent(apiKeyMatch[1]));
+    if (!key) {
+      sendJson(response, 404, { error: "api_key_not_found" });
+      return true;
+    }
+    sendJson(response, 200, { key });
+    return true;
+  }
+  if (apiKeyMatch && request.method === "DELETE") {
+    if (session.authType === "api_key" || !requireCsrf(request, response, session)
+      || !requireSecurityActionRate(request, response, user.id)) {
+      if (session.authType === "api_key") sendJson(response, 403, { error: "api_key_route_forbidden" });
+      return true;
+    }
+    const keyId = decodeURIComponent(apiKeyMatch[1]);
+    if (!store.revokeUserApiKey(user.id, keyId)) {
+      sendJson(response, 404, { error: "api_key_not_found" });
+      return true;
+    }
+    audit(request, session, "security.api_key_revoked", { detail: { keyId } });
+    sendJson(response, 204, null);
+    return true;
+  }
+
+  if (pathname === "/api/v1/resources" && request.method === "GET") {
+    const search = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams;
+    const limit = Math.min(200, Math.max(1, Number(search.get("limit")) || 50));
+    const offset = Math.max(0, Number(search.get("offset")) || 0);
+    const type = String(search.get("type") || "").toLowerCase();
+    const status = String(search.get("status") || "").toLowerCase();
+    const clusterId = String(search.get("clusterId") || "");
+    const query = String(search.get("search") || "").trim().toLowerCase();
+    const visible = filterApiKeyResources(session, resourcesFor(user))
+      .filter((resource) => !type || resource.type === type)
+      .filter((resource) => !status || resource.status === status)
+      .filter((resource) => !clusterId || resource.clusterId === clusterId)
+      .filter((resource) => !query || [
+        resource.name,
+        resource.displayName,
+        resource.node,
+        resource.clusterName,
+        resource.vmid,
+      ].some((value) => String(value || "").toLowerCase().includes(query)));
+    sendJson(response, 200, {
+      resources: {
+        items: visible.slice(offset, offset + limit),
+        total: visible.length,
+        limit,
+        offset,
+      },
+    });
     return true;
   }
 
   if (pathname === "/api/v1/dashboard" && request.method === "GET") {
     const resources = enrollmentRequired
       ? []
-      : user.role === "admin"
-        ? store.listResources()
-        : store.listResources({ customerId: user.customerId }).filter((resource) => resource.permissions.includes("view_status"));
+      : resourcesFor(user);
     const accountSessions = store.listSessions(user.id, { currentIdHash: session.idHash });
     const visibleSessions = config.demoReadOnly
       ? accountSessions.filter((entry) => entry.current).map((entry) => ({
@@ -1540,6 +2190,9 @@ async function routeCustomer(request, response, pathname) {
         twoFactorAuthentication: true,
         customerInvitations: true,
         passwordRecovery: true,
+        mobileApi: true,
+        rotatingRefreshTokens: true,
+        integrationApiKeys: true,
         demoReadOnly: config.demoReadOnly,
       },
     });
@@ -1547,9 +2200,7 @@ async function routeCustomer(request, response, pathname) {
   }
 
   if (pathname === "/api/v1/network" && request.method === "GET") {
-    const resources = user.role === "admin"
-      ? store.listResources()
-      : store.listResources({ customerId: user.customerId }).filter((resource) => resource.permissions.includes("view_status"));
+    const resources = filterApiKeyResources(session, resourcesFor(user));
     const networks = {};
     const clusters = new Map();
     for (const resource of resources) {
@@ -1572,6 +2223,57 @@ async function routeCustomer(request, response, pathname) {
       Object.assign(networks, discovered);
     }));
     sendJson(response, 200, { networks, collectedAt: Date.now() });
+    return true;
+  }
+
+  let mobileResourceMatch = pathname.match(/^\/api\/v1\/resources\/(.+)\/network$/);
+  if (mobileResourceMatch && request.method === "GET") {
+    const resourceId = decodeURIComponent(mobileResourceMatch[1]);
+    const resource = requireResource(response, user, resourceId, "view_status");
+    if (!resource) return true;
+    if (isDemo(resource)) {
+      sendJson(response, 200, {
+        network: {
+          status: resource.status === "running" ? "available" : "stopped",
+          source: "demo",
+          primaryIp: resource.ip,
+          addresses: resource.ip ? [{ address: resource.ip, family: "ipv4", interface: "eth0", prefix: null }] : [],
+          interfaces: [],
+        },
+        collectedAt: Date.now(),
+      });
+      return true;
+    }
+    const discovered = await clientFor(resource).getNetworks([resource]);
+    sendJson(response, 200, {
+      network: discovered[resource.id] || {
+        status: resource.status === "running" ? "unavailable" : "stopped",
+        source: "proxmox",
+        primaryIp: null,
+        addresses: [],
+        interfaces: [],
+      },
+      collectedAt: Date.now(),
+    });
+    return true;
+  }
+
+  mobileResourceMatch = pathname.match(/^\/api\/v1\/resources\/(.+)\/snapshots$/);
+  if (mobileResourceMatch && request.method === "GET") {
+    const resourceId = decodeURIComponent(mobileResourceMatch[1]);
+    const resource = requireResource(response, user, resourceId, "view_status");
+    if (!resource) return true;
+    if (!canViewSnapshots(resource, user)) {
+      sendJson(response, 403, { error: "snapshot_access_denied" });
+      return true;
+    }
+    const snapshots = isDemo(resource)
+      ? demoSnapshotsFor(resource)
+      : await clientFor(resource).listSnapshots(resource);
+    sendJson(response, 200, {
+      snapshots,
+      policy: snapshotPolicy(resource, snapshots),
+    });
     return true;
   }
 
@@ -1777,6 +2479,27 @@ async function routeCustomer(request, response, pathname) {
     });
     sendJson(response, 200, { preferences }); return true;
   }
+  if (pathname === "/api/v1/push/devices" && request.method === "POST") {
+    if (session.authType !== "bearer") {
+      sendJson(response, 403, { error: "api_bearer_required" });
+      return true;
+    }
+    if (!requireCsrf(request, response, session)) return true;
+    const device = store.registerPushDevice(user.id, await readBody(request));
+    sendJson(response, 200, { ...device, pushAvailable: push.configured });
+    return true;
+  }
+  if (pathname === "/api/v1/push/devices/unregister" && request.method === "POST") {
+    if (session.authType !== "bearer") {
+      sendJson(response, 403, { error: "api_bearer_required" });
+      return true;
+    }
+    if (!requireCsrf(request, response, session)) return true;
+    const { token } = await readBody(request);
+    store.unregisterPushDevice(user.id, token);
+    sendJson(response, 204, null);
+    return true;
+  }
   if (pathname === "/api/v1/notifications/read-all" && request.method === "POST") {
     if (!requireCsrf(request, response, session)) return true;
     const changed = store.markAllNotificationsRead(user.id);
@@ -1793,16 +2516,11 @@ async function routeCustomer(request, response, pathname) {
   if (match && request.method === "GET") {
     const token = decodeURIComponent(match[1]);
     const consoleSession = store.getConsoleSession(token, user.id);
-    if (!consoleSession || !resourceFor(user, consoleSession.resourceId, "console")) {
+    if (!consoleSession || !apiKeyHasResource(session, consoleSession.resourceId)
+      || !resourceFor(user, consoleSession.resourceId, "console")) {
       sendJson(response, 404, { error: "console_session_not_found" }); return true;
     }
-    sendJson(response, 200, {
-      resource: { name: consoleSession.name, node: consoleSession.node, type: consoleSession.type, vmid: consoleSession.vmid },
-      expiresAt: consoleSession.expiresAt,
-      demo: config.allowDemoData && consoleSession.clusterId === "demo-eu",
-      websocketUrl: `/api/v1/console/ws/${encodeURIComponent(token)}`,
-      credentials: { password: consoleSession.password },
-    });
+    sendConsoleSession(response, token, consoleSession);
     return true;
   }
 
@@ -2189,14 +2907,43 @@ async function routeCustomer(request, response, pathname) {
     const resource = requireResource(response, user, resourceId, "console");
     if (!resource) return true;
     let consoleSession;
+    let consoleType;
     if (isDemo(resource)) {
-      consoleSession = store.createConsoleSession({ userId: user.id, resourceId, ticket: "demo-console-ticket", port: 5900 });
+      consoleType = resource.type === "lxc" ? "terminal" : "graphical";
+      consoleSession = store.createConsoleSession({
+        userId: user.id,
+        resourceId,
+        ticket: "demo-console-ticket",
+        port: 5900,
+        consoleType,
+        consoleUser: "nimbus-demo@pve",
+      });
     } else {
       const ticket = await clientFor(resource).createConsoleTicket(resource);
-      consoleSession = store.createConsoleSession({ userId: user.id, resourceId, ticket: ticket.ticket, port: ticket.port });
+      consoleType = ticket.consoleType;
+      consoleSession = store.createConsoleSession({
+        userId: user.id,
+        resourceId,
+        ticket: ticket.ticket,
+        port: ticket.port,
+        consoleType: ticket.consoleType,
+        consoleUser: ticket.user,
+      });
     }
-    audit(request, session, "resource.console.ticket_created", { customerId: resource.customerId || user.customerId, resourceId });
-    sendJson(response, 201, { launchUrl: `/console.html?token=${encodeURIComponent(consoleSession.token)}`, expiresAt: consoleSession.expiresAt }); return true;
+    audit(request, session, "resource.console.ticket_created", {
+      customerId: resource.customerId || user.customerId,
+      resourceId,
+      consoleType,
+    });
+    sendJson(response, 201, {
+      launchUrl: `/console.html?token=${encodeURIComponent(consoleSession.token)}`,
+      nativeLaunchUrl: `/api/v1/console/native-launch/${encodeURIComponent(consoleSession.token)}`,
+      expiresAt: consoleSession.expiresAt,
+      console: {
+        type: consoleType,
+        label: consoleType === "terminal" ? "Terminal console" : "Graphical console",
+      },
+    }); return true;
   }
 
   match = pathname.match(/^\/api\/v1\/resources\/(.+)\/snapshots$/);
@@ -2358,11 +3105,23 @@ async function routeCustomer(request, response, pathname) {
     const resource = requireResource(response, user, resourceId, "view_status");
     if (!resource) return true;
     if (isDemo(resource)) {
-      const snapshots = canViewSnapshots(resource, user) ? demoSnapshotsFor(resource) : [];
+      const snapshots = canViewSnapshots(resource, user) && apiKeyHasGroup(session, "snapshot_management") ? demoSnapshotsFor(resource) : [];
       sendJson(response, 200, {
         instance: resource,
         config: { cores: resource.vcpu, memory: resource.memory * 1024, onboot: 1 },
-        network: { status: "available", primaryIp: resource.ip, addresses: resource.ip ? [{ address: resource.ip, family: "ipv4", interface: "eth0" }] : [] },
+        network: {
+          status: "available",
+          source: "demo",
+          primaryIp: resource.ip,
+          addresses: resource.ip ? [{ address: resource.ip, family: "ipv4", interface: "eth0", prefix: 24 }] : [],
+          interfaces: resource.ip
+            ? [{
+              name: "eth0",
+              mac: null,
+              addresses: [{ address: resource.ip, family: "ipv4", interface: "eth0", prefix: 24 }],
+            }]
+            : [],
+        },
         snapshots,
         snapshotPolicy: snapshotPolicy(resource, snapshots),
         tasks: store.listTasks(user, { resourceId, limit: 12 }),
@@ -2371,7 +3130,7 @@ async function routeCustomer(request, response, pathname) {
     }
     const details = await clientFor(resource).getInstanceDetails(resource);
     if (!resource.permissions.includes("view_config") && user.role !== "admin") details.config = {};
-    if (!canViewSnapshots(resource, user)) details.snapshots = [];
+    if (!canViewSnapshots(resource, user) || !apiKeyHasGroup(session, "snapshot_management")) details.snapshots = [];
     details.snapshotPolicy = snapshotPolicy(resource, details.snapshots);
     details.tasks = store.listTasks(user, { resourceId, limit: 12 });
     sendJson(response, 200, details); return true;
@@ -2383,14 +3142,16 @@ async function routeCustomer(request, response, pathname) {
     if (resourceId && !resourceFor(user, resourceId, "view_status")) {
       sendJson(response, 404, { error: "resource_not_found" }); return true;
     }
-    sendJson(response, 200, { tasks: store.listTasks(user, { resourceId, limit: search.get("limit") || 20 }) });
+    const tasks = store.listTasks(user, { resourceId, limit: search.get("limit") || 20 })
+      .filter((task) => apiKeyHasResource(session, task.resourceId));
+    sendJson(response, 200, { tasks });
     return true;
   }
 
   match = pathname.match(/^\/api\/v1\/tasks\/([^/]+)$/);
   if (match && request.method === "GET") {
     const task = store.getTask(decodeURIComponent(match[1]), user);
-    if (!task) { sendJson(response, 404, { error: "task_not_found" }); return true; }
+    if (!task || !apiKeyHasResource(session, task.resourceId)) { sendJson(response, 404, { error: "task_not_found" }); return true; }
     try {
       const result = await refreshStoredTask(task);
       if (result.transitioned) await recordTaskCompletion(result.task);
@@ -2544,6 +3305,40 @@ async function routeCustomer(request, response, pathname) {
 async function routeApi(request, response, pathname) {
   if (pathname === "/api/health" && request.method === "GET") { sendJson(response, 200, { ok: true }); return; }
   if (pathname === "/api/ready" && request.method === "GET") { sendJson(response, store.hasUsers() ? 200 : 503, { ready: store.hasUsers() }); return; }
+  if (pathname === "/api/v1" && request.method === "GET") {
+    sendJson(response, 200, {
+      name: "Nimbus Direct API",
+      version: "v1",
+      openapi: "/api/v1/openapi.json",
+      authentication: {
+        accessTokenType: "Bearer",
+        accessTokenExpiresInSeconds: Math.floor(config.apiAccessTokenTtlMs / 1000),
+        refreshTokenExpiresInSeconds: Math.floor(config.apiRefreshTokenTtlMs / 1000),
+        refreshRotation: true,
+        twoFactorAuthentication: true,
+      },
+      capabilities: {
+        resources: true,
+        actions: true,
+        tasks: true,
+        snapshots: true,
+        isoMedia: true,
+        notifications: true,
+        pushNotifications: push.configured,
+        maintenance: true,
+        support: true,
+        administration: true,
+        integrationApiKeys: true,
+      },
+      demoReadOnly: config.demoReadOnly,
+    });
+    return;
+  }
+  if (pathname === "/api/v1/openapi.json" && request.method === "GET") {
+    sendJson(response, 200, nimbusOpenApi);
+    return;
+  }
+  if (routeNativeConsole(request, response, pathname)) return;
   if (config.demoReadOnly && !isDemoReadOnlyRequestAllowed(request.method, pathname)) {
     sendJson(response, 403, {
       error: "demo_read_only",
@@ -2551,13 +3346,27 @@ async function routeApi(request, response, pathname) {
     });
     return;
   }
+  const integrationToken = bearerToken(request);
+  if (integrationToken?.startsWith("nmb_key_")) {
+    const integrationSession = currentSession(request);
+    if (!integrationSession) {
+      sendJson(response, 401, { error: "authentication_required" });
+      return;
+    }
+    if (!authorizeIntegrationKeyRequest(request, response, pathname, integrationSession)) return;
+  }
   if (pathname.startsWith("/api/auth/") && await routeAuth(request, response, pathname)) return;
+  if (pathname.startsWith("/api/v1/auth/") && await routeApiAuth(request, response, pathname)) return;
+  if (pathname.startsWith("/api/v1/admin/")) {
+    await routeAdmin(request, response, pathname.replace(/^\/api\/v1\/admin/, "/api/admin"));
+    return;
+  }
   if (pathname.startsWith("/api/admin/")) { await routeAdmin(request, response, pathname); return; }
   await routeCustomer(request, response, pathname);
 }
 
 const mime = {
-  ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+  ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json", ".txt": "text/plain; charset=utf-8",
 };
 
@@ -2578,10 +3387,13 @@ const server = createServer(async (request, response) => {
       }));
     }
     if (url.pathname.startsWith("/api/")) return await routeApi(request, response, url.pathname);
-    const vendorPrefix = "/vendor/novnc/";
-    const isNoVnc = url.pathname.startsWith(vendorPrefix);
-    const requested = url.pathname === "/" ? "index.html" : (isNoVnc ? url.pathname.slice(vendorPrefix.length) : url.pathname.slice(1));
-    const staticRoot = isNoVnc ? noVncRoot : root;
+    const vendor = [
+      { prefix: "/vendor/novnc/", root: noVncRoot },
+      { prefix: "/vendor/xterm/", root: xtermRoot },
+      { prefix: "/vendor/xterm-fit/", root: xtermFitRoot },
+    ].find((entry) => url.pathname.startsWith(entry.prefix));
+    const requested = url.pathname === "/" ? "index.html" : (vendor ? url.pathname.slice(vendor.prefix.length) : url.pathname.slice(1));
+    const staticRoot = vendor?.root || root;
     const file = resolve(staticRoot, requested);
     if (file !== staticRoot && !file.startsWith(`${staticRoot}${sep}`)) return sendJson(response, 403, { error: "forbidden" });
     const contents = await readFile(file);
@@ -2609,11 +3421,14 @@ server.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
     const match = url.pathname.match(/^\/api\/v1\/console\/ws\/([^/]+)$/);
     if (!match) return rejectUpgrade(socket, "404 Not Found");
-    const session = currentSession(request);
-    if (!session) return rejectUpgrade(socket);
     const token = decodeURIComponent(match[1]);
-    const pending = store.getConsoleSession(token, session.user.id);
-    if (!pending || !resourceFor(session.user, pending.resourceId, "console")) return rejectUpgrade(socket, "404 Not Found");
+    let session = currentSession(request);
+    const nativeContext = session ? null : nativeConsoleContext(request, token);
+    if (!session && !nativeContext) return rejectUpgrade(socket);
+    if (!session) session = { authType: "native_console", user: nativeContext.user };
+    const pending = nativeContext?.pending || store.getConsoleSession(token, session.user.id);
+    if (!pending || !apiKeyHasGroup(session, "console_access") || !apiKeyHasResource(session, pending.resourceId)
+      || !resourceFor(session.user, pending.resourceId, "console")) return rejectUpgrade(socket, "404 Not Found");
     if (config.allowDemoData && pending.clusterId === "demo-eu") return rejectUpgrade(socket, "409 Conflict");
     const consoleSession = store.consumeConsoleSession(token, session.user.id);
     if (!consoleSession) return rejectUpgrade(socket, "404 Not Found");

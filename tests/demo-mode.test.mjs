@@ -8,6 +8,10 @@ test("public demo allows reads and only the authentication writes needed for ses
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/login"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/mfa"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/logout"), true);
+  assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/token"), true);
+  assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/mfa"), true);
+  assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/refresh"), true);
+  assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/logout"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/resources/demo/actions"), false);
   assert.equal(isDemoReadOnlyRequestAllowed("PATCH", "/api/v1/profile"), false);
   assert.equal(isDemoReadOnlyRequestAllowed("PUT", "/api/admin/email/settings"), false);

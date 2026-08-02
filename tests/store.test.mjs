@@ -46,15 +46,36 @@ test("direct assignments authorize by customer, resource, and permission", async
       assert.equal(store.authorizeResource(beta.id, webId, "start"), null);
       assert.deepEqual(store.listResources({ customerId: beta.id }), []);
 
-      // A partial/failed inventory refresh marks a missing guest stale but never
-      // removes or transfers the local customer assignment.
+      // A failed synchronization records the error but cannot hide the last
+      // successfully discovered resources or alter their assignments.
+      store.setClusterSync("production", { error: "proxmox_timeout" });
+      assert.equal(store.listResources().some((resource) => resource.id === webId), true);
+      assert.equal(store.authorizeResource(acme.id, webId, "start").customerId, "acme");
+
+      // A successful inventory refresh hides a missing guest from every active
+      // inventory and action lookup while preserving its local assignment.
       store.syncResources("production", [
         { type: "lxc", vmid: 301, node: "pve-b", name: "cache", status: "running" },
       ]);
       assert.equal(store.getResource(webId).stale, true);
-      assert.equal(store.authorizeResource(acme.id, webId, "start").customerId, "acme");
+      assert.equal(store.listResources().some((resource) => resource.id === webId), false);
+      assert.equal(store.listResources({ clusterId: "production" }).some((resource) => resource.id === webId), false);
+      assert.equal(store.listResources({ customerId: acme.id }).some((resource) => resource.id === webId), false);
+      assert.equal(store.authorizeResource(acme.id, webId, "start"), null);
+      assert.equal(store.listResources({ includeStale: true }).find((resource) => resource.id === webId).customerId, "acme");
+      assert.equal(store.listCustomers().find((customer) => customer.id === acme.id).resourceCount, 0);
+      assert.equal(store.listClusters().find((cluster) => cluster.id === "production").resourceCount, 1);
 
       // Reassignment is a local database operation; Proxmox pools are absent.
+      assert.throws(
+        () => store.assignResource({ customerId: beta.id, resourceId: webId, permissions: ["view_status", "reboot"], snapshotLimit: 2 }),
+        (error) => error.code === "resource_not_found",
+      );
+      store.syncResources("production", [
+        { type: "qemu", vmid: 101, node: "pve-a", name: "web", status: "running" },
+        { type: "lxc", vmid: 301, node: "pve-b", name: "cache", status: "running" },
+      ]);
+      assert.equal(store.authorizeResource(acme.id, webId, "start").customerId, "acme");
       store.assignResource({ customerId: beta.id, resourceId: webId, permissions: ["view_status", "reboot"], snapshotLimit: 2 });
       assert.equal(store.authorizeResource(acme.id, webId, "view_status"), null);
       assert.equal(store.authorizeResource(beta.id, webId, "reboot").customerId, "beta");
@@ -69,6 +90,29 @@ test("direct assignments authorize by customer, resource, and permission", async
       assert.equal(store.listSessions(betaUser.id).length, 2);
       assert.equal(store.getSession(session.token), null);
       assert.equal(store.getSession(cappedSession.token).user.customerId, "beta");
+
+      const pushToken = "ab".repeat(32);
+      assert.equal(store.registerPushDevice(betaUser.id, {
+        token: pushToken,
+        environment: "sandbox",
+        appVersion: "0.2.0",
+      }).registered, true);
+      assert.equal(store.listPushDevices(betaUser.id)[0].token, pushToken);
+      assert.equal(store.listPushDevices(betaUser.id)[0].environment, "sandbox");
+      const pushRow = store.database.prepare("SELECT * FROM mobile_push_devices").get();
+      assert.equal(pushRow.token_encrypted.includes(pushToken), false);
+      assert.equal(pushRow.token_hash.includes(pushToken), false);
+      store.disablePushDevice(pushRow.id, "Unregistered");
+      assert.equal(store.listPushDevices(betaUser.id).length, 0);
+      store.registerPushDevice(betaUser.id, {
+        token: pushToken,
+        environment: "production",
+        appVersion: "0.2.0",
+      });
+      assert.equal(store.listPushDevices(betaUser.id)[0].environment, "production");
+      assert.equal(store.unregisterPushDevice(acmeUser.id, pushToken), false);
+      assert.equal(store.unregisterPushDevice(betaUser.id, pushToken), true);
+      assert.equal(store.listPushDevices(betaUser.id).length, 0);
 
       store.writeAudit({ customerId: "beta", userId: betaUser.id, actorRole: "customer", action: "resource.reboot.requested", resourceId: webId });
       assert.equal(store.listAudit("beta").total, 1);
@@ -113,12 +157,24 @@ test("direct assignments authorize by customer, resource, and permission", async
       const completedSnapshotTask = store.updateTask(snapshotTask.id, { status: "stopped", exitStatus: "OK", completedAt: 1700000001000 });
       assert.equal(store.publicTask(completedSnapshotTask).message, "Snapshot created successfully.");
 
-      const consoleSession = store.createConsoleSession({ userId: betaUser.id, resourceId: webId, ticket: "PVEVNC:short-lived-ticket", port: 5900 });
+      const consoleSession = store.createConsoleSession({
+        userId: betaUser.id,
+        resourceId: webId,
+        ticket: "PVEVNC:short-lived-ticket",
+        port: 5900,
+        consoleType: "terminal",
+        consoleUser: "nimbus@pve",
+      });
       assert.equal(store.getConsoleSession(consoleSession.token, acmeUser.id), null);
       assert.equal(store.getConsoleSession(consoleSession.token, betaUser.id).resourceId, webId);
+      assert.equal(store.getConsoleSessionByToken(consoleSession.token).userId, betaUser.id);
+      assert.equal(store.getConsoleSessionByToken(consoleSession.token).resourceId, webId);
       assert.equal(store.getConsoleSession(consoleSession.token, betaUser.id).password, "PVEVNC:short-lived-ticket");
+      assert.equal(store.getConsoleSession(consoleSession.token, betaUser.id).consoleType, "terminal");
+      assert.equal(store.getConsoleSession(consoleSession.token, betaUser.id).consoleUser, "nimbus@pve");
       assert.equal(store.consumeConsoleSession(consoleSession.token, betaUser.id).ticket, "PVEVNC:short-lived-ticket");
       assert.equal(store.consumeConsoleSession(consoleSession.token, betaUser.id), null);
+      assert.equal(store.getConsoleSessionByToken(consoleSession.token), null);
 
       assert.throws(() => store.updateUser(admin.id, { status: "disabled" }), (error) => error.code === "last_admin");
     } finally { store.close(); }

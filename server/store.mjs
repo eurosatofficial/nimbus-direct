@@ -24,6 +24,51 @@ export const DEFAULT_PERMISSIONS = [
   "view_config", "view_usage",
 ];
 
+export const API_PERMISSION_GROUPS = Object.freeze([
+  { id: "server_overview", label: "Server overview", description: "Read assigned server status, configuration, usage, network information, and task status.", roles: ["customer", "admin"], resourceScoped: true },
+  { id: "power_management", label: "Power management", description: "Start, stop, shut down, reboot, reset, suspend, and resume permitted servers.", roles: ["customer", "admin"], resourceScoped: true },
+  { id: "snapshot_management", label: "Snapshot management", description: "View, create, restore, and delete snapshots where the assignment permits it.", roles: ["customer", "admin"], resourceScoped: true },
+  { id: "installation_media", label: "Installation media", description: "View, upload, mount, eject, boot, and delete customer ISO images where permitted.", roles: ["customer", "admin"], resourceScoped: true },
+  { id: "console_access", label: "Console access", description: "Create short-lived console sessions for permitted servers.", roles: ["customer", "admin"], resourceScoped: true },
+  { id: "notifications", label: "Notifications", description: "Read and acknowledge account notifications.", roles: ["customer", "admin"], resourceScoped: false },
+  { id: "maintenance_information", label: "Maintenance information", description: "Read maintenance notices that affect the account.", roles: ["customer", "admin"], resourceScoped: false },
+  { id: "support_tickets", label: "Support tickets", description: "Read, create, and reply to the account's support tickets.", roles: ["customer"], resourceScoped: false },
+  { id: "admin_customers", label: "Customer administration", description: "Manage customer records.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_users", label: "User administration", description: "Manage users and secure onboarding.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_clusters", label: "Cluster administration", description: "Manage, test, and synchronize Proxmox clusters.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_assignments", label: "Assignment administration", description: "Assign resources and maintain assignment policy.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_operations", label: "Operations center", description: "Read operations health and acknowledge incidents.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_maintenance", label: "Maintenance administration", description: "Create, publish, update, and resolve maintenance notices.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_support", label: "Support administration", description: "Manage all customer support tickets.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_email", label: "Email administration", description: "Manage email delivery settings and jobs.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_security", label: "Security administration", description: "Read the Security Center and update security policy.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_iso_policies", label: "ISO policy administration", description: "Manage customer ISO storage policies.", roles: ["admin"], resourceScoped: false },
+  { id: "admin_audit", label: "Audit access", description: "Read the complete platform audit log.", roles: ["admin"], resourceScoped: false },
+]);
+
+export const API_ACTION_DEFINITIONS = Object.freeze([
+  { id: "read_resource", label: "Read resource information", group: "server_overview", permission: "view_status", resourceScoped: true },
+  { id: "read_configuration", label: "Read configuration", group: "server_overview", permission: "view_config", resourceScoped: true },
+  { id: "read_usage", label: "Read usage statistics", group: "server_overview", permission: "view_usage", resourceScoped: true },
+  { id: "start", label: "Start", group: "power_management", permission: "start", resourceScoped: true },
+  { id: "stop", label: "Stop", group: "power_management", permission: "stop", resourceScoped: true },
+  { id: "shutdown", label: "Shutdown", group: "power_management", permission: "shutdown", resourceScoped: true },
+  { id: "reboot", label: "Reboot", group: "power_management", permission: "reboot", resourceScoped: true },
+  { id: "reset", label: "Reset", group: "power_management", permission: "reset", resourceScoped: true },
+  { id: "suspend", label: "Suspend", group: "power_management", permission: "suspend", resourceScoped: true },
+  { id: "resume", label: "Resume", group: "power_management", permission: "resume", resourceScoped: true },
+  { id: "snapshot_view", label: "View snapshots", group: "snapshot_management", permission: "view_status", resourceScoped: true },
+  { id: "snapshot_create", label: "Create snapshots", group: "snapshot_management", permission: "snapshot_create", resourceScoped: true },
+  { id: "snapshot_restore", label: "Restore snapshots", group: "snapshot_management", permission: "snapshot_restore", resourceScoped: true },
+  { id: "snapshot_delete", label: "Delete snapshots", group: "snapshot_management", permission: "snapshot_delete", resourceScoped: true },
+  { id: "console", label: "Console", group: "console_access", permission: "console", resourceScoped: true },
+  { id: "iso_view", label: "View ISO images", group: "installation_media", permission: "iso_view", resourceScoped: true },
+  { id: "iso_upload", label: "Upload ISO images", group: "installation_media", permission: "iso_upload", resourceScoped: true },
+  { id: "iso_mount", label: "Mount or eject ISO images", group: "installation_media", permission: "iso_mount", resourceScoped: true },
+  { id: "iso_boot", label: "Boot from ISO once", group: "installation_media", permission: "iso_boot", resourceScoped: true },
+  { id: "iso_delete", label: "Delete ISO images", group: "installation_media", permission: "iso_delete", resourceScoped: true },
+]);
+
 export const DEFAULT_SNAPSHOT_LIMIT = 3;
 export const DEFAULT_ALERT_POLICY = Object.freeze({
   enabled: false,
@@ -92,12 +137,32 @@ function publicUser(row) {
 function publicSession(row, currentIdHash = null) {
   return row && {
     id: row.id_hash,
+    kind: "browser",
     current: row.id_hash === currentIdHash,
     ipAddress: row.ip_address || "Unknown",
     userAgent: row.user_agent || "Unknown device",
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
     expiresAt: row.expires_at,
+  };
+}
+
+function publicApiDeviceSession(row, currentIdHash = null) {
+  if (!row) return null;
+  const id = `mobile:${row.id}`;
+  return {
+    id,
+    kind: "api",
+    current: id === currentIdHash,
+    deviceName: row.device_name,
+    platform: row.platform,
+    appVersion: row.app_version || null,
+    ipAddress: row.ip_address || "Unknown",
+    userAgent: row.device_name || row.user_agent || "Nimbus API device",
+    createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at,
+    expiresAt: row.refresh_expires_at,
+    accessExpiresAt: row.access_expires_at,
   };
 }
 
@@ -694,7 +759,10 @@ function normalizeEmailSettings(input, existing = null) {
 
 function customerSelect(where = "") {
   return `SELECT c.*,
-    (SELECT COUNT(*) FROM customer_resource_assignments a WHERE a.customer_id=c.id AND a.status='active') AS resource_count,
+    (SELECT COUNT(*) FROM customer_resource_assignments a
+      JOIN resources r ON r.id=a.resource_id
+      WHERE a.customer_id=c.id AND a.status='active' AND r.stale=0
+    ) AS resource_count,
     (SELECT COUNT(*) FROM users u WHERE u.customer_id=c.id) AS user_count
     FROM customers c ${where}`;
 }
@@ -712,7 +780,7 @@ function userSelect(where = "") {
 
 function clusterSelect(where = "") {
   return `SELECT c.*,pc.token_id,
-    (SELECT COUNT(*) FROM resources r WHERE r.cluster_id=c.id) AS resource_count,
+    (SELECT COUNT(*) FROM resources r WHERE r.cluster_id=c.id AND r.stale=0) AS resource_count,
     (SELECT COUNT(*) FROM proxmox_nodes n WHERE n.cluster_id=c.id) AS node_count
     FROM proxmox_clusters c LEFT JOIN proxmox_credentials pc ON pc.cluster_id=c.id ${where}`;
 }
@@ -939,6 +1007,105 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       expires_at INTEGER NOT NULL,
       created_at INTEGER NOT NULL,
       last_seen_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS api_device_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      access_token_hash TEXT NOT NULL UNIQUE,
+      device_name TEXT NOT NULL,
+      platform TEXT NOT NULL CHECK(platform IN ('ios','android','desktop','other')),
+      app_version TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      access_expires_at INTEGER NOT NULL,
+      refresh_expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      rotated_at INTEGER,
+      revoked_at INTEGER,
+      revoked_reason TEXT
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS api_refresh_tokens (
+      token_hash TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES api_device_sessions(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK(status IN ('active','rotated','revoked')),
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      used_at INTEGER
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS mobile_push_devices (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      token_encrypted TEXT NOT NULL,
+      platform TEXT NOT NULL CHECK(platform IN ('ios')),
+      environment TEXT NOT NULL CHECK(environment IN ('sandbox','production')),
+      app_version TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
+      failure_reason TEXT,
+      last_registered_at INTEGER NOT NULL,
+      last_sent_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS mobile_push_devices_user_status
+      ON mobile_push_devices(user_id, status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS user_api_policies (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      max_active_keys INTEGER NOT NULL DEFAULT 3 CHECK(max_active_keys BETWEEN 1 AND 50),
+      max_lifetime_days INTEGER NOT NULL DEFAULT 365 CHECK(max_lifetime_days BETWEEN 1 AND 3650),
+      allow_no_expiry INTEGER NOT NULL DEFAULT 0,
+      all_visible_resources INTEGER NOT NULL DEFAULT 0,
+      updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS user_api_policy_groups (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      group_id TEXT NOT NULL,
+      PRIMARY KEY(user_id,group_id)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS user_api_policy_resources (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+      PRIMARY KEY(user_id,resource_id)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS user_api_keys (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      token_hint TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','revoked')),
+      expires_at INTEGER,
+      last_used_at INTEGER,
+      last_ip TEXT,
+      revoked_at INTEGER,
+      revoked_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      revoked_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS user_api_key_groups (
+      key_id TEXT NOT NULL REFERENCES user_api_keys(id) ON DELETE CASCADE,
+      group_id TEXT NOT NULL,
+      PRIMARY KEY(key_id,group_id)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS user_api_key_resources (
+      key_id TEXT NOT NULL REFERENCES user_api_keys(id) ON DELETE CASCADE,
+      resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+      PRIMARY KEY(key_id,resource_id)
     ) STRICT;
 
     CREATE TABLE IF NOT EXISTS mfa_login_challenges (
@@ -1243,6 +1410,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
       ticket_encrypted TEXT NOT NULL,
       port INTEGER NOT NULL,
+      console_type TEXT NOT NULL DEFAULT 'graphical' CHECK(console_type IN ('graphical','terminal')),
+      console_user TEXT,
       expires_at INTEGER NOT NULL,
       used_at INTEGER,
       created_at INTEGER NOT NULL
@@ -1251,6 +1420,12 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     CREATE INDEX IF NOT EXISTS users_customer_idx ON users(customer_id);
     CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
     CREATE INDEX IF NOT EXISTS sessions_user_created_idx ON sessions(user_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS api_device_sessions_user_idx ON api_device_sessions(user_id,last_seen_at DESC);
+    CREATE INDEX IF NOT EXISTS api_device_sessions_access_idx ON api_device_sessions(access_token_hash,access_expires_at);
+    CREATE INDEX IF NOT EXISTS api_refresh_tokens_session_idx ON api_refresh_tokens(session_id,status,created_at DESC);
+    CREATE INDEX IF NOT EXISTS api_refresh_tokens_expiry_idx ON api_refresh_tokens(expires_at,status);
+    CREATE INDEX IF NOT EXISTS user_api_keys_user_status_idx ON user_api_keys(user_id,status,created_at DESC);
+    CREATE INDEX IF NOT EXISTS user_api_keys_token_idx ON user_api_keys(token_hash,status);
     CREATE INDEX IF NOT EXISTS mfa_challenges_expires_idx ON mfa_login_challenges(expires_at);
     CREATE INDEX IF NOT EXISTS account_tokens_user_purpose_idx ON account_tokens(user_id,purpose,created_at DESC);
     CREATE INDEX IF NOT EXISTS account_tokens_expires_idx ON account_tokens(expires_at);
@@ -1297,8 +1472,13 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   if (!sessionColumns.has("user_agent")) database.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT");
   const userColumns = new Set(database.prepare("PRAGMA table_info(users)").all().map((column) => column.name));
   if (!userColumns.has("password_set")) database.exec("ALTER TABLE users ADD COLUMN password_set INTEGER NOT NULL DEFAULT 1");
+  const apiPolicyColumns = new Set(database.prepare("PRAGMA table_info(user_api_policies)").all().map((column) => column.name));
+  if (!apiPolicyColumns.has("all_visible_resources")) database.exec("ALTER TABLE user_api_policies ADD COLUMN all_visible_resources INTEGER NOT NULL DEFAULT 0");
   const emailSettingsColumns = new Set(database.prepare("PRAGMA table_info(email_settings)").all().map((column) => column.name));
   if (!emailSettingsColumns.has("app_url")) database.exec("ALTER TABLE email_settings ADD COLUMN app_url TEXT NOT NULL DEFAULT ''");
+  const consoleSessionColumns = new Set(database.prepare("PRAGMA table_info(console_sessions)").all().map((column) => column.name));
+  if (!consoleSessionColumns.has("console_type")) database.exec("ALTER TABLE console_sessions ADD COLUMN console_type TEXT NOT NULL DEFAULT 'graphical' CHECK(console_type IN ('graphical','terminal'))");
+  if (!consoleSessionColumns.has("console_user")) database.exec("ALTER TABLE console_sessions ADD COLUMN console_user TEXT");
   const securityPolicyNow = Date.now();
   database.prepare(`INSERT OR IGNORE INTO security_policy
     (id,require_admin_mfa,require_customer_mfa,new_login_email,created_at,updated_at)
@@ -1309,6 +1489,21 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   const getUserByEmailRow = database.prepare(userSelect("WHERE u.email=?"));
   const getClusterRow = database.prepare(clusterSelect("WHERE c.id=?"));
   const getResourceRow = database.prepare(resourceSelect("WHERE r.id=?"));
+
+  function revokeApiDeviceSessionRow(id, reason = "revoked", timestamp = Date.now()) {
+    const changed = database.prepare(`UPDATE api_device_sessions
+      SET revoked_at=COALESCE(revoked_at,?),revoked_reason=COALESCE(revoked_reason,?)
+      WHERE id=? AND revoked_at IS NULL`).run(timestamp, reason, id).changes;
+    if (changed) database.prepare("UPDATE api_refresh_tokens SET status='revoked' WHERE session_id=? AND status='active'").run(id);
+    return changed > 0;
+  }
+
+  function expireApiDeviceSessions(timestamp = Date.now()) {
+    const expired = database.prepare(`SELECT id FROM api_device_sessions
+      WHERE revoked_at IS NULL AND refresh_expires_at<=?`).all(timestamp);
+    for (const row of expired) revokeApiDeviceSessionRow(row.id, "expired", timestamp);
+    return expired.length;
+  }
 
   function replacePermissions(assignmentId, permissions) {
     database.prepare("DELETE FROM assignment_permissions WHERE assignment_id=?").run(assignmentId);
@@ -1520,6 +1715,173 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       ORDER BY m.created_at,m.id`).all(ticketId).map(publicSupportMessage);
   }
 
+  function apiGroupsForRole(role) {
+    return API_PERMISSION_GROUPS.filter((group) => group.roles.includes(role));
+  }
+
+  function apiVisibleResources(user) {
+    if (!user) return [];
+    return user.role === "admin"
+      ? database.prepare(resourceSelect("WHERE r.stale=0")).all().map(publicResource)
+      : database.prepare(resourceSelect("WHERE a.customer_id=? AND a.status='active' AND r.stale=0"))
+          .all(user.customerId || user.customer_id).map(publicResource);
+  }
+
+  function apiPolicyFor(userId) {
+    const user = publicUser(getUserRow.get(userId));
+    if (!user) throw problem("User does not exist", "user_not_found", 404);
+    const row = database.prepare("SELECT * FROM user_api_policies WHERE user_id=?").get(userId);
+    const groupIds = row
+      ? database.prepare("SELECT group_id FROM user_api_policy_groups WHERE user_id=? ORDER BY group_id").all(userId).map((entry) => entry.group_id)
+      : [];
+    const resourceIds = row
+      ? database.prepare("SELECT resource_id FROM user_api_policy_resources WHERE user_id=? ORDER BY resource_id").all(userId).map((entry) => entry.resource_id)
+      : [];
+    const roleGroups = new Set(apiGroupsForRole(user.role).map((group) => group.id));
+    const visibleIds = new Set(apiVisibleResources(user).map((resource) => resource.id));
+    return {
+      userId,
+      enabled: Boolean(row?.enabled),
+      maxActiveKeys: Number(row?.max_active_keys || 3),
+      maxLifetimeDays: Number(row?.max_lifetime_days || 365),
+      allowNoExpiry: Boolean(row?.allow_no_expiry),
+      groups: groupIds.filter((id) => roleGroups.has(id)),
+      resourceIds: resourceIds.filter((id) => visibleIds.has(id)),
+      allVisibleResources: Boolean(row?.all_visible_resources),
+      updatedBy: row?.updated_by || null,
+      createdAt: row?.created_at || null,
+      updatedAt: row?.updated_at || null,
+    };
+  }
+
+  function allowedPolicyResourceIds(user, policy, visibleResources = apiVisibleResources(user)) {
+    const visibleIds = new Set(visibleResources.map((resource) => resource.id));
+    return policy.allVisibleResources
+      ? [...visibleIds]
+      : policy.resourceIds.filter((id) => visibleIds.has(id));
+  }
+
+  function apiKeyRow(keyId) {
+    return database.prepare("SELECT * FROM user_api_keys WHERE id=?").get(keyId);
+  }
+
+  function apiKeySelections(keyId) {
+    return {
+      groups: database.prepare("SELECT group_id FROM user_api_key_groups WHERE key_id=? ORDER BY group_id").all(keyId).map((row) => row.group_id),
+      resourceIds: database.prepare("SELECT resource_id FROM user_api_key_resources WHERE key_id=? ORDER BY resource_id").all(keyId).map((row) => row.resource_id),
+    };
+  }
+
+  function apiKeySummary(user, input, policy = apiPolicyFor(user.id), visibleResources = apiVisibleResources(user)) {
+    const selectedGroups = new Set(input.groups || []);
+    const selectedResourceIds = new Set(input.resourceIds || []);
+    const policyGroups = new Set(policy.groups);
+    const policyResources = new Set(allowedPolicyResourceIds(user, policy, visibleResources));
+    const effectiveGroups = [...selectedGroups].filter((id) => policyGroups.has(id));
+    const effectiveGroupSet = new Set(effectiveGroups);
+    const resources = visibleResources.filter((resource) => selectedResourceIds.has(resource.id));
+    const effectiveResources = resources.filter((resource) => policyResources.has(resource.id));
+    const effectiveResourceIds = new Set(effectiveResources.map((resource) => resource.id));
+    const actions = API_ACTION_DEFINITIONS.map((action) => {
+      const selected = resources;
+      const allowedCount = selected.filter((resource) =>
+        effectiveGroupSet.has(action.group)
+        && effectiveResourceIds.has(resource.id)
+        && (user.role === "admin" || resource.permissions.includes(action.permission))).length;
+      const state = allowedCount === 0 ? "denied" : allowedCount === selected.length ? "allowed" : "partial";
+      return {
+        id: action.id,
+        label: action.label,
+        group: action.group,
+        state,
+        allowedCount,
+        resourceCount: selected.length,
+      };
+    });
+    return {
+      name: String(input.name || "").trim(),
+      permissionGroups: apiGroupsForRole(user.role).map((group) => ({
+        ...group,
+        selected: selectedGroups.has(group.id),
+        effective: effectiveGroupSet.has(group.id),
+      })),
+      resources: resources.map((resource) => ({
+        id: resource.id,
+        name: resource.displayName || resource.name,
+        type: resource.type,
+        vmid: resource.vmid,
+        clusterId: resource.clusterId,
+        node: resource.node,
+        effective: effectiveResourceIds.has(resource.id),
+      })),
+      expiresAt: input.expiresAt || null,
+      actions,
+    };
+  }
+
+  function normalizeApiKeyInput(user, input, { requirePolicy = true } = {}) {
+    const policy = apiPolicyFor(user.id);
+    if (requirePolicy && !policy.enabled) throw problem("API access is not enabled for this account", "api_access_disabled", 403);
+    const name = String(input?.name || "").trim();
+    if (!name || name.length > 100) throw problem("API key name must contain 1-100 characters", "invalid_api_key_name");
+    const roleGroups = new Set(apiGroupsForRole(user.role).map((group) => group.id));
+    const policyGroups = new Set(policy.groups);
+    const groups = [...new Set((Array.isArray(input?.groups) ? input.groups : []).map(String))];
+    if (!groups.length || groups.some((id) => !roleGroups.has(id) || !policyGroups.has(id))) {
+      throw problem("Choose only API permissions enabled by the administrator", "invalid_api_key_groups");
+    }
+    const visibleResources = apiVisibleResources(user);
+    const visibleIds = new Set(visibleResources.map((resource) => resource.id));
+    const policyResourceIds = new Set(allowedPolicyResourceIds(user, policy, visibleResources));
+    const resourceIds = [...new Set((Array.isArray(input?.resourceIds) ? input.resourceIds : []).map(String))];
+    if (resourceIds.some((id) => !visibleIds.has(id) || !policyResourceIds.has(id))) {
+      throw problem("Choose only resources enabled for this account", "invalid_api_key_resources");
+    }
+    const resourceGroups = new Set(apiGroupsForRole(user.role).filter((group) => group.resourceScoped).map((group) => group.id));
+    if (groups.some((id) => resourceGroups.has(id)) && !resourceIds.length) {
+      throw problem("Choose at least one resource for resource permissions", "api_key_resources_required");
+    }
+    let expiresAt = null;
+    if (input?.expiresAt !== undefined && input.expiresAt !== null && input.expiresAt !== "") {
+      expiresAt = typeof input.expiresAt === "number" ? input.expiresAt : Date.parse(String(input.expiresAt));
+      if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() + 60_000) {
+        throw problem("API key expiry must be in the future", "invalid_api_key_expiry");
+      }
+      if (expiresAt > Date.now() + policy.maxLifetimeDays * 86_400_000 + 60_000) {
+        throw problem("API key expiry exceeds the administrator limit", "api_key_expiry_too_long");
+      }
+    } else if (!policy.allowNoExpiry) {
+      throw problem("An expiry date is required for this API key", "api_key_expiry_required");
+    }
+    return { name, groups, resourceIds, expiresAt, policy, visibleResources };
+  }
+
+  function publicApiKey(row, user = null) {
+    if (!row) return null;
+    const owner = user || publicUser(getUserRow.get(row.user_id));
+    const selections = apiKeySelections(row.id);
+    const expired = Boolean(row.expires_at && Number(row.expires_at) <= Date.now());
+    const policy = apiPolicyFor(row.user_id);
+    return {
+      id: row.id,
+      userId: row.user_id,
+      name: row.name,
+      tokenHint: row.token_hint,
+      status: row.status === "active" && expired ? "expired" : row.status,
+      active: row.status === "active" && !expired && policy.enabled,
+      groups: selections.groups,
+      resourceIds: selections.resourceIds,
+      expiresAt: row.expires_at || null,
+      lastUsedAt: row.last_used_at || null,
+      lastIp: row.last_ip || null,
+      revokedAt: row.revoked_at || null,
+      revokedReason: row.revoked_reason || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      summary: apiKeySummary(owner, { name: row.name, ...selections, expiresAt: row.expires_at }, policy),
+    };
+  }
+
   return {
     database,
     hasUsers: () => database.prepare("SELECT COUNT(*) AS count FROM users").get().count > 0,
@@ -1550,7 +1912,13 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       database.prepare("UPDATE customers SET name=?,status=?,support_email=?,plan_name=?,updated_at=? WHERE id=?")
         .run(name, status, supportEmail, planName, Date.now(), id);
       if (status === "disabled") {
+        const now = Date.now();
         database.prepare("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE customer_id=?)").run(id);
+        database.prepare(`UPDATE api_device_sessions SET revoked_at=?,revoked_reason='customer_deleted'
+          WHERE user_id IN (SELECT id FROM users WHERE customer_id=?) AND revoked_at IS NULL`).run(now, id);
+        database.prepare(`UPDATE user_api_keys SET status='revoked',revoked_at=COALESCE(revoked_at,?),
+          revoked_reason=COALESCE(revoked_reason,'customer_disabled'),updated_at=?
+          WHERE user_id IN (SELECT id FROM users WHERE customer_id=?) AND status='active'`).run(now, now, id);
       }
       return publicCustomer(getCustomerRow.get(id));
     },
@@ -1594,10 +1962,197 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     },
     findUserForLogin: (email) => getUserByEmailRow.get(normalizeEmail(email)),
     getUserForAuth: (id) => getUserRow.get(id),
+    getUser: (id) => publicUser(getUserRow.get(id)),
     listUsers: () => database.prepare(userSelect("ORDER BY u.email")).all().map(publicUser),
     listCustomerUsers: (customerId) => database.prepare(userSelect("WHERE u.customer_id=? ORDER BY u.display_name")).all(customerId).map(publicUser),
     listActiveCustomerUsers: (customerId) => database.prepare(userSelect("WHERE u.customer_id=? AND u.role='customer' AND u.status='active' ORDER BY u.display_name"))
       .all(customerId).map(publicUser),
+    getUserApiPolicy: (userId) => apiPolicyFor(userId),
+    listUserApiPolicies() {
+      return database.prepare(userSelect("ORDER BY u.email")).all().map((row) => {
+        const user = publicUser(row);
+        const policy = apiPolicyFor(user.id);
+        const activeKeys = database.prepare(`SELECT COUNT(*) AS count FROM user_api_keys
+          WHERE user_id=? AND status='active' AND (expires_at IS NULL OR expires_at>?)`).get(user.id, Date.now()).count;
+        return { userId: user.id, email: user.email, displayName: user.displayName, role: user.role, activeKeys: Number(activeKeys), ...policy };
+      });
+    },
+    updateUserApiPolicy(userId, input, updatedBy = null) {
+      const user = publicUser(getUserRow.get(userId));
+      if (!user) throw problem("User does not exist", "user_not_found", 404);
+      const enabled = input.enabled === true;
+      const maxActiveKeys = Math.max(1, Math.min(50, Number(input.maxActiveKeys) || 3));
+      const maxLifetimeDays = Math.max(1, Math.min(3650, Number(input.maxLifetimeDays) || 365));
+      const allowNoExpiry = input.allowNoExpiry === true;
+      const roleGroups = new Set(apiGroupsForRole(user.role).map((group) => group.id));
+      const groups = [...new Set((Array.isArray(input.groups) ? input.groups : []).map(String))];
+      if (groups.some((id) => !roleGroups.has(id)) || (enabled && !groups.length)) {
+        throw problem("Choose valid API permission groups for this user", "invalid_api_policy_groups");
+      }
+      const visibleIds = new Set(apiVisibleResources(user).map((resource) => resource.id));
+      const resourceIds = [...new Set((Array.isArray(input.resourceIds) ? input.resourceIds : []).map(String))];
+      const allVisibleResources = input.allVisibleResources === true
+        || (input.allVisibleResources === undefined && resourceIds.length === 0);
+      if (resourceIds.some((id) => !visibleIds.has(id))) {
+        throw problem("Choose only resources visible to this user", "invalid_api_policy_resources");
+      }
+      const hasResourceGroups = groups.some((id) => apiGroupsForRole(user.role).find((group) => group.id === id)?.resourceScoped);
+      if (enabled && hasResourceGroups && !allVisibleResources && !resourceIds.length) {
+        throw problem("Choose at least one maximum resource or allow all visible resources", "invalid_api_policy_resources");
+      }
+      const now = Date.now();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare(`INSERT INTO user_api_policies
+          (user_id,enabled,max_active_keys,max_lifetime_days,allow_no_expiry,all_visible_resources,updated_by,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled,max_active_keys=excluded.max_active_keys,
+            max_lifetime_days=excluded.max_lifetime_days,allow_no_expiry=excluded.allow_no_expiry,
+            all_visible_resources=excluded.all_visible_resources,updated_by=excluded.updated_by,updated_at=excluded.updated_at`)
+          .run(userId, Number(enabled), maxActiveKeys, maxLifetimeDays, Number(allowNoExpiry), Number(allVisibleResources), updatedBy, now, now);
+        database.prepare("DELETE FROM user_api_policy_groups WHERE user_id=?").run(userId);
+        const insertGroup = database.prepare("INSERT INTO user_api_policy_groups (user_id,group_id) VALUES (?,?)");
+        for (const id of groups) insertGroup.run(userId, id);
+        database.prepare("DELETE FROM user_api_policy_resources WHERE user_id=?").run(userId);
+        const insertResource = database.prepare("INSERT INTO user_api_policy_resources (user_id,resource_id) VALUES (?,?)");
+        for (const id of resourceIds) insertResource.run(userId, id);
+        if (!enabled) {
+          database.prepare(`UPDATE user_api_keys SET status='revoked',revoked_at=COALESCE(revoked_at,?),
+            revoked_by=COALESCE(revoked_by,?),revoked_reason=COALESCE(revoked_reason,'policy_disabled'),updated_at=?
+            WHERE user_id=? AND status='active'`).run(now, updatedBy, now, userId);
+        } else {
+          const excess = database.prepare(`SELECT id FROM user_api_keys
+            WHERE user_id=? AND status='active' AND (expires_at IS NULL OR expires_at>?)
+            ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET ?`).all(userId, now, maxActiveKeys);
+          for (const key of excess) {
+            database.prepare(`UPDATE user_api_keys SET status='revoked',revoked_at=?,revoked_by=?,
+              revoked_reason='policy_key_limit',updated_at=? WHERE id=?`).run(now, updatedBy, now, key.id);
+          }
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return apiPolicyFor(userId);
+    },
+    getUserApiKeyCenter(userId, { includeAllVisible = false } = {}) {
+      const user = publicUser(getUserRow.get(userId));
+      if (!user) throw problem("User does not exist", "user_not_found", 404);
+      const policy = apiPolicyFor(userId);
+      const visibleResources = apiVisibleResources(user);
+      const allowedIds = new Set(allowedPolicyResourceIds(user, policy, visibleResources));
+      return {
+        policy,
+        groups: apiGroupsForRole(user.role),
+        resources: visibleResources.filter((resource) => includeAllVisible || allowedIds.has(resource.id)).map((resource) => ({
+          id: resource.id,
+          name: resource.displayName || resource.name,
+          type: resource.type,
+          vmid: resource.vmid,
+          clusterId: resource.clusterId,
+          clusterName: resource.clusterName,
+          node: resource.node,
+          permissions: user.role === "admin" ? ASSIGNMENT_PERMISSIONS : resource.permissions,
+        })),
+        keys: database.prepare("SELECT * FROM user_api_keys WHERE user_id=? ORDER BY created_at DESC").all(userId)
+          .map((row) => publicApiKey(row, user)),
+      };
+    },
+    previewUserApiKey(userId, input) {
+      const user = publicUser(getUserRow.get(userId));
+      if (!user) throw problem("User does not exist", "user_not_found", 404);
+      const normalized = normalizeApiKeyInput(user, input);
+      return apiKeySummary(user, normalized, normalized.policy, normalized.visibleResources);
+    },
+    createUserApiKey(userId, input) {
+      const user = publicUser(getUserRow.get(userId));
+      if (!user) throw problem("User does not exist", "user_not_found", 404);
+      const normalized = normalizeApiKeyInput(user, input);
+      const activeCount = database.prepare(`SELECT COUNT(*) AS count FROM user_api_keys
+        WHERE user_id=? AND status='active' AND (expires_at IS NULL OR expires_at>?)`).get(userId, Date.now()).count;
+      if (Number(activeCount) >= normalized.policy.maxActiveKeys) {
+        throw problem("The maximum number of active API keys has been reached", "api_key_limit_reached", 409);
+      }
+      const id = randomToken(18);
+      const secret = `nmb_key_${randomToken(48)}`;
+      const suffix = secret.slice(-4);
+      const tokenHint = `${secret.slice(0, 12)}…${suffix}`;
+      const now = Date.now();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare(`INSERT INTO user_api_keys
+          (id,user_id,name,token_hash,token_hint,status,expires_at,created_at,updated_at)
+          VALUES (?,?,?,?,?,'active',?,?,?)`)
+          .run(id, userId, normalized.name, hashToken(secret, appSecret), tokenHint, normalized.expiresAt, now, now);
+        const insertGroup = database.prepare("INSERT INTO user_api_key_groups (key_id,group_id) VALUES (?,?)");
+        for (const group of normalized.groups) insertGroup.run(id, group);
+        const insertResource = database.prepare("INSERT INTO user_api_key_resources (key_id,resource_id) VALUES (?,?)");
+        for (const resourceId of normalized.resourceIds) insertResource.run(id, resourceId);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return { secret, key: publicApiKey(apiKeyRow(id), user) };
+    },
+    getUserApiKey(userId, keyId) {
+      const row = database.prepare("SELECT * FROM user_api_keys WHERE id=? AND user_id=?").get(keyId, userId);
+      return row ? publicApiKey(row) : null;
+    },
+    revokeUserApiKey(userId, keyId, { revokedBy = userId, reason = "user_revoked" } = {}) {
+      const now = Date.now();
+      const changed = database.prepare(`UPDATE user_api_keys SET status='revoked',revoked_at=?,revoked_by=?,
+        revoked_reason=?,updated_at=? WHERE id=? AND user_id=? AND status='active'`)
+        .run(now, revokedBy, reason, now, keyId, userId).changes;
+      return changed > 0;
+    },
+    revokeAllUserApiKeys(userId, { revokedBy = null, reason = "admin_revoked_all" } = {}) {
+      const now = Date.now();
+      return Number(database.prepare(`UPDATE user_api_keys SET status='revoked',revoked_at=?,revoked_by=?,
+        revoked_reason=?,updated_at=? WHERE user_id=? AND status='active'`)
+        .run(now, revokedBy, reason, now, userId).changes);
+    },
+    getIntegrationApiSession(token, { ipAddress = null } = {}) {
+      if (!String(token || "").startsWith("nmb_key_") || String(token).length > 260) return null;
+      const now = Date.now();
+      const row = database.prepare(`SELECT k.id AS api_key_id,k.name AS api_key_name,k.expires_at AS api_key_expires_at,
+        k.last_used_at AS api_key_last_used_at,u.*,c.name AS customer_name,c.status AS customer_status,
+        c.support_email,c.plan_name,CASE WHEN m.enabled=1 THEN 1 ELSE 0 END AS mfa_enabled
+        FROM user_api_keys k
+        JOIN users u ON u.id=k.user_id
+        JOIN user_api_policies p ON p.user_id=u.id AND p.enabled=1
+        LEFT JOIN customers c ON c.id=u.customer_id
+        LEFT JOIN user_mfa m ON m.user_id=u.id
+        WHERE k.token_hash=? AND k.status='active' AND (k.expires_at IS NULL OR k.expires_at>?)`)
+        .get(hashToken(token, appSecret), now);
+      if (!row || row.status !== "active" || (row.role === "customer" && row.customer_status !== "active")) return null;
+      const user = publicUser(row);
+      const policy = apiPolicyFor(user.id);
+      const selections = apiKeySelections(row.api_key_id);
+      const allowedRoleGroups = new Set(apiGroupsForRole(user.role).map((group) => group.id));
+      const policyGroups = new Set(policy.groups);
+      const groups = selections.groups.filter((id) => allowedRoleGroups.has(id) && policyGroups.has(id));
+      const visible = apiVisibleResources(user);
+      const visibleIds = new Set(visible.map((resource) => resource.id));
+      const policyIds = new Set(allowedPolicyResourceIds(user, policy, visible));
+      const resourceIds = selections.resourceIds.filter((id) => visibleIds.has(id) && policyIds.has(id));
+      if (now - Number(row.api_key_last_used_at || 0) > 60_000) {
+        database.prepare("UPDATE user_api_keys SET last_used_at=?,last_ip=? WHERE id=?")
+          .run(now, String(ipAddress || "").slice(0, 80) || null, row.api_key_id);
+      }
+      return {
+        authType: "api_key",
+        idHash: `api-key:${row.api_key_id}`,
+        apiKeyId: row.api_key_id,
+        apiKeyName: row.api_key_name,
+        apiKeyGroups: groups,
+        apiKeyResourceIds: resourceIds,
+        csrfToken: null,
+        expiresAt: row.api_key_expires_at || null,
+        user,
+      };
+    },
     updateUser(id, input) {
       const row = database.prepare("SELECT * FROM users WHERE id=?").get(id);
       if (!row) throw problem("User does not exist", "user_not_found", 404);
@@ -1615,7 +2170,17 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       }
       database.prepare("UPDATE users SET customer_id=?,display_name=?,role=?,status=?,updated_at=? WHERE id=?")
         .run(customerId, displayName, role, status, Date.now(), id);
-      if (status === "disabled") database.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
+      if (status === "disabled") {
+        const now = Date.now();
+        database.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
+        database.prepare(`UPDATE api_device_sessions SET revoked_at=?,revoked_reason='account_disabled'
+          WHERE user_id=? AND revoked_at IS NULL`).run(now, id);
+        database.prepare(`UPDATE api_refresh_tokens SET status='revoked'
+          WHERE session_id IN (SELECT id FROM api_device_sessions WHERE user_id=?) AND status='active'`).run(id);
+        database.prepare(`UPDATE user_api_keys SET status='revoked',revoked_at=COALESCE(revoked_at,?),
+          revoked_reason=COALESCE(revoked_reason,'account_disabled'),updated_at=?
+          WHERE user_id=? AND status='active'`).run(now, now, id);
+      }
       return publicUser(getUserRow.get(id));
     },
     deleteUser(id) {
@@ -1634,7 +2199,13 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     },
     async updatePassword(id, password, { revokeSessions = true } = {}) {
       database.prepare("UPDATE users SET password_hash=?,password_set=1,updated_at=? WHERE id=?").run(await hashPassword(password), Date.now(), id);
-      if (revokeSessions) database.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
+      if (revokeSessions) {
+        database.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
+        database.prepare(`UPDATE api_device_sessions SET revoked_at=?,revoked_reason='password_changed'
+          WHERE user_id=? AND revoked_at IS NULL`).run(Date.now(), id);
+        database.prepare(`UPDATE api_refresh_tokens SET status='revoked'
+          WHERE session_id IN (SELECT id FROM api_device_sessions WHERE user_id=?) AND status='active'`).run(id);
+      }
       database.prepare("UPDATE account_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL").run(Date.now(), id);
     },
 
@@ -2198,10 +2769,18 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       };
     },
 
-    listResources({ clusterId = null, customerId = null } = {}) {
-      if (customerId) return database.prepare(resourceSelect("WHERE a.customer_id=? AND a.status='active'")).all(customerId).map(publicResource);
-      if (clusterId) return database.prepare(resourceSelect("WHERE r.cluster_id=?")).all(clusterId).map(publicResource);
-      return database.prepare(resourceSelect()).all().map(publicResource).sort((left, right) =>
+    listResources({ clusterId = null, customerId = null, includeStale = false } = {}) {
+      const current = includeStale ? "" : " AND r.stale=0";
+      if (customerId) {
+        return database.prepare(resourceSelect(`WHERE a.customer_id=? AND a.status='active'${current}`))
+          .all(customerId).map(publicResource);
+      }
+      if (clusterId) {
+        return database.prepare(resourceSelect(`WHERE r.cluster_id=?${current}`))
+          .all(clusterId).map(publicResource);
+      }
+      const where = includeStale ? "" : "WHERE r.stale=0";
+      return database.prepare(resourceSelect(where)).all().map(publicResource).sort((left, right) =>
         left.clusterName.localeCompare(right.clusterName) || left.node.localeCompare(right.node) || left.vmid - right.vmid);
     },
     getResource: (id) => publicResource(getResourceRow.get(id)),
@@ -2211,7 +2790,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     },
     assignResource({ customerId, resourceId, displayName = null, permissions = DEFAULT_PERMISSIONS, snapshotLimit, alertPolicy }) {
       if (!getCustomerRow.get(customerId)) throw problem("Customer does not exist", "customer_not_found", 404);
-      if (!getResourceRow.get(resourceId)) throw problem("Resource does not exist", "resource_not_found", 404);
+      const target = getResourceRow.get(resourceId);
+      if (!target || target.stale) throw problem("Resource does not exist", "resource_not_found", 404);
       const existing = database.prepare("SELECT * FROM customer_resource_assignments WHERE resource_id=?").get(resourceId);
       if (existing?.customer_id !== customerId && database.prepare("SELECT 1 FROM iso_mounts WHERE resource_id=? AND status='active' LIMIT 1").get(resourceId)) {
         throw problem("Eject the mounted customer ISO before reassigning this resource", "resource_iso_mounted", 409);
@@ -2275,6 +2855,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     authorizeResource(customerId, resourceId, permission) {
       if (!ASSIGNMENT_PERMISSIONS.includes(permission)) return null;
       const row = database.prepare(`${resourceSelect(`WHERE r.id=? AND a.customer_id=? AND a.status='active'
+        AND r.stale=0
         AND EXISTS (SELECT 1 FROM assignment_permissions p WHERE p.assignment_id=a.id AND p.permission=? AND p.allowed=1)`)}`).get(resourceId, customerId, permission);
       return publicResource(row);
     },
@@ -2599,6 +3180,68 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     markAllNotificationsRead(userId) {
       return database.prepare("UPDATE notifications SET read_at=? WHERE user_id=? AND in_app_visible=1 AND read_at IS NULL")
         .run(Date.now(), userId).changes;
+    },
+    registerPushDevice(userId, {
+      token,
+      platform = "ios",
+      environment = "production",
+      appVersion = "",
+    }) {
+      if (!getUserRow.get(userId)) throw problem("User does not exist", "user_not_found", 404);
+      const cleanToken = String(token || "").trim().toLowerCase();
+      if (!/^[a-f0-9]{64,200}$/.test(cleanToken)) {
+        throw problem("The push device token is invalid", "invalid_push_token");
+      }
+      if (platform !== "ios" || !["sandbox", "production"].includes(environment)) {
+        throw problem("The push device registration is invalid", "invalid_push_device");
+      }
+      const tokenHash = hashToken(cleanToken, appSecret);
+      const existing = database.prepare("SELECT * FROM mobile_push_devices WHERE token_hash=?").get(tokenHash);
+      const id = existing?.id || randomToken(18);
+      const now = Date.now();
+      database.prepare(`INSERT INTO mobile_push_devices
+        (id,user_id,token_hash,token_encrypted,platform,environment,app_version,status,failure_reason,last_registered_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,'active',NULL,?,?,?)
+        ON CONFLICT(token_hash) DO UPDATE SET
+          user_id=excluded.user_id,token_encrypted=excluded.token_encrypted,platform=excluded.platform,
+          environment=excluded.environment,app_version=excluded.app_version,status='active',
+          failure_reason=NULL,last_registered_at=excluded.last_registered_at,updated_at=excluded.updated_at`)
+        .run(
+          id,
+          userId,
+          tokenHash,
+          encryptSecret(cleanToken, appSecret),
+          platform,
+          environment,
+          String(appVersion || "").trim().slice(0, 40) || null,
+          now,
+          existing?.created_at || now,
+          now,
+        );
+      return { id, registered: true };
+    },
+    unregisterPushDevice(userId, token) {
+      const tokenHash = hashToken(String(token || "").trim().toLowerCase(), appSecret);
+      return Boolean(database.prepare("DELETE FROM mobile_push_devices WHERE user_id=? AND token_hash=?")
+        .run(userId, tokenHash).changes);
+    },
+    listPushDevices(userId) {
+      return database.prepare(`SELECT * FROM mobile_push_devices
+        WHERE user_id=? AND status='active' ORDER BY updated_at DESC`).all(userId).map((row) => ({
+        id: row.id,
+        token: decryptSecret(row.token_encrypted, appSecret),
+        platform: row.platform,
+        environment: row.environment,
+        appVersion: row.app_version || null,
+      }));
+    },
+    markPushDeviceSent(id) {
+      database.prepare("UPDATE mobile_push_devices SET last_sent_at=?,updated_at=? WHERE id=?")
+        .run(Date.now(), Date.now(), id);
+    },
+    disablePushDevice(id, reason = "delivery_failed") {
+      database.prepare(`UPDATE mobile_push_devices SET status='disabled',failure_reason=?,updated_at=?
+        WHERE id=?`).run(String(reason).slice(0, 120), Date.now(), id);
     },
 
     createMaintenanceEvent(input, { userId = null } = {}) {
@@ -3268,6 +3911,10 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
           .run(passwordHash, now, userId);
         database.prepare("UPDATE account_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL").run(now, userId);
         database.prepare("DELETE FROM sessions WHERE user_id=?").run(userId);
+        database.prepare(`UPDATE api_device_sessions SET revoked_at=?,revoked_reason='account_token_completed'
+          WHERE user_id=? AND revoked_at IS NULL`).run(now, userId);
+        database.prepare(`UPDATE api_refresh_tokens SET status='revoked'
+          WHERE session_id IN (SELECT id FROM api_device_sessions WHERE user_id=?) AND status='active'`).run(userId);
         database.exec("COMMIT");
       } catch (error) {
         database.exec("ROLLBACK");
@@ -3388,6 +4035,201 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       return row;
     },
 
+    createApiDeviceSession({
+      userId,
+      accessTtlMs,
+      refreshTtlMs,
+      deviceName = "Nimbus mobile device",
+      platform = "other",
+      appVersion = null,
+      ipAddress = null,
+      userAgent = null,
+      maxSessions = 10,
+    }) {
+      const user = getUserRow.get(userId);
+      if (!user || user.status !== "active" || (user.role === "customer" && user.customer_status !== "active")) {
+        throw problem("Account is not available", "authentication_required", 401);
+      }
+      const normalizedDeviceName = String(deviceName || "Nimbus mobile device").trim().slice(0, 100);
+      const normalizedPlatform = String(platform || "other").toLowerCase();
+      if (!normalizedDeviceName) throw problem("Device name is required", "invalid_device");
+      if (!["ios", "android", "desktop", "other"].includes(normalizedPlatform)) {
+        throw problem("Device platform is invalid", "invalid_device");
+      }
+      const now = Date.now();
+      const id = randomToken(18);
+      const accessToken = `nmb_at_${randomToken(32)}`;
+      const refreshToken = `nmb_rt_${randomToken(48)}`;
+      const accessExpiresAt = now + Number(accessTtlMs);
+      const refreshExpiresAt = now + Number(refreshTtlMs);
+      if (!Number.isSafeInteger(accessExpiresAt) || !Number.isSafeInteger(refreshExpiresAt)
+        || accessExpiresAt <= now || refreshExpiresAt <= accessExpiresAt) {
+        throw problem("API token lifetime is invalid", "invalid_token_lifetime", 500);
+      }
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        expireApiDeviceSessions(now);
+        database.prepare(`INSERT INTO api_device_sessions
+          (id,user_id,access_token_hash,device_name,platform,app_version,ip_address,user_agent,
+           access_expires_at,refresh_expires_at,created_at,last_seen_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          id,
+          userId,
+          hashToken(accessToken, appSecret),
+          normalizedDeviceName,
+          normalizedPlatform,
+          String(appVersion || "").trim().slice(0, 60) || null,
+          String(ipAddress || "").slice(0, 80) || null,
+          String(userAgent || "").slice(0, 300) || null,
+          accessExpiresAt,
+          refreshExpiresAt,
+          now,
+          now,
+        );
+        database.prepare(`INSERT INTO api_refresh_tokens
+          (token_hash,session_id,status,expires_at,created_at)
+          VALUES (?,?,'active',?,?)`).run(hashToken(refreshToken, appSecret), id, refreshExpiresAt, now);
+        const limit = Math.max(1, Math.min(100, Number(maxSessions) || 10));
+        const older = database.prepare(`SELECT id FROM api_device_sessions
+          WHERE user_id=? AND revoked_at IS NULL
+          ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET ?`).all(userId, limit);
+        for (const row of older) revokeApiDeviceSessionRow(row.id, "session_limit", now);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return {
+        tokenType: "Bearer",
+        accessToken,
+        accessTokenExpiresAt: accessExpiresAt,
+        refreshToken,
+        refreshTokenExpiresAt: refreshExpiresAt,
+        session: publicApiDeviceSession(database.prepare("SELECT * FROM api_device_sessions WHERE id=?").get(id), `mobile:${id}`),
+      };
+    },
+    getApiAccessSession(accessToken) {
+      if (!String(accessToken || "").startsWith("nmb_at_") || String(accessToken).length > 200) return null;
+      const now = Date.now();
+      const row = database.prepare(`SELECT d.id AS api_session_id,d.access_expires_at,d.refresh_expires_at,
+        d.last_seen_at AS api_last_seen_at,u.*,c.name AS customer_name,c.status AS customer_status,
+        c.support_email,c.plan_name,CASE WHEN m.enabled=1 THEN 1 ELSE 0 END AS mfa_enabled
+        FROM api_device_sessions d
+        JOIN users u ON u.id=d.user_id
+        LEFT JOIN customers c ON c.id=u.customer_id
+        LEFT JOIN user_mfa m ON m.user_id=u.id
+        WHERE d.access_token_hash=? AND d.revoked_at IS NULL
+          AND d.access_expires_at>? AND d.refresh_expires_at>?`)
+        .get(hashToken(accessToken, appSecret), now, now);
+      if (!row || row.status !== "active" || (row.role === "customer" && row.customer_status !== "active")) return null;
+      if (now - Number(row.api_last_seen_at || 0) > 60_000) {
+        database.prepare("UPDATE api_device_sessions SET last_seen_at=? WHERE id=?").run(now, row.api_session_id);
+      }
+      return {
+        authType: "bearer",
+        idHash: `mobile:${row.api_session_id}`,
+        mobileSessionId: row.api_session_id,
+        csrfToken: null,
+        expiresAt: row.access_expires_at,
+        refreshExpiresAt: row.refresh_expires_at,
+        user: publicUser(row),
+      };
+    },
+    rotateApiRefreshToken(refreshToken, {
+      accessTtlMs,
+      ipAddress = null,
+      userAgent = null,
+    } = {}) {
+      if (!String(refreshToken || "").startsWith("nmb_rt_") || String(refreshToken).length > 260) {
+        throw problem("Refresh token is invalid", "invalid_refresh_token", 401);
+      }
+      const now = Date.now();
+      const tokenHash = hashToken(refreshToken, appSecret);
+      const nextAccessToken = `nmb_at_${randomToken(32)}`;
+      const nextRefreshToken = `nmb_rt_${randomToken(48)}`;
+      let result = null;
+      let failure = null;
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const row = database.prepare(`SELECT
+          r.token_hash,r.status AS refresh_status,r.expires_at AS token_expires_at,
+          d.*,u.status AS user_status,u.role,c.status AS customer_status
+          FROM api_refresh_tokens r
+          JOIN api_device_sessions d ON d.id=r.session_id
+          JOIN users u ON u.id=d.user_id
+          LEFT JOIN customers c ON c.id=u.customer_id
+          WHERE r.token_hash=?`).get(tokenHash);
+        if (!row) {
+          failure = problem("Refresh token is invalid", "invalid_refresh_token", 401);
+        } else if (row.refresh_status === "rotated") {
+          revokeApiDeviceSessionRow(row.id, "refresh_token_reuse", now);
+          failure = problem("Refresh token reuse was detected and the device session was revoked", "refresh_token_reused", 401);
+        } else if (row.refresh_status !== "active" || row.revoked_at
+          || Number(row.token_expires_at) <= now || Number(row.refresh_expires_at) <= now
+          || row.user_status !== "active" || (row.role === "customer" && row.customer_status !== "active")) {
+          revokeApiDeviceSessionRow(row.id, "refresh_token_invalid", now);
+          failure = problem("Refresh token is invalid", "invalid_refresh_token", 401);
+        } else {
+          const accessExpiresAt = Math.min(now + Number(accessTtlMs), Number(row.refresh_expires_at));
+          if (!Number.isSafeInteger(accessExpiresAt) || accessExpiresAt <= now) {
+            revokeApiDeviceSessionRow(row.id, "refresh_token_expired", now);
+            failure = problem("Refresh token is invalid", "invalid_refresh_token", 401);
+          } else {
+          database.prepare("UPDATE api_refresh_tokens SET status='rotated',used_at=? WHERE token_hash=?")
+            .run(now, tokenHash);
+          database.prepare(`UPDATE api_device_sessions SET
+            access_token_hash=?,access_expires_at=?,last_seen_at=?,rotated_at=?,ip_address=?,user_agent=?
+            WHERE id=?`).run(
+            hashToken(nextAccessToken, appSecret),
+            accessExpiresAt,
+            now,
+            now,
+            String(ipAddress || row.ip_address || "").slice(0, 80) || null,
+            String(userAgent || row.user_agent || "").slice(0, 300) || null,
+            row.id,
+          );
+          database.prepare(`INSERT INTO api_refresh_tokens
+            (token_hash,session_id,status,expires_at,created_at)
+            VALUES (?,?,'active',?,?)`).run(
+            hashToken(nextRefreshToken, appSecret),
+            row.id,
+            row.refresh_expires_at,
+            now,
+          );
+          result = {
+            tokenType: "Bearer",
+            accessToken: nextAccessToken,
+            accessTokenExpiresAt: accessExpiresAt,
+            refreshToken: nextRefreshToken,
+            refreshTokenExpiresAt: row.refresh_expires_at,
+            session: publicApiDeviceSession(
+              database.prepare("SELECT * FROM api_device_sessions WHERE id=?").get(row.id),
+              `mobile:${row.id}`,
+            ),
+          };
+          }
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      if (failure) throw failure;
+      return result;
+    },
+    listApiDeviceSessions(userId, { currentIdHash = null } = {}) {
+      expireApiDeviceSessions();
+      return database.prepare(`SELECT * FROM api_device_sessions
+        WHERE user_id=? AND revoked_at IS NULL AND refresh_expires_at>?
+        ORDER BY last_seen_at DESC`).all(userId, Date.now())
+        .map((row) => publicApiDeviceSession(row, currentIdHash));
+    },
+    revokeApiDeviceSession(userId, sessionId, reason = "user_revoked") {
+      const normalized = String(sessionId || "").replace(/^mobile:/, "");
+      const row = database.prepare("SELECT id FROM api_device_sessions WHERE id=? AND user_id=?").get(normalized, userId);
+      return row ? revokeApiDeviceSessionRow(row.id, reason) : false;
+    },
+
     createSession({ userId, ttlMs, ipAddress = null, userAgent = null, maxSessions = null }) {
       const token = randomToken();
       const csrfToken = randomToken(24);
@@ -3428,17 +4270,35 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     deleteSession(token) { if (token) database.prepare("DELETE FROM sessions WHERE id_hash=?").run(hashToken(token, appSecret)); },
     listSessions(userId, { currentIdHash = null } = {}) {
       database.prepare("DELETE FROM sessions WHERE expires_at<=?").run(Date.now());
-      return database.prepare("SELECT * FROM sessions WHERE user_id=? ORDER BY last_seen_at DESC")
+      const browser = database.prepare("SELECT * FROM sessions WHERE user_id=? ORDER BY last_seen_at DESC")
         .all(userId).map((row) => publicSession(row, currentIdHash));
+      const devices = this.listApiDeviceSessions(userId, { currentIdHash });
+      return [...browser, ...devices].sort((left, right) => Number(right.lastSeenAt) - Number(left.lastSeenAt));
     },
     deleteUserSession(userId, idHash) {
+      if (String(idHash || "").startsWith("mobile:")) {
+        return this.revokeApiDeviceSession(userId, idHash, "user_revoked");
+      }
       return database.prepare("DELETE FROM sessions WHERE user_id=? AND id_hash=?").run(userId, idHash).changes > 0;
     },
     deleteOtherSessions(userId, currentIdHash) {
-      return database.prepare("DELETE FROM sessions WHERE user_id=? AND id_hash<>?").run(userId, currentIdHash).changes;
+      const mobileCurrent = String(currentIdHash || "").startsWith("mobile:")
+        ? String(currentIdHash).slice("mobile:".length)
+        : null;
+      const browserChanges = mobileCurrent
+        ? database.prepare("DELETE FROM sessions WHERE user_id=?").run(userId).changes
+        : database.prepare("DELETE FROM sessions WHERE user_id=? AND id_hash<>?").run(userId, currentIdHash).changes;
+      const mobileRows = mobileCurrent
+        ? database.prepare("SELECT id FROM api_device_sessions WHERE user_id=? AND id<>? AND revoked_at IS NULL").all(userId, mobileCurrent)
+        : database.prepare("SELECT id FROM api_device_sessions WHERE user_id=? AND revoked_at IS NULL").all(userId);
+      for (const row of mobileRows) revokeApiDeviceSessionRow(row.id, "other_sessions_revoked");
+      return browserChanges + mobileRows.length;
     },
     revokeUserSessions(userId) {
-      return database.prepare("DELETE FROM sessions WHERE user_id=?").run(userId).changes;
+      const browserChanges = database.prepare("DELETE FROM sessions WHERE user_id=?").run(userId).changes;
+      const mobileRows = database.prepare("SELECT id FROM api_device_sessions WHERE user_id=? AND revoked_at IS NULL").all(userId);
+      for (const row of mobileRows) revokeApiDeviceSessionRow(row.id, "account_sessions_revoked");
+      return browserChanges + mobileRows.length;
     },
 
     getSecurityPolicy() {
@@ -3506,6 +4366,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     },
     getSecurityCenter({ limit = 100 } = {}) {
       database.prepare("DELETE FROM sessions WHERE expires_at<=?").run(Date.now());
+      expireApiDeviceSessions();
       const policy = this.getSecurityPolicy();
       const accounts = database.prepare(`SELECT
         COUNT(*) AS active_accounts,
@@ -3517,13 +4378,16 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
         FROM users u LEFT JOIN user_mfa m ON m.user_id=u.id
         WHERE u.status='active'`).get();
       const since = Date.now() - 24 * 60 * 60 * 1000;
-      const successfulLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action='auth.login' AND created_at>=?").get(since).count;
+      const successfulLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action IN ('auth.login','auth.api_login') AND created_at>=?").get(since).count;
       const failedLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action IN ('auth.login_failed','auth.mfa_failed') AND created_at>=?").get(since).count;
       const activeAccounts = Number(accounts.active_accounts || 0);
       const mfaProtected = Number(accounts.mfa_protected || 0);
       const requiredPending =
         (policy.requireAdminMfa ? Number(accounts.admins || 0) - Number(accounts.protected_admins || 0) : 0)
         + (policy.requireCustomerMfa ? Number(accounts.customers || 0) - Number(accounts.protected_customers || 0) : 0);
+      const browserSessions = Number(database.prepare("SELECT COUNT(*) AS count FROM sessions").get().count || 0);
+      const apiDeviceSessions = Number(database.prepare(`SELECT COUNT(*) AS count FROM api_device_sessions
+        WHERE revoked_at IS NULL AND refresh_expires_at>?`).get(Date.now()).count || 0);
       return {
         policy,
         summary: {
@@ -3531,7 +4395,9 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
           mfaProtected,
           mfaCoverage: activeAccounts ? Math.round(mfaProtected / activeAccounts * 100) : 100,
           requiredPending,
-          activeSessions: Number(database.prepare("SELECT COUNT(*) AS count FROM sessions").get().count || 0),
+          activeSessions: browserSessions + apiDeviceSessions,
+          browserSessions,
+          apiDeviceSessions,
           successfulLogins24h: Number(successfulLogins || 0),
           failedLogins24h: Number(failedLogins || 0),
         },
@@ -3631,20 +4497,32 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       return database.prepare("SELECT * FROM api_tasks WHERE id=?").get(id);
     },
 
-    createConsoleSession({ userId, resourceId, ticket, port, ttlMs = 45_000 }) {
+    createConsoleSession({ userId, resourceId, ticket, port, consoleType = "graphical", consoleUser = null, ttlMs = 45_000 }) {
       const token = randomToken(24);
       const now = Date.now();
+      const type = consoleType === "terminal" ? "terminal" : "graphical";
       database.prepare("DELETE FROM console_sessions WHERE expires_at<=? OR used_at IS NOT NULL").run(now);
-      database.prepare("INSERT INTO console_sessions (id_hash,user_id,resource_id,ticket_encrypted,port,expires_at,created_at) VALUES (?,?,?,?,?,?,?)")
-        .run(hashToken(token, appSecret), userId, resourceId, encryptSecret(ticket, appSecret), Number(port), now + ttlMs, now);
+      database.prepare("INSERT INTO console_sessions (id_hash,user_id,resource_id,ticket_encrypted,port,console_type,console_user,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(hashToken(token, appSecret), userId, resourceId, encryptSecret(ticket, appSecret), Number(port), type, consoleUser, now + ttlMs, now);
       return { token, expiresAt: now + ttlMs };
     },
     getConsoleSession(token, userId) {
-      const row = database.prepare("SELECT cs.resource_id,cs.ticket_encrypted,cs.expires_at,r.cluster_id,r.node,r.type,r.vmid,r.name FROM console_sessions cs JOIN resources r ON r.id=cs.resource_id WHERE cs.id_hash=? AND cs.user_id=? AND cs.expires_at>? AND cs.used_at IS NULL")
+      const row = database.prepare("SELECT cs.resource_id,cs.ticket_encrypted,cs.console_type,cs.console_user,cs.expires_at,r.cluster_id,r.node,r.type,r.vmid,r.name FROM console_sessions cs JOIN resources r ON r.id=cs.resource_id WHERE cs.id_hash=? AND cs.user_id=? AND cs.expires_at>? AND cs.used_at IS NULL")
         .get(hashToken(token, appSecret), userId, Date.now());
       return row ? {
         resourceId: row.resource_id, expiresAt: row.expires_at, clusterId: row.cluster_id,
         node: row.node, type: row.type, vmid: row.vmid, name: row.name,
+        consoleType: row.console_type, consoleUser: row.console_user,
+        password: decryptSecret(row.ticket_encrypted, appSecret),
+      } : null;
+    },
+    getConsoleSessionByToken(token) {
+      const row = database.prepare("SELECT cs.user_id,cs.resource_id,cs.ticket_encrypted,cs.console_type,cs.console_user,cs.expires_at,r.cluster_id,r.node,r.type,r.vmid,r.name FROM console_sessions cs JOIN resources r ON r.id=cs.resource_id WHERE cs.id_hash=? AND cs.expires_at>? AND cs.used_at IS NULL")
+        .get(hashToken(token, appSecret), Date.now());
+      return row ? {
+        userId: row.user_id, resourceId: row.resource_id, expiresAt: row.expires_at, clusterId: row.cluster_id,
+        node: row.node, type: row.type, vmid: row.vmid, name: row.name,
+        consoleType: row.console_type, consoleUser: row.console_user,
         password: decryptSecret(row.ticket_encrypted, appSecret),
       } : null;
     },

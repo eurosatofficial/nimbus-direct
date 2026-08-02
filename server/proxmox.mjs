@@ -128,6 +128,12 @@ function bootableQemuDevices(config = {}) {
   return [...new Set([bootDisk, ...disks, ...networks].filter((entry) => /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(entry)))];
 }
 
+function qemuSerialDisplay(value) {
+  const display = typeof value === "object" && value !== null ? value.type : value;
+  const type = String(display || "").split(",", 1)[0].trim().toLowerCase();
+  return /^serial[0-3]$/.test(type) ? type : null;
+}
+
 async function mapLimit(items, limit, mapper) {
   const result = new Array(items.length);
   let cursor = 0;
@@ -888,10 +894,31 @@ export class ProxmoxClient {
   }
 
   async createConsoleTicket(vm) {
-    const body = new URLSearchParams({ websocket: "1" });
-    const result = await this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/vncproxy`, { method: "POST", body });
+    let consoleType = vm.type === "lxc" ? "terminal" : "graphical";
+    let serial = null;
+    if (vm.type === "qemu") {
+      try {
+        const config = await this.request(`/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config?current=1`);
+        serial = qemuSerialDisplay(config?.vga);
+        if (serial) consoleType = "terminal";
+      } catch {
+        // A regular QEMU display remains safely usable through noVNC when
+        // display metadata is unavailable to a narrowly scoped API token.
+      }
+    }
+    const body = new URLSearchParams();
+    if (consoleType === "graphical") body.set("websocket", "1");
+    if (serial) body.set("serial", serial);
+    const proxy = consoleType === "terminal" ? "termproxy" : "vncproxy";
+    const result = await this.request(`/nodes/${encodeURIComponent(vm.node)}/${vm.type}/${vm.vmid}/${proxy}`, { method: "POST", body });
     if (!result?.ticket || !result?.port) throw new ProxmoxError("Proxmox returned an invalid console ticket", { code: "proxmox_console_invalid", status: 502 });
-    return { ticket: result.ticket, port: Number(result.port), user: result.user || null };
+    return {
+      ticket: result.ticket,
+      port: Number(result.port),
+      user: result.user || null,
+      consoleType,
+      serial,
+    };
   }
 
   async getTaskStatus(node, upid) {

@@ -70,6 +70,45 @@ test("request maps authentication, timeout, and missing-configuration failures",
   await assert.rejects(() => insecureClient.request("/version"), (error) => error.code === "proxmox_https_required" && error.status === 503);
 });
 
+test("console tickets automatically select termproxy for LXC and serial-display QEMU guests", async () => {
+  const calls = [];
+  const client = mockClient({
+    "/nodes/pve-a/lxc/101/termproxy": jsonResponse({ ticket: "PVEVNC:lxc", port: 5900, user: "nimbus@pve" }),
+    "/nodes/pve-a/qemu/201/config?current=1": jsonResponse({ vga: "serial1", serial1: "socket" }),
+    "/nodes/pve-a/qemu/201/termproxy": jsonResponse({ ticket: "PVEVNC:qemu-serial", port: 5901, user: "nimbus@pve" }),
+    "/nodes/pve-a/qemu/202/config?current=1": jsonResponse({ vga: "std" }),
+    "/nodes/pve-a/qemu/202/vncproxy": jsonResponse({ ticket: "PVEVNC:qemu-vga", port: 5902, user: "nimbus@pve" }),
+  }, calls);
+
+  const lxc = await client.createConsoleTicket({ type: "lxc", node: "pve-a", vmid: 101 });
+  assert.deepEqual(lxc, {
+    ticket: "PVEVNC:lxc", port: 5900, user: "nimbus@pve", consoleType: "terminal", serial: null,
+  });
+  const serial = await client.createConsoleTicket({ type: "qemu", node: "pve-a", vmid: 201 });
+  assert.equal(serial.consoleType, "terminal");
+  assert.equal(serial.serial, "serial1");
+  const graphical = await client.createConsoleTicket({ type: "qemu", node: "pve-a", vmid: 202 });
+  assert.equal(graphical.consoleType, "graphical");
+  assert.equal(graphical.serial, null);
+
+  const lxcBody = String(calls.find((call) => call.key.endsWith("/lxc/101/termproxy")).options.body);
+  const serialBody = String(calls.find((call) => call.key.endsWith("/qemu/201/termproxy")).options.body);
+  const graphicalBody = String(calls.find((call) => call.key.endsWith("/qemu/202/vncproxy")).options.body);
+  assert.equal(lxcBody, "");
+  assert.equal(serialBody, "serial=serial1");
+  assert.equal(graphicalBody, "websocket=1");
+});
+
+test("QEMU console safely falls back to noVNC when display metadata is unavailable", async () => {
+  const client = mockClient({
+    "/nodes/pve-a/qemu/203/config?current=1": jsonResponse(null, 403),
+    "/nodes/pve-a/qemu/203/vncproxy": jsonResponse({ ticket: "PVEVNC:fallback", port: 5903, user: "nimbus@pve" }),
+  });
+  const ticket = await client.createConsoleTicket({ type: "qemu", node: "pve-a", vmid: 203 });
+  assert.equal(ticket.consoleType, "graphical");
+  assert.equal(ticket.ticket, "PVEVNC:fallback");
+});
+
 test("guest inventory uses cluster resources without any Proxmox pool lookup", async () => {
   const calls = [];
   const client = mockClient({

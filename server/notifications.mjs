@@ -75,6 +75,7 @@ export function notificationEmailTemplate(event, resource) {
 export function createNotificationService({
   store,
   email,
+  push = null,
   log = () => {},
   now = () => Date.now(),
 } = {}) {
@@ -115,6 +116,16 @@ export function createNotificationService({
             error: error.code || error.message,
           });
         }
+      }
+      if (sendInApp && push?.configured) {
+        void push.sendUser(user.id, {
+          title: created.event.title,
+          message: created.event.message,
+          type: created.event.type,
+          resourceId: created.event.resourceId,
+          notificationId: delivery.id,
+          collapseId: created.event.eventId,
+        });
       }
     }
     return { event: created.event, created: true, deliveries };

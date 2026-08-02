@@ -71,9 +71,16 @@ test("notification service delivers once per user preference and queues the bran
     }, { userId: admin.id });
     store.updateNotificationPreferences(user.id, { emailEnabled: true });
     let processCalls = 0;
+    const pushed = [];
     const service = createNotificationService({
       store,
       email: { async processDue() { processCalls += 1; } },
+      push: {
+        configured: true,
+        async sendUser(userId, notification) {
+          pushed.push({ userId, notification });
+        },
+      },
     });
     const result = await service.emitEvent({
       customerId: customer.id,
@@ -91,6 +98,10 @@ test("notification service delivers once per user preference and queues the bran
     assert.equal(store.listEmailJobs().total, 1);
     assert.equal(store.listEmailJobs().items[0].category, "notification");
     assert.equal(processCalls, 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(pushed.length, 1);
+    assert.equal(pushed[0].userId, user.id);
+    assert.equal(pushed[0].notification.resourceId, resourceId);
     assert.equal((await service.emitEvent({
       customerId: customer.id,
       resourceId,

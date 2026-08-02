@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <title>Secure console · Nimbus Direct</title>
-    <link rel="stylesheet" href="/console.css?v=20260722-4" />
+    <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
+    <link rel="stylesheet" href="/console.css?v=20260802-1" />
   </head>
   <body>
     <header>
@@ -14,12 +15,22 @@
       <button id="closeButton">Close console</button>
     </header>
     <main>
-      <div class="console-head"><span id="resourceName">Secure console</span><small id="resourceMeta">Preparing connection…</small></div>
+      <div class="console-head">
+        <span id="resourceName">Secure console</span>
+        <div class="console-meta"><strong id="consoleType">Automatic console</strong><small id="resourceMeta">Preparing connection…</small></div>
+      </div>
+      <div class="terminal-tools" id="terminalTools" hidden aria-label="Terminal controls">
+        <button type="button" id="keyboardButton">Keyboard</button>
+        <button type="button" data-terminal-key="escape">Esc</button>
+        <button type="button" data-terminal-key="tab">Tab</button>
+        <button type="button" data-terminal-key="interrupt">Ctrl C</button>
+        <button type="button" id="pasteButton">Paste</button>
+      </div>
       <div class="screen" id="screen" role="application" aria-label="Virtual machine console">
         <div class="terminal" id="terminal"><span class="muted">Nimbus Direct secure console gateway</span><br><span class="muted">Waiting for the short-lived Proxmox ticket…</span></div>
       </div>
       <footer><span>Ticket expires in <strong id="countdown">—</strong></span><span>Credentials stay on the Nimbus server</span></footer>
     </main>
-    <script src="/console.js?v=20260722-4" type="module"></script>
+    <script src="/console.js?v=20260802-1" type="module"></script>
   </body>
 </html>

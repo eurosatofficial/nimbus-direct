@@ -8,7 +8,8 @@
     <title>Nimbus Direct</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20260726-06" />
+    <script src="/theme.js?v=20260731-07"></script>
+    <link rel="stylesheet" href="/styles.css?v=20260731-07" />
   </head>
   <body class="auth-pending">
     <a class="skip-link" href="#pageContent">Skip to content</a>
@@ -18,6 +19,9 @@
         <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
         <span class="brand-name">nimbus<span>direct</span></span>
       </div>
+      <button class="icon-button appearance-cycle auth-appearance" id="authAppearanceButton" type="button" aria-label="Appearance: System" title="Appearance: System">
+        <span aria-hidden="true">◐</span>
+      </button>
       <div class="auth-card">
         <span class="auth-icon" aria-hidden="true">⌁</span>
         <p class="eyebrow">Secure customer access</p>
@@ -109,6 +113,9 @@
               <span class="visually-hidden">Filter current view</span>
               <input id="globalSearch" type="search" placeholder="Filter this view" autocomplete="off" />
             </label>
+            <button class="icon-button appearance-cycle" id="appearanceButton" type="button" aria-label="Appearance: System" title="Appearance: System">
+              <span aria-hidden="true">◐</span>
+            </button>
             <button class="button secondary refresh-button" id="refreshButton" type="button"><span aria-hidden="true">↻</span><span class="refresh-copy">Refresh</span></button>
           </div>
         </header>
@@ -196,6 +203,6 @@
       <button class="icon-button" type="button" id="toastClose" aria-label="Dismiss message">×</button>
     </div>
 
-    <script src="/app.js?v=20260729-01" type="module"></script>
+    <script src="/app.js?v=20260731-07" type="module"></script>
   </body>
 </html>

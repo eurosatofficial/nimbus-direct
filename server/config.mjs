@@ -34,6 +34,27 @@ export function readConfig() {
   if (demoReadOnly && !allowDemoData) {
     throw new Error("DEMO_READ_ONLY requires ALLOW_DEMO_DATA=true");
   }
+  const apiAccessTokenTtlMs = integer(process.env.API_ACCESS_TOKEN_MINUTES, 15) * 60 * 1000;
+  const apiRefreshTokenTtlMs = integer(process.env.API_REFRESH_TOKEN_DAYS, 30) * 24 * 60 * 60 * 1000;
+  if (apiRefreshTokenTtlMs <= apiAccessTokenTtlMs) {
+    throw new Error("API_REFRESH_TOKEN_DAYS must be longer than API_ACCESS_TOKEN_MINUTES");
+  }
+  const apnsKeyId = String(process.env.APNS_KEY_ID || "").trim();
+  const apnsTeamId = String(process.env.APNS_TEAM_ID || "").trim();
+  const apnsTopic = String(process.env.APNS_TOPIC || "").trim();
+  const apnsPrivateKeyBase64 = String(process.env.APNS_PRIVATE_KEY_BASE64 || "").trim();
+  const apnsCredentials = [apnsKeyId, apnsTeamId, apnsPrivateKeyBase64];
+  if (apnsCredentials.some(Boolean) && (!apnsCredentials.every(Boolean) || !apnsTopic)) {
+    throw new Error("APNs requires APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC, and APNS_PRIVATE_KEY_BASE64");
+  }
+  let apnsPrivateKey = "";
+  if (apnsPrivateKeyBase64) {
+    try { apnsPrivateKey = Buffer.from(apnsPrivateKeyBase64, "base64").toString("utf8"); }
+    catch { throw new Error("APNS_PRIVATE_KEY_BASE64 is invalid"); }
+    if (!apnsPrivateKey.includes("BEGIN PRIVATE KEY")) {
+      throw new Error("APNS_PRIVATE_KEY_BASE64 does not contain an Apple .p8 private key");
+    }
+  }
   return {
     production,
     port: integer(process.env.PORT, 4173),
@@ -43,12 +64,23 @@ export function readConfig() {
     secureCookies: boolean(process.env.SESSION_COOKIE_SECURE, production),
     trustProxy: boolean(process.env.TRUST_PROXY, false),
     sessionTtlMs: integer(process.env.SESSION_TTL_HOURS, 12) * 60 * 60 * 1000,
+    apiAccessTokenTtlMs,
+    apiRefreshTokenTtlMs,
+    apiMaxDeviceSessions: integer(process.env.API_MAX_DEVICE_SESSIONS, 10),
     proxmoxTimeoutMs: integer(process.env.PROXMOX_REQUEST_TIMEOUT_MS, 12_000),
     syncIntervalMs: integer(process.env.RESOURCE_SYNC_SECONDS, 60) * 1000,
     isoMaxUploadBytes: integer(process.env.ISO_MAX_UPLOAD_MB, 8192) * 1024 * 1024,
     isoUploadTimeoutMs: integer(process.env.ISO_UPLOAD_TIMEOUT_MINUTES, 120) * 60 * 1000,
     emailSmtpTimeoutMs: integer(process.env.EMAIL_SMTP_TIMEOUT_SECONDS, 10) * 1000,
     emailQueueIntervalMs: integer(process.env.EMAIL_QUEUE_INTERVAL_SECONDS, 5) * 1000,
+    apns: {
+      enabled: apnsCredentials.every(Boolean) && Boolean(apnsTopic),
+      keyId: apnsKeyId,
+      teamId: apnsTeamId,
+      topic: apnsTopic,
+      privateKey: apnsPrivateKey,
+      timeoutMs: integer(process.env.APNS_TIMEOUT_SECONDS, 10) * 1000,
+    },
     allowDemoData,
     demoReadOnly,
     bootstrap: {

@@ -6,6 +6,7 @@ const KEYS = [
   "NODE_ENV", "APP_SECRET", "BOOTSTRAP_CUSTOMER_ID", "BOOTSTRAP_CUSTOMER_NAME",
   "BOOTSTRAP_SUPPORT_EMAIL", "BOOTSTRAP_PLAN_NAME", "PROXMOX_REQUEST_TIMEOUT_MS", "RESOURCE_SYNC_SECONDS",
   "ISO_MAX_UPLOAD_MB", "ISO_UPLOAD_TIMEOUT_MINUTES", "EMAIL_SMTP_TIMEOUT_SECONDS", "EMAIL_QUEUE_INTERVAL_SECONDS",
+  "API_ACCESS_TOKEN_MINUTES", "API_REFRESH_TOKEN_DAYS", "API_MAX_DEVICE_SESSIONS",
   "ALLOW_DEMO_DATA", "DEMO_READ_ONLY",
 ];
 
@@ -36,6 +37,9 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     ISO_UPLOAD_TIMEOUT_MINUTES: "45",
     EMAIL_SMTP_TIMEOUT_SECONDS: "12",
     EMAIL_QUEUE_INTERVAL_SECONDS: "7",
+    API_ACCESS_TOKEN_MINUTES: "20",
+    API_REFRESH_TOKEN_DAYS: "45",
+    API_MAX_DEVICE_SESSIONS: "7",
     ALLOW_DEMO_DATA: "true",
     DEMO_READ_ONLY: "true",
   }, () => {
@@ -49,6 +53,9 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     assert.equal(config.isoUploadTimeoutMs, 45 * 60 * 1000);
     assert.equal(config.emailSmtpTimeoutMs, 12_000);
     assert.equal(config.emailQueueIntervalMs, 7_000);
+    assert.equal(config.apiAccessTokenTtlMs, 20 * 60 * 1000);
+    assert.equal(config.apiRefreshTokenTtlMs, 45 * 24 * 60 * 60 * 1000);
+    assert.equal(config.apiMaxDeviceSessions, 7);
     assert.equal(config.allowDemoData, true);
     assert.equal(config.demoReadOnly, true);
     assert.equal("globalProxmoxTenantId" in config, false);
@@ -70,4 +77,13 @@ test("invalid timeouts and sync intervals fail at startup", () => {
     APP_SECRET: "a-production-secret-with-at-least-32-characters",
     PROXMOX_REQUEST_TIMEOUT_MS: "0",
   }, () => assert.throws(() => readConfig(), /Invalid positive integer/));
+});
+
+test("native refresh lifetime must exceed the access-token lifetime", () => {
+  withEnvironment({
+    NODE_ENV: "production",
+    APP_SECRET: "a-production-secret-with-at-least-32-characters",
+    API_ACCESS_TOKEN_MINUTES: String(60 * 24 * 31),
+    API_REFRESH_TOKEN_DAYS: "30",
+  }, () => assert.throws(() => readConfig(), /API_REFRESH_TOKEN_DAYS must be longer/));
 });

@@ -117,7 +117,7 @@ test("customer ISO boot and Snapshot Center workflows stay assignment-scoped", a
         resourceId: resource.id,
         snapshotLimit: 2,
         permissions: [
-          "view_status", "reboot", "iso_view", "iso_upload", "iso_mount", "iso_boot",
+          "view_status", "reboot", "console", "iso_view", "iso_upload", "iso_mount", "iso_boot",
           "snapshot_create", "snapshot_restore", "snapshot_delete",
         ],
         alertPolicy: {
@@ -172,6 +172,40 @@ test("customer ISO boot and Snapshot Center workflows stay assignment-scoped", a
     assert.equal(Object.keys(customerNetwork).length, customerDashboard.resources.length);
     assert.equal(customerNetwork[resource.id].primaryIp, resource.ip);
     assert.equal(customerNetwork[resource.id].source, "demo");
+    const consoleLaunch = (await request(`/api/v1/resources/${encodeURIComponent(resource.id)}/console`, {
+      method: "POST",
+      body: {},
+    })).payload;
+    assert.match(consoleLaunch.nativeLaunchUrl, /^\/api\/v1\/console\/native-launch\//);
+    assert.equal(consoleLaunch.console.type, resource.type === "lxc" ? "terminal" : "graphical");
+    assert.equal(consoleLaunch.console.label, resource.type === "lxc" ? "Terminal console" : "Graphical console");
+    const consoleToken = decodeURIComponent(consoleLaunch.nativeLaunchUrl.split("/").at(-1));
+    const nativeHandoff = await fetch(`${baseUrl}${consoleLaunch.nativeLaunchUrl}`, {
+      redirect: "manual",
+      headers: { Accept: "text/html" },
+    });
+    assert.equal(nativeHandoff.status, 303);
+    assert.equal(nativeHandoff.headers.get("location"), `/console.html?token=${encodeURIComponent(consoleToken)}`);
+    const nativeCookie = String(nativeHandoff.headers.get("set-cookie") || "").split(";")[0];
+    assert.match(nativeCookie, /^nimbus_console=/);
+    const nativeSession = await fetch(`${baseUrl}/api/v1/console/session/${encodeURIComponent(consoleToken)}`, {
+      headers: { Accept: "application/json", Cookie: nativeCookie },
+    });
+    assert.equal(nativeSession.status, 200);
+    const nativeSessionPayload = await nativeSession.json();
+    assert.equal(nativeSessionPayload.resource.vmid, resource.vmid);
+    assert.equal(nativeSessionPayload.console.type, resource.type === "lxc" ? "terminal" : "graphical");
+    assert.equal(nativeSessionPayload.credentials.user, "nimbus-demo@pve");
+    const xtermModule = await fetch(`${baseUrl}/vendor/xterm/lib/xterm.mjs`);
+    const xtermFitModule = await fetch(`${baseUrl}/vendor/xterm-fit/lib/addon-fit.mjs`);
+    assert.equal(xtermModule.status, 200);
+    assert.match(xtermModule.headers.get("content-type"), /^text\/javascript/);
+    assert.equal(xtermFitModule.status, 200);
+    assert.match(xtermFitModule.headers.get("content-type"), /^text\/javascript/);
+    const stolenSession = await fetch(`${baseUrl}/api/v1/console/session/${encodeURIComponent(consoleToken)}`, {
+      headers: { Accept: "application/json", Cookie: "nimbus_console=wrong-token" },
+    });
+    assert.equal(stolenSession.status, 401);
     const customerMaintenance = (await request("/api/v1/maintenance")).payload.maintenance;
     assert.equal(customerMaintenance.items[0].title, "Demo hypervisor maintenance");
     await request(`/api/v1/maintenance/${encodeURIComponent(customerMaintenance.items[0].deliveryId)}/read`, {

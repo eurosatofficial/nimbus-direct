@@ -7,9 +7,9 @@ The design never creates, reads, or depends on one Proxmox resource pool per cus
 ## 1. Overall architecture
 
 ```text
-Customer browser                    Administrator browser
-        |                                    |
-        +----------- HTTPS / secure cookie --+
+Customer browser         Native mobile app         Administrator browser
+        |                       |                            |
+        +-- secure cookie ------+-- HTTPS / bearer token ----+
                              |
                     Nimbus Direct server
                     +--------------------+
@@ -34,6 +34,8 @@ Customer browser                    Administrator browser
           - alerts/notifications     HTTPS :8006
           - MFA/recovery codes
           - account-link hashes
+          - API device sessions
+          - refresh-token history
           - operations telemetry
           - operations incidents
           - audit/tasks
@@ -58,6 +60,12 @@ Core tables:
 - `customer_resource_assignments`: exactly one current customer per resource, optional customer-facing name, snapshot limit, and status.
 - `assignment_permissions`: explicit allowed operations for one assignment.
 - `sessions`: opaque, secret-bound server sessions, CSRF tokens, source IP, and bounded user-agent metadata.
+- `api_device_sessions`: user/device identity, hashed current access token, fixed refresh expiry, activity metadata, and revocation state.
+- `api_refresh_tokens`: hashed single-use refresh-token history for atomic rotation, expiry, revocation, and reuse detection.
+- `user_api_policies`: administrator-defined per-user API enablement, key-count/lifetime ceilings, and no-expiry policy.
+- `user_api_policy_groups` / `user_api_policy_resources`: maximum stable permission groups and optional resource allowlist for one account.
+- `user_api_keys`: hash-only integration credentials, safe display hints, expiry, last-use metadata, and revocation history.
+- `user_api_key_groups` / `user_api_key_resources`: the narrower groups and individual resources selected by the user for one key.
 - `mfa_login_challenges`: hashed, five-minute, attempt-limited challenges that bridge password verification and session creation.
 - `security_policy`: singleton administrator/customer MFA requirements, optional successful-login email setting, and update attribution.
 - `account_tokens`: `APP_SECRET`-keyed token hash, invitation/password-reset purpose, target user, expiration, single-use/revocation state, creator, and bounded request IP. Raw tokens are never stored in this table.
@@ -113,6 +121,23 @@ The canonical resource ID is `cluster-id:type:vmid`. The node is stored and upda
 
 Authentication uses scrypt password hashing and opaque HTTP-only sessions. Optional TOTP authentication is compatible with standard authenticator apps. A password-valid account with MFA enabled receives only a short-lived challenge; Nimbus creates the real session only after a current six-digit code or an unused recovery code succeeds. TOTP secrets are encrypted with `APP_SECRET`, while recovery codes are normalized, secret-bound hashed, displayed once, and atomically consumed. Administrators have platform scope. Customer users must belong to one active customer account.
 
+Native clients authenticate against the same account and TOTP services but
+receive an opaque short-lived `nmb_at_` bearer access token and a longer-lived
+`nmb_rt_` refresh token. Both are stored only as `APP_SECRET`-bound hashes.
+Refresh is an atomic single-use rotation: the old history row becomes
+`rotated`, a new access/refresh pair is committed to the same device session,
+and submitting a rotated token again revokes that entire device session. The
+fixed refresh expiry cannot be extended by rotation. Password changes, account
+or customer disablement/deletion, invitation/reset completion, administrator
+2FA resets, and explicit session controls revoke native tokens alongside
+browser sessions.
+
+Bearer authentication changes only session verification. It enters the same
+role, customer, assignment, permission, action-rate, task, and audit path used
+by the browser. Cookie requests retain session-bound CSRF and same-origin
+validation. Bearer requests do not use CSRF because credentials are supplied in
+the `Authorization` header and Nimbus does not enable browser CORS.
+
 The durable security policy can independently require MFA for administrator and customer roles. A password-valid account covered by policy but missing MFA receives a restricted enrollment session. The backend permits only the redacted dashboard plus TOTP setup/confirmation until enrollment succeeds; it denies administrative, resource, network, account, and other customer routes. Policy evaluation occurs on every request, and disabling MFA is rejected while the authenticated user's role remains covered.
 
 Administrators can create a user in pending-password state and send a 30-minute invitation. Invitations and password resets share a purpose-bound, single-use account-token service. The email contains the raw random token inside an encrypted queued body; SQLite stores only its `APP_SECRET`-keyed hash. Resending invalidates the previous invitation, completion consumes every outstanding account token and revokes every session, and password recovery preserves TOTP configuration. Forgot-password responses are intentionally identical for eligible, unknown, disabled, and pending-invitation addresses. Account-link validation/completion and request generation use independent rate limits.
@@ -147,7 +172,7 @@ The service layer uses the official `/api2/json` endpoints for:
 - `POST /nodes/{node}/{type}/{vmid}/status/{action}` for power actions.
 - Guest-agent/LXC interface endpoints for live network information, with allowlisted static QEMU Cloud-Init and LXC configuration fallback.
 - Snapshot list/create/rollback/delete endpoints.
-- `POST .../vncproxy` for short-lived console tickets.
+- `POST .../termproxy` for LXC and serial-display QEMU terminal tickets, or `POST .../vncproxy` for graphical QEMU console tickets.
 - `GET /nodes/{node}/tasks/{upid}/status` for asynchronous task status.
 - `GET /nodes/{node}/storage?content=iso&enabled=1` for administrator storage discovery and node availability checks.
 - `POST /nodes/{node}/storage/{storage}/upload` for streamed multipart ISO upload.
@@ -207,7 +232,7 @@ Power operations use idempotency keys and return either an immediate result or a
 
 For assignments with snapshot permissions, Snapshot Center lists normalized Proxmox recovery points and exposes create, restore, and delete independently. The backend enforces the assignment's 1-50 snapshot limit against live Proxmox inventory, validates snapshot names, requires exact-name confirmation for restore/delete, applies the shared action rate limit, tracks the returned UPID, and rejects overlapping resource tasks. Snapshot create/restore fails closed while customer ISO media or a one-time boot override is active.
 
-Console launch creates a short-lived, encrypted, one-time ticket record. The bundled noVNC 1.7 client connects to a same-origin WebSocket gateway; the gateway consumes the local launch token once, completes the authenticated Proxmox `vncwebsocket` upgrade server-side, and then pipes binary frames. The authenticated console page receives the scoped, short-lived VNC ticket in memory because Proxmox requires it as the noVNC password. The long-lived Proxmox API token never reaches the browser.
+Console launch creates a short-lived, encrypted, one-time ticket record containing the server-selected console type. LXC and QEMU guests whose display is explicitly `serial0` through `serial3` use Proxmox termproxy with the bundled xterm.js client; other QEMU guests use noVNC. Both clients connect to the same-origin WebSocket gateway, which consumes the local launch token once, completes the authenticated Proxmox `vncwebsocket` upgrade server-side, and then pipes binary frames. The authenticated console page receives the scoped ticket and, for termproxy, its username only in memory for the handshake. The long-lived Proxmox API token never reaches the browser.
 
 For QEMU assignments with explicit media permissions, the detail page exposes a customer-private ISO library. The server derives the customer from the active VM assignment, scopes every ISO lookup to that customer and cluster, validates the enabled storage policy/quota, and then uses resource coordinates loaded from the database. Customers cannot supply a node, VMID, storage ID, or Proxmox volume ID. LXC media requests are rejected server-side.
 
@@ -233,6 +258,8 @@ The unauthenticated sign-in surface also handles invitations and password recove
 - Passwords use scrypt; TOTP secrets use AES-256-GCM; recovery codes are one-way hashed and single-use.
 - Invitation and password-reset tokens are random, purpose-bound, `APP_SECRET`-keyed hashes at rest, expire after 30 minutes, and are single-use.
 - Sessions are opaque, HTTP-only, SameSite=Strict, and Secure in production; users can review and revoke only their own sessions.
+- Native access tokens are opaque, short lived, and hashed at rest; refresh tokens rotate once, have a fixed maximum lifetime, and retain hashed history for reuse detection.
+- Native devices and browser sessions share user-scoped review/revocation controls; password and account security events revoke both session types.
 - Required-MFA policy is enforced server-side on every request; an unenrolled account cannot reach resources or administrative data.
 - State-changing requests require a session-bound CSRF token and same-origin check.
 - Password login, MFA verification, invitation delivery, password recovery, account-link validation, security-setting changes, and resource actions have independent rate limits.
@@ -268,7 +295,7 @@ Recommended token privileges must be adjusted to the enabled feature set. A stat
 - Status, resource usage, IP metadata, details, audit history, and task model.
 - Full customer instance detail page with usage history, networking, status-aware controls, and live task progress.
 - Snapshot Center with per-assignment limits, confirmations, tracked tasks, and audit events.
-- Selected configuration services and a short-lived, one-time noVNC console gateway.
+- Selected configuration services and a short-lived, one-time hybrid termproxy/noVNC console gateway.
 - Customer-owned QEMU ISO upload, quota, mount/eject, guarded one-time boot restoration, optional deletion, and administrator storage policies.
 - Encrypted SMTP configuration, administrator connection/message tests, durable delivery retries, and sanitized delivery history.
 - Per-assignment resource alerts, private notification delivery, customer preferences, action completion events, and branded alert/recovery email.
@@ -278,6 +305,7 @@ Recommended token privileges must be adjusted to the enabled feature set. A stat
 - Administrator Operations Center with last-good node/storage telemetry, cluster/stale-assignment/task monitoring, persistent acknowledgement, and automatic recovery.
 - Targeted maintenance/incident drafts, schedules, immutable per-user audiences, customer timeline/banner, read state, resolution, and branded email.
 - Customer-scoped support tickets with resource validation, administrator queue/assignment, internal notes, per-login unread state, audit events, and branded email.
+- Versioned Nimbus API v1 with native 2FA login, short-lived bearer access, rotating refresh tokens, device-session controls, shared assignment authorization, administrator aliases, and an OpenAPI 3.1 contract.
 - Docker deployment, health/readiness endpoints, and automated security/isolation tests.
 
 ### Phase 2 — production hardening

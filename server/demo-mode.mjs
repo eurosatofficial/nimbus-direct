@@ -3,6 +3,10 @@ const DEMO_AUTH_WRITES = new Set([
   "POST /api/auth/login",
   "POST /api/auth/mfa",
   "POST /api/auth/logout",
+  "POST /api/v1/auth/token",
+  "POST /api/v1/auth/mfa",
+  "POST /api/v1/auth/refresh",
+  "POST /api/v1/auth/logout",
 ]);
 
 export function isDemoReadOnlyRequestAllowed(method, pathname) {

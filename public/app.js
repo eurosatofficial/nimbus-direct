@@ -9,6 +9,10 @@ const state = {
   notifications: null,
   maintenance: null,
   support: null,
+  apiKeys: null,
+  apiKeyDraft: null,
+  apiKeySecret: null,
+  apiAccessEditor: null,
   admin: null,
   currentView: "overview",
   adminTab: "operations",
@@ -76,6 +80,7 @@ const els = Object.fromEntries([
   "viewRoot", "pageTitle", "pageDescription", "currentSection",
   "tenantPlan", "connectionHealth", "healthTitle", "healthDetail", "instanceCount", "profileName", "profileTenant",
   "profileAvatar", "globalSearch", "refreshButton", "logoutButton", "todayLabel", "lastUpdated", "notificationCount", "maintenanceCount", "supportCount",
+  "appearanceButton", "authAppearanceButton",
   "actionDialog", "actionForm", "actionDialogTitle", "actionDialogDescription",
   "actionDialogResource", "confirmAction", "editDialog", "editForm", "editDialogTitle", "editDialogBody", "editDialogError",
   "snapshotDialog", "snapshotForm", "snapshotDialogEyebrow", "snapshotDialogTitle", "snapshotDialogBody", "snapshotDialogError", "confirmSnapshot",
@@ -84,6 +89,7 @@ const els = Object.fromEntries([
 
 const readOnlyBrowsingControls = [
   "[data-admin-tab]",
+  "[data-appearance]",
   "[data-details]",
   "[data-open-support]",
   "[data-copy]",
@@ -93,6 +99,60 @@ const readOnlyBrowsingControls = [
   "[data-retry-instance]",
   "[data-refresh-media]",
 ].join(",");
+
+const appearanceOptions = {
+  system: { label: "System", icon: "◐", description: "Match this device" },
+  light: { label: "Light", icon: "☀", description: "Always use light" },
+  dark: { label: "Dark", icon: "☾", description: "Always use dark" },
+};
+
+function currentAppearance() {
+  return window.NimbusAppearance?.get?.() || "system";
+}
+
+function refreshAppearanceControls() {
+  const mode = currentAppearance();
+  const option = appearanceOptions[mode] || appearanceOptions.system;
+  [els.appearanceButton, els.authAppearanceButton].filter(Boolean).forEach((button) => {
+    const icon = button.querySelector("[aria-hidden='true']");
+    if (icon) icon.textContent = option.icon;
+    button.setAttribute("aria-label", `Appearance: ${option.label}`);
+    button.title = `Appearance: ${option.label}`;
+  });
+  document.querySelectorAll("button[data-appearance]").forEach((button) => {
+    const active = button.dataset.appearance === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  document.querySelectorAll("[data-appearance-label]").forEach((label) => {
+    label.textContent = option.label;
+  });
+}
+
+function setAppearance(mode) {
+  window.NimbusAppearance?.set?.(mode);
+  refreshAppearanceControls();
+}
+
+function cycleAppearance() {
+  const modes = ["system", "light", "dark"];
+  const next = modes[(modes.indexOf(currentAppearance()) + 1) % modes.length];
+  setAppearance(next);
+}
+
+function appearancePanelMarkup() {
+  const selected = currentAppearance();
+  return `<section class="panel form-panel appearance-panel">
+    <div class="appearance-heading"><span><p class="eyebrow">Personal preference</p><h2>Appearance</h2><p>Nimbus can follow this device or keep the interface light or dark.</p></span><span class="pill" data-appearance-label>${escapeHtml(appearanceOptions[selected]?.label || "System")}</span></div>
+    <div class="appearance-options" role="group" aria-label="Color appearance">
+      ${Object.entries(appearanceOptions).map(([mode, option]) => `<button class="appearance-option ${selected === mode ? "active" : ""}" type="button" data-appearance="${mode}" aria-pressed="${selected === mode}">
+        <span class="appearance-option-icon" aria-hidden="true">${option.icon}</span>
+        <span><strong>${option.label}</strong><small>${option.description}</small></span>
+        <span class="appearance-check" aria-hidden="true">✓</span>
+      </button>`).join("")}
+    </div>
+  </section>`;
+}
 
 function applyDemoReadOnlyUi(root = els.viewRoot) {
   if (!state.demoReadOnly || !root) return;
@@ -252,6 +312,18 @@ function friendlyError(error) {
     mfa_self_reset_forbidden: "Use your own account settings to disable two-factor authentication.",
     session_not_found: "That session has already ended.",
     current_password_invalid: "Your current password is incorrect.",
+    api_access_disabled: "An administrator has not enabled API access for this account.",
+    invalid_api_key_name: "Enter a name between 1 and 100 characters for this API key.",
+    invalid_api_key_groups: "Choose only permission groups enabled for your account.",
+    invalid_api_key_resources: "One of the selected resources is no longer available to this API policy.",
+    api_key_resources_required: "Choose at least one VM or container for resource permissions.",
+    invalid_api_key_expiry: "Choose an API key expiry date in the future.",
+    api_key_expiry_required: "Your administrator requires every API key to expire.",
+    api_key_expiry_too_long: "The expiry date exceeds the maximum lifetime set by your administrator.",
+    api_key_limit_reached: "The maximum number of active API keys has been reached.",
+    api_key_not_found: "That API key is no longer available.",
+    invalid_api_policy_groups: "Choose valid maximum permission groups for this user.",
+    invalid_api_policy_resources: "One of the selected resources is not visible to this user.",
     invalid_csrf_token: "Your session changed. Refresh the page and try again.",
     request_timeout: "The panel request timed out. Check the reverse proxy and container API logs.",
     resource_not_found: "That resource is not assigned to your account or the permission is disabled.",
@@ -525,6 +597,11 @@ async function loadSupport(ticketId = supportTicketIdFromHash()) {
 async function loadAdmin() {
   state.admin = await apiFetch("/api/admin/state");
   setDemoReadOnly(state.admin.demoReadOnly);
+}
+
+async function loadApiKeys() {
+  state.apiKeys = await apiFetch("/api/v1/api-keys");
+  return state.apiKeys;
 }
 
 function filteredResources(resources = state.dashboard?.resources || []) {
@@ -996,6 +1073,7 @@ function drawInstanceChart() {
   canvas.width = Math.max(1, Math.round(rect.width * ratio));
   canvas.height = Math.round(220 * ratio);
   const context = canvas.getContext("2d");
+  const theme = getComputedStyle(document.documentElement);
   context.scale(ratio, ratio);
   const width = rect.width;
   const height = 220;
@@ -1009,12 +1087,12 @@ function drawInstanceChart() {
   context.textBaseline = "middle";
   for (const value of [0, 25, 50, 75, 100]) {
     const y = padding.top + chartHeight - chartHeight * value / 100;
-    context.strokeStyle = "#e8ebf2";
+    context.strokeStyle = theme.getPropertyValue("--chart-grid").trim() || "#e8ebf2";
     context.beginPath();
     context.moveTo(padding.left, y);
     context.lineTo(width - padding.right, y);
     context.stroke();
-    context.fillStyle = "#969eb0";
+    context.fillStyle = theme.getPropertyValue("--chart-label").trim() || "#969eb0";
     context.fillText(`${value}%`, padding.left - 6, y);
   }
   const drawLine = (key, color) => {
@@ -1031,8 +1109,8 @@ function drawInstanceChart() {
     });
     context.stroke();
   };
-  drawLine("cpu", "#5d68ec");
-  drawLine("memory", "#36aa82");
+  drawLine("cpu", theme.getPropertyValue("--chart-cpu").trim() || "#5d68ec");
+  drawLine("memory", theme.getPropertyValue("--chart-memory").trim() || "#36aa82");
 }
 
 function networkDiscoveryMessage(network, resource) {
@@ -1315,6 +1393,63 @@ function sessionDevice(userAgent) {
   return `${browser} on ${platform}`;
 }
 
+function apiKeySummaryMarkup(summary, { secret = null, compact = false } = {}) {
+  const selectedGroups = (summary?.permissionGroups || []).filter((group) => group.selected);
+  const resources = summary?.resources || [];
+  const actions = summary?.actions || [];
+  const actionRows = actions.map((action) => {
+    const icon = action.state === "allowed" ? "✓" : action.state === "partial" ? "◐" : "✕";
+    const detail = action.state === "partial" ? ` <small>${action.allowedCount}/${action.resourceCount} resources</small>` : "";
+    return `<li class="${escapeHtml(action.state)}"><span>${icon}</span><span>${escapeHtml(action.label)}${detail}</span></li>`;
+  }).join("");
+  return `<div class="api-key-summary ${compact ? "compact" : ""}">
+    <div class="api-summary-heading"><span class="api-key-icon">⌁</span><span><small>Integration key</small><strong>${escapeHtml(summary?.name || "Untitled key")}</strong></span></div>
+    ${secret ? `<div class="api-secret-once"><small>Copy this secret now — Nimbus cannot show it again</small><code>${escapeHtml(secret)}</code><button class="button secondary small" type="button" data-copy-api-secret>Copy secret</button></div>` : ""}
+    <div class="api-summary-grid">
+      <section><h4>Permissions</h4><ul>${selectedGroups.map((group) => `<li><span>✓</span><span>${escapeHtml(group.label)}</span></li>`).join("") || "<li><span>✕</span><span>None</span></li>"}</ul></section>
+      <section><h4>Resources</h4><ul>${resources.map((resource) => `<li class="${resource.effective ? "" : "denied"}"><span>${resource.effective ? "✓" : "✕"}</span><span>${escapeHtml(resource.name)} <small>${resource.type.toUpperCase()} ${resource.vmid}</small></span></li>`).join("") || "<li><span>—</span><span>Account-wide permissions only</span></li>"}</ul></section>
+      <section><h4>Expires</h4><p>${summary?.expiresAt ? escapeHtml(formatDate(summary.expiresAt, { dateOnly: true })) : "Never"}</p></section>
+    </div>
+    ${compact ? "" : `<section class="api-actions-summary"><h4>Allowed actions</h4><ul>${actionRows}</ul><p><span>◐</span> means the action is available on only some selected resources because assignment permissions still apply.</p></section>`}
+  </div>`;
+}
+
+function apiKeyCenterMarkup(mfa) {
+  const center = state.apiKeys;
+  if (!center) return "";
+  const policy = center.policy || {};
+  if (!policy.enabled) {
+    return `<section class="panel api-key-center disabled">
+      <header class="panel-header"><div><p class="eyebrow">Integrations</p><h2>API keys</h2><p>Connect Home Assistant, scripts, monitoring, and other private tools without sharing your password.</p></div><span class="pill warning">Not enabled</span></header>
+      <div class="notice"><span>⌁</span><span>An administrator must enable API access and choose the maximum permission groups for this account.</span></div>
+    </section>`;
+  }
+  const resourceGroups = new Set((center.groups || []).filter((group) => group.resourceScoped).map((group) => group.id));
+  const defaultDays = Math.min(90, Number(policy.maxLifetimeDays || 365));
+  const defaultExpiry = new Date(Date.now() + defaultDays * 86_400_000).toISOString().slice(0, 10);
+  const keyCards = (center.keys || []).map((key) => `<article class="api-key-card">
+    <div class="api-key-card-head"><span class="api-key-icon">⌁</span><span><strong>${escapeHtml(key.name)}</strong><small>${escapeHtml(key.tokenHint)} · Created ${formatDate(key.createdAt, { dateOnly: true })}</small></span><span class="status-badge ${key.active ? "" : "disabled"}">${escapeHtml(key.status)}</span></div>
+    <div class="api-key-meta"><span><small>Last used</small><strong>${key.lastUsedAt ? formatRelative(key.lastUsedAt) : "Never"}</strong></span><span><small>Expires</small><strong>${key.expiresAt ? formatDate(key.expiresAt, { dateOnly: true }) : "Never"}</strong></span><span><small>Resources</small><strong>${key.resourceIds.length}</strong></span></div>
+    <details><summary>View permission summary</summary>${apiKeySummaryMarkup(key.summary, { compact: false })}</details>
+    ${key.active ? `<button class="button danger small" type="button" data-revoke-api-key="${escapeHtml(key.id)}">Revoke key</button>` : ""}
+  </article>`).join("");
+  return `<section class="panel api-key-center">
+    <header class="panel-header"><div><p class="eyebrow">Integrations</p><h2>API keys</h2><p>Create narrowly scoped keys for Home Assistant, scripts, monitoring, and future Nimbus apps.</p></div><span class="pill success">${Number((center.keys || []).filter((key) => key.active).length)} / ${Number(policy.maxActiveKeys)} active</span></header>
+    <div class="api-policy-strip"><span><small>Maximum lifetime</small><strong>${Number(policy.maxLifetimeDays)} days</strong></span><span><small>No-expiry keys</small><strong>${policy.allowNoExpiry ? "Allowed" : "Blocked"}</strong></span><span><small>Enforcement</small><strong>Live assignment policy</strong></span></div>
+    <form id="apiKeyCreateForm" class="api-key-create-form">
+      <div class="form-grid">
+        <div class="field"><label for="apiKeyName">Key name</label><input id="apiKeyName" name="name" maxlength="100" required placeholder="Home Assistant"></div>
+        <div class="field"><label for="apiKeyExpiry">Expiry date</label><input id="apiKeyExpiry" name="expiresAt" type="date" value="${defaultExpiry}" ${policy.allowNoExpiry ? "" : "required"} max="${new Date(Date.now() + Number(policy.maxLifetimeDays) * 86_400_000).toISOString().slice(0, 10)}"><small>${policy.allowNoExpiry ? "Leave blank only when a permanent key is truly necessary." : "Expiry is required by your administrator."}</small></div>
+      </div>
+      <fieldset class="api-group-grid"><legend>Permission groups</legend>${(center.groups || []).map((group) => `<label><input type="checkbox" name="groups" value="${escapeHtml(group.id)}" data-resource-group="${resourceGroups.has(group.id) ? "true" : "false"}"><span><strong>${escapeHtml(group.label)}</strong><small>${escapeHtml(group.description)}</small></span></label>`).join("")}</fieldset>
+      <fieldset class="api-resource-grid"><legend>Resources</legend>${(center.resources || []).map((resource) => `<label><input type="checkbox" name="resourceIds" value="${escapeHtml(resource.id)}"><span class="resource-type ${resource.type}">${resource.type === "lxc" ? "CT" : "VM"}</span><span><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resource.clusterName)} · ${escapeHtml(resource.node)} · ${resource.type.toUpperCase()} ${resource.vmid}</small></span></label>`).join("") || `<p>No resources are currently available under this API policy.</p>`}</fieldset>
+      <div class="notice"><span>✓</span><span>Nimbus will show the final effective actions before creating the key. Assignment permissions remain the last authorization layer.</span></div>
+      <div class="form-actions"><button class="button primary" type="submit">Review API key</button><p class="form-message"></p></div>
+    </form>
+    <div class="api-key-list"><h3>Your API keys</h3>${keyCards || `<div class="empty-state compact"><div><span class="empty-icon">⌁</span><h3>No API keys yet</h3><p>Create one above when an integration needs access.</p></div></div>`}</div>
+  </section>`;
+}
+
 function renderSettings() {
   const security = state.dashboard.security || { mfa: {}, sessions: [] };
   const mfa = security.mfa || {};
@@ -1356,20 +1491,22 @@ function renderSettings() {
   </form>`;
   const sessionRows = sessions.map((item) => `<article class="session-row">
     <span class="session-icon">${item.current ? "●" : "◉"}</span>
-    <span class="session-copy"><strong>${escapeHtml(sessionDevice(item.userAgent))}${item.current ? ` <em>Current</em>` : ""}</strong><small>${escapeHtml(item.ipAddress)} · Last active ${formatRelative(item.lastSeenAt)} · Expires ${formatDate(item.expiresAt)}</small></span>
+    <span class="session-copy"><strong>${escapeHtml(sessionDevice(item.userAgent))}${item.kind === "api" ? ` <em>Nimbus API</em>` : ""}${item.current ? ` <em>Current</em>` : ""}</strong><small>${escapeHtml(item.ipAddress)} · Last active ${formatRelative(item.lastSeenAt)} · Expires ${formatDate(item.expiresAt)}</small></span>
     <button class="row-button ${item.current ? "danger" : ""}" type="button" data-revoke-session="${escapeHtml(item.id)}">${item.current ? "Sign out" : "Revoke"}</button>
   </article>`).join("");
   if (enrollmentRequired) {
-    els.viewRoot.innerHTML = `${policyBanner}${mfaPanel}`;
+    els.viewRoot.innerHTML = `${appearancePanelMarkup()}${policyBanner}${mfaPanel}`;
+    refreshAppearanceControls();
     return;
   }
-  els.viewRoot.innerHTML = `${recoveryPanel}<section class="layout-grid equal">
+  els.viewRoot.innerHTML = `${appearancePanelMarkup()}${recoveryPanel}<section class="layout-grid equal">
     <form class="panel form-panel" id="profileForm"><h2>Profile</h2><p>Update your display name.</p><div class="form-grid"><div class="field full"><label for="settingsName">Display name</label><input id="settingsName" name="displayName" maxlength="100" required value="${escapeHtml(state.user.displayName)}"></div><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(state.user.email)}"></div></div><div class="form-actions"><button class="button primary">Save profile</button><p class="form-message"></p></div></form>
     <form class="panel form-panel" id="passwordForm"><h2>Password</h2><p>Changing your password revokes all active sessions.</p><div class="form-grid"><div class="field full"><label for="currentPassword">Current password</label><input id="currentPassword" type="password" name="currentPassword" required autocomplete="current-password"></div><div class="field full"><label for="newPassword">New password</label><input id="newPassword" type="password" name="password" minlength="12" required autocomplete="new-password"></div></div><div class="form-actions"><button class="button primary">Change password</button><p class="form-message"></p></div></form>
   </section>
   <div class="settings-security-grid">${mfaPanel}
     <section class="panel form-panel security-panel"><div class="security-heading"><span class="security-icon">◷</span><span><h2>Active sessions</h2><p>Review devices signed in to this account.</p></span><span class="pill">${plural(sessions.length, "session")}</span></div><div class="session-list">${sessionRows || `<p>No active sessions.</p>`}</div>${sessions.length > 1 ? `<form id="revokeOtherSessionsForm"><div class="field"><label for="revokeSessionsPassword">Current password</label><input id="revokeSessionsPassword" name="currentPassword" type="password" required autocomplete="current-password"></div><div class="form-actions"><button class="button secondary" type="submit">Revoke all other sessions</button><p class="form-message"></p></div></form>` : ""}</section>
-  </div>`;
+  </div>${apiKeyCenterMarkup(mfa)}`;
+  refreshAppearanceControls();
 }
 
 function operationsStatusPill(value) {
@@ -1803,7 +1940,7 @@ function customerOptions(selected = "") {
 
 function securityEventTone(action) {
   if (String(action).includes("failed")) return "warning";
-  if (action === "auth.login" || action === "security.mfa_enabled") return "success";
+  if (action === "auth.login" || action === "auth.api_login" || action === "security.mfa_enabled") return "success";
   if (String(action).includes("reset") || String(action).includes("disabled")) return "critical";
   return "neutral";
 }
@@ -1881,6 +2018,7 @@ function renderAdminUsers() {
   const users = state.admin.users;
   const invitationReady = Boolean(state.admin.emailSettings?.enabled && state.admin.emailSettings?.appUrl);
   const userRows = users.map((user) => {
+    const apiPolicy = state.admin.apiPolicies?.find((policy) => policy.userId === user.id);
     let onboarding = `<span class="status-badge">Ready</span>`;
     if (!user.passwordSet) {
       const pending = user.invitationExpiresAt && Number(user.invitationExpiresAt) > Date.now();
@@ -1892,9 +2030,11 @@ function renderAdminUsers() {
       <td><span class="role-badge ${user.role === "admin" ? "platform" : ""}">${escapeHtml(user.role)}</span></td>
       <td>${onboarding}</td>
       <td><span class="status-badge ${user.mfaEnabled ? "" : "disabled"}">${user.mfaEnabled ? "Enabled" : "Off"}</span></td>
+      <td><span class="status-badge ${apiPolicy?.enabled ? "" : "disabled"}">${apiPolicy?.enabled ? `${Number(apiPolicy.activeKeys || 0)} active` : "Off"}</span></td>
       <td><span class="status-badge ${user.status === "disabled" ? "disabled" : ""}">${escapeHtml(user.status)}</span></td>
       <td><div class="row-buttons">
         ${!user.passwordSet ? `<button class="row-button" data-resend-invitation="${escapeHtml(user.id)}" ${invitationReady ? "" : "disabled"}>Resend invite</button><button class="row-button danger" data-revoke-invitation="${escapeHtml(user.id)}">Revoke link</button>` : ""}
+        <button class="row-button" data-api-access-user="${escapeHtml(user.id)}">API access</button>
         <button class="row-button" data-edit-user="${escapeHtml(user.id)}">Edit</button>
         <button class="row-button danger" data-delete-user="${escapeHtml(user.id)}">Delete</button>
       </div></td>
@@ -1923,7 +2063,7 @@ function renderAdminUsers() {
   </section>
   <section class="panel" style="margin-top:18px">
     <header class="panel-header"><div><h2>Users</h2><p>${plural(users.length, "account")}</p></div></header>
-    <div class="table-wrap"><table class="data-table"><thead><tr><th>User</th><th>Customer</th><th>Role</th><th>Onboarding</th><th>2FA</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${userRows}</tbody></table></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>User</th><th>Customer</th><th>Role</th><th>Onboarding</th><th>2FA</th><th>API</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${userRows}</tbody></table></div>
   </section>`;
 }
 
@@ -1996,6 +2136,10 @@ function route() {
     els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading support tickets</div>`;
     loadSupport(supportTicketId).then(renderSupport).catch((error) => showToast("error", "Could not load support tickets", friendlyError(error)));
   }
+  else if (view === "settings" && !state.apiKeys) {
+    els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading account security</div>`;
+    loadApiKeys().then(renderSettings).catch((error) => showToast("error", "Could not load API access", friendlyError(error)));
+  }
   else renderers[view]();
   closeSidebar();
 }
@@ -2040,7 +2184,7 @@ function openAssignment(resourceId) {
     </fieldset>
     <div class="ownership-proof"><strong>Server-side ownership key</strong><code>${escapeHtml(resource.clusterId)} / ${escapeHtml(resource.node)} / ${resource.type} / ${resource.vmid}</code><small>Nimbus resolves this key from its database; it never trusts customer-supplied coordinates.</small></div>`;
   els.editDialogError.textContent = "";
-  els.editDialog.showModal();
+  if (!els.editDialog.open) els.editDialog.showModal();
 }
 
 function openCustomerEditor(customerId) {
@@ -2065,6 +2209,97 @@ function openUserEditor(userId) {
   els.editDialogBody.innerHTML = `<div class="form-grid"><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(user.email)}"></div><div class="field"><label for="editUserName">Display name</label><input id="editUserName" name="displayName" maxlength="100" required value="${escapeHtml(user.displayName)}"></div><div class="field"><label for="editUserStatus">Status</label><select id="editUserStatus" name="status"><option value="active" ${user.status === "active" ? "selected" : ""}>Active</option><option value="disabled" ${user.status === "disabled" ? "selected" : ""}>Disabled</option></select></div><div class="field"><label for="editUserRole">Role</label><select id="editUserRole" name="role"><option value="customer" ${user.role === "customer" ? "selected" : ""}>Customer</option><option value="admin" ${user.role === "admin" ? "selected" : ""}>Administrator</option></select></div><div class="field"><label for="editUserCustomer">Customer</label><select id="editUserCustomer" name="customerId">${customerOptions(user.customerId || "")}</select></div><div class="field full"><label for="editUserPassword">${passwordLabel} <span class="optional">(optional)</span></label><input id="editUserPassword" name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="${passwordHelp}"></div>${user.mfaEnabled && user.id !== state.user.id ? `<label class="policy-checkbox full danger-zone"><input name="resetMfa" type="checkbox"><span><strong>Reset two-factor authentication</strong><small>Requires your administrator password below. The user will be signed out everywhere and must enroll again.</small></span></label><div class="field full"><label for="adminPasswordForMfaReset">Your administrator password</label><input id="adminPasswordForMfaReset" name="adminPasswordForMfaReset" type="password" autocomplete="current-password"></div>` : `<div class="field full"><label>Two-factor authentication</label><input disabled value="${user.mfaEnabled ? "Enabled" : "Not enabled"}"></div>`}</div>`;
   els.editDialogError.textContent = "";
   els.editDialog.showModal();
+}
+
+async function openApiAccessEditor(userId) {
+  const user = state.admin.users.find((item) => item.id === userId);
+  if (!user) return;
+  els.editForm.dataset.kind = "api-policy-loading";
+  els.editForm.dataset.id = user.id;
+  els.editDialogTitle.textContent = `API access · ${user.displayName}`;
+  els.editDialogBody.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading API policy</div>`;
+  els.editDialogError.textContent = "";
+  if (!els.editDialog.open) els.editDialog.showModal();
+  try {
+    const center = await apiFetch(`/api/admin/users/${encodeURIComponent(user.id)}/api-access`);
+    state.apiAccessEditor = center;
+    const policy = center.policy || {};
+    const activeKeys = (center.keys || []).filter((key) => key.active);
+    els.editForm.dataset.kind = "api-policy";
+    els.editDialogBody.innerHTML = `<div class="api-admin-policy">
+      <label class="policy-checkbox"><input type="checkbox" name="apiEnabled" ${policy.enabled ? "checked" : ""}><span><strong>Enable integration API access</strong><small>The user can create keys only inside the maximum policy below. Disabling access immediately revokes all active keys.</small></span></label>
+      <div class="form-grid">
+        <div class="field"><label for="apiMaxKeys">Maximum active keys</label><input id="apiMaxKeys" name="maxActiveKeys" type="number" min="1" max="50" required value="${Number(policy.maxActiveKeys || 3)}"><small>Reducing this limit revokes the oldest excess keys.</small></div>
+        <div class="field"><label for="apiMaxLifetime">Maximum lifetime in days</label><input id="apiMaxLifetime" name="maxLifetimeDays" type="number" min="1" max="3650" required value="${Number(policy.maxLifetimeDays || 365)}"></div>
+        <label class="policy-checkbox full"><input type="checkbox" name="allowNoExpiry" ${policy.allowNoExpiry ? "checked" : ""}><span><strong>Allow keys without an expiry date</strong><small>Leave disabled for the safer default.</small></span></label>
+      </div>
+      <fieldset class="api-group-grid"><legend>Maximum permission groups</legend>${(center.groups || []).map((group) => `<label><input type="checkbox" name="policyGroups" value="${escapeHtml(group.id)}" ${policy.groups?.includes(group.id) ? "checked" : ""}><span><strong>${escapeHtml(group.label)}</strong><small>${escapeHtml(group.description)}</small></span></label>`).join("")}</fieldset>
+      <fieldset class="api-resource-grid"><legend>Maximum resources</legend>
+        <label class="api-all-resources"><input type="checkbox" name="allVisibleResources" ${policy.allVisibleResources ? "checked" : ""}><span><strong>All resources currently visible to this user</strong><small>Future direct assignments are included automatically.</small></span></label>
+        <div data-policy-resource-list>${(center.resources || []).map((resource) => `<label><input type="checkbox" name="policyResources" value="${escapeHtml(resource.id)}" ${policy.resourceIds?.includes(resource.id) ? "checked" : ""} ${policy.allVisibleResources ? "disabled" : ""}><span class="resource-type ${resource.type}">${resource.type === "lxc" ? "CT" : "VM"}</span><span><strong>${escapeHtml(resource.name)}</strong><small>${resource.type.toUpperCase()} ${resource.vmid} · ${escapeHtml(resource.node)}</small></span></label>`).join("") || "<p>This user has no visible resources.</p>"}</div>
+      </fieldset>
+      <section class="api-admin-keys"><div><h3>Existing keys</h3><p>${plural(activeKeys.length, "active key")} · revoked keys remain in the audit history.</p></div>
+        ${activeKeys.length ? `<div class="api-admin-key-list">${activeKeys.map((key) => `<article><span><strong>${escapeHtml(key.name)}</strong><small>${escapeHtml(key.tokenHint)} · ${key.expiresAt ? `expires ${formatDate(key.expiresAt, { dateOnly: true })}` : "never expires"}</small></span><button class="row-button danger" type="button" data-admin-revoke-api-key="${escapeHtml(key.id)}" data-api-user="${escapeHtml(user.id)}">Revoke</button></article>`).join("")}</div><button class="button danger small" type="button" data-admin-revoke-all-api-keys="${escapeHtml(user.id)}">Revoke all active keys</button>` : `<p class="muted-copy">No active keys.</p>`}
+      </section>
+    </div>`;
+  } catch (error) {
+    els.editDialogError.textContent = friendlyError(error);
+  }
+}
+
+async function reviewApiKey(form) {
+  if (!form.checkValidity()) {
+    form.reportValidity();
+    return;
+  }
+  const data = new FormData(form);
+  const groups = data.getAll("groups");
+  const resourceIds = data.getAll("resourceIds");
+  if (!groups.length) {
+    form.querySelector(".form-message").textContent = "Choose at least one permission group.";
+    form.querySelector(".form-message").className = "form-message error";
+    return;
+  }
+  const needsResources = [...form.querySelectorAll('input[name="groups"]:checked')]
+    .some((input) => input.dataset.resourceGroup === "true");
+  if (needsResources && !resourceIds.length) {
+    form.querySelector(".form-message").textContent = "Choose at least one VM or container for these permissions.";
+    form.querySelector(".form-message").className = "form-message error";
+    return;
+  }
+  const expiry = data.get("expiresAt");
+  const draft = {
+    name: data.get("name"),
+    groups,
+    resourceIds,
+    expiresAt: expiry ? new Date(`${expiry}T23:59:59`).getTime() : null,
+  };
+  const button = form.querySelector("button[type='submit']");
+  const message = form.querySelector(".form-message");
+  button.disabled = true;
+  message.className = "form-message";
+  message.textContent = "Computing effective permissions…";
+  try {
+    const { preview } = await apiFetch("/api/v1/api-keys/preview", { method: "POST", body: draft });
+    state.apiKeyDraft = { ...draft, preview };
+    els.editForm.dataset.kind = "api-key-create";
+    els.editForm.dataset.id = "";
+    els.editDialogTitle.textContent = "Review API key";
+    els.editDialogBody.innerHTML = `${apiKeySummaryMarkup(preview)}
+      <div class="api-key-confirmation">
+        <div class="field"><label for="apiKeyPassword">Current password</label><input id="apiKeyPassword" name="currentPassword" type="password" required autocomplete="current-password"></div>
+        ${state.dashboard.security?.mfa?.enabled ? `<div class="field"><label for="apiKeyMfaCode">Authenticator or recovery code</label><input id="apiKeyMfaCode" name="code" required maxlength="16" autocomplete="one-time-code"></div>` : ""}
+      </div>
+      <div class="notice warning"><span>!</span><span>The secret is shown only once. Store it in the integration's secret storage, never in source code.</span></div>`;
+    els.editDialogError.textContent = "";
+    els.editForm.querySelector("button[type='submit']").textContent = "Create API key";
+    if (!els.editDialog.open) els.editDialog.showModal();
+  } catch (error) {
+    message.className = "form-message error";
+    message.textContent = friendlyError(error);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function openClusterEditor(clusterId) {
@@ -2414,6 +2649,7 @@ async function refresh({ quiet = false } = {}) {
     if (state.currentView === "notifications") await loadNotifications();
     if (state.currentView === "maintenance") await loadMaintenance();
     if (state.currentView === "support") await loadSupport();
+    if (state.currentView === "settings") await loadApiKeys();
     if (state.currentView === "instance" && state.instance.resourceId) await loadInstanceDetails(state.instance.resourceId, { quiet: true });
     else route();
     if (!quiet) showToast("success", "Refreshed", "Latest panel data loaded.");
@@ -2627,6 +2863,8 @@ els.logoutButton.addEventListener("click", async () => {
   location.reload();
 });
 els.refreshButton.addEventListener("click", () => refresh());
+els.appearanceButton.addEventListener("click", cycleAppearance);
+els.authAppearanceButton.addEventListener("click", cycleAppearance);
 els.toastClose.addEventListener("click", () => els.toast.classList.remove("show"));
 els.globalSearch.addEventListener("input", (event) => { state.search = event.target.value; route(); });
 window.addEventListener("hashchange", route);
@@ -2700,6 +2938,49 @@ els.editForm.addEventListener("submit", async (event) => {
       }
       await apiFetch(`/api/admin/users/${encodeURIComponent(id)}`, { method: "PATCH", body: payload });
       if (password) await apiFetch(`/api/admin/users/${encodeURIComponent(id)}/password`, { method: "POST", body: { password } });
+    } else if (kind === "api-policy") {
+      const payload = {
+        enabled: data.has("apiEnabled"),
+        maxActiveKeys: Number(data.get("maxActiveKeys")),
+        maxLifetimeDays: Number(data.get("maxLifetimeDays")),
+        allowNoExpiry: data.has("allowNoExpiry"),
+        groups: data.getAll("policyGroups"),
+        allVisibleResources: data.has("allVisibleResources"),
+        resourceIds: data.has("allVisibleResources") ? [] : data.getAll("policyResources"),
+      };
+      if (payload.enabled && !payload.groups.length) {
+        els.editDialogError.textContent = "Choose at least one maximum permission group before enabling API access.";
+        return;
+      }
+      await apiFetch(`/api/admin/users/${encodeURIComponent(id)}/api-access`, { method: "PATCH", body: payload });
+    } else if (kind === "api-key-create") {
+      if (!state.apiKeyDraft) {
+        els.editDialogError.textContent = "The API key preview expired. Close this window and review the key again.";
+        return;
+      }
+      const result = await apiFetch("/api/v1/api-keys", {
+        method: "POST",
+        body: {
+          ...state.apiKeyDraft,
+          preview: undefined,
+          currentPassword: data.get("currentPassword"),
+          code: data.get("code"),
+        },
+      });
+      state.apiKeySecret = result.secret;
+      state.apiKeyDraft = null;
+      state.apiKeys = await apiFetch("/api/v1/api-keys");
+      els.editForm.dataset.kind = "api-key-secret";
+      els.editDialogTitle.textContent = "API key created";
+      els.editDialogBody.innerHTML = `${apiKeySummaryMarkup(result.key.summary, { secret: result.secret })}
+        <div class="notice"><span>✓</span><span>The key is active immediately and remains constrained by the live administrator and resource-assignment policies.</span></div>`;
+      els.editDialogError.textContent = "";
+      els.editForm.querySelector("button[type='submit']").textContent = "Done";
+      renderSettings();
+      return;
+    } else if (kind === "api-key-secret") {
+      els.editDialog.close();
+      return;
     } else if (kind === "cluster") {
       const payload = formPayload(form);
       if (!payload.tokenId) delete payload.tokenId;
@@ -2727,6 +3008,17 @@ els.editForm.addEventListener("submit", async (event) => {
 els.viewRoot.addEventListener("click", async (event) => {
   const target = event.target.closest("button, a");
   if (!target) return;
+  if (target.dataset.appearance) {
+    setAppearance(target.dataset.appearance);
+    return;
+  }
+  if (target.dataset.copyApiSecret !== undefined) {
+    try {
+      await navigator.clipboard.writeText(state.apiKeySecret || "");
+      showToast("success", "API secret copied", "Store it in the integration's secret storage.");
+    } catch { showToast("error", "Could not copy", "Select and copy the API secret manually."); }
+    return;
+  }
   if (target.dataset.copyMfaSecret !== undefined) {
     try {
       await navigator.clipboard.writeText(state.mfaEnrollment?.secret || "");
@@ -2761,6 +3053,17 @@ els.viewRoot.addEventListener("click", async (event) => {
       renderSettings();
       showToast("success", "Session revoked", "That device must sign in again.");
     } catch (error) { showToast("error", "Could not revoke session", friendlyError(error)); }
+    return;
+  }
+  if (target.dataset.revokeApiKey) {
+    const key = state.apiKeys?.keys?.find((item) => item.id === target.dataset.revokeApiKey);
+    if (!confirm(`Revoke “${key?.name || "this API key"}” now? The integration will immediately lose access.`)) return;
+    try {
+      await apiFetch(`/api/v1/api-keys/${encodeURIComponent(target.dataset.revokeApiKey)}`, { method: "DELETE", body: {} });
+      await loadApiKeys();
+      renderSettings();
+      showToast("success", "API key revoked", "Requests using that secret are now rejected.");
+    } catch (error) { showToast("error", "Could not revoke API key", friendlyError(error)); }
     return;
   }
   if (target.dataset.readNotification) {
@@ -2886,6 +3189,27 @@ els.viewRoot.addEventListener("click", async (event) => {
     return;
   }
   if (target.dataset.editUser) { openUserEditor(target.dataset.editUser); return; }
+  if (target.dataset.apiAccessUser) { await openApiAccessEditor(target.dataset.apiAccessUser); return; }
+  if (target.dataset.adminRevokeApiKey) {
+    if (!confirm("Revoke this API key now? The integration will immediately lose access.")) return;
+    try {
+      await apiFetch(`/api/admin/users/${encodeURIComponent(target.dataset.apiUser)}/api-keys/${encodeURIComponent(target.dataset.adminRevokeApiKey)}`, { method: "DELETE", body: {} });
+      await loadAdmin();
+      await openApiAccessEditor(target.dataset.apiUser);
+      showToast("success", "API key revoked", "The key can no longer authenticate.");
+    } catch (error) { showToast("error", "Could not revoke API key", friendlyError(error)); }
+    return;
+  }
+  if (target.dataset.adminRevokeAllApiKeys) {
+    if (!confirm("Revoke every active API key for this user? All connected integrations will immediately lose access.")) return;
+    try {
+      await apiFetch(`/api/admin/users/${encodeURIComponent(target.dataset.adminRevokeAllApiKeys)}/api-keys/revoke-all`, { method: "POST", body: {} });
+      await loadAdmin();
+      await openApiAccessEditor(target.dataset.adminRevokeAllApiKeys);
+      showToast("success", "API keys revoked", "All active integration keys were disabled.");
+    } catch (error) { showToast("error", "Could not revoke API keys", friendlyError(error)); }
+    return;
+  }
   if (target.dataset.editCluster) { openClusterEditor(target.dataset.editCluster); return; }
   if (target.dataset.editIsoPolicy) { openIsoPolicyEditor(target.dataset.editIsoPolicy); return; }
   if (target.dataset.editMaintenance) { openMaintenanceEditor(target.dataset.editMaintenance); return; }
@@ -3107,6 +3431,62 @@ function updateMaintenanceAudience(audience) {
 
 els.editDialog.addEventListener("change", (event) => {
   if (event.target.matches("[data-maintenance-audience]")) updateMaintenanceAudience(event.target);
+  if (event.target.name === "allVisibleResources") {
+    els.editDialog.querySelectorAll('input[name="policyResources"]').forEach((input) => {
+      input.disabled = event.target.checked;
+      if (event.target.checked) input.checked = false;
+    });
+  }
+});
+
+els.editDialog.addEventListener("click", async (event) => {
+  const target = event.target.closest("button");
+  if (!target) return;
+  if (target.dataset.copyApiSecret !== undefined) {
+    try {
+      await navigator.clipboard.writeText(state.apiKeySecret || "");
+      showToast("success", "API secret copied", "Store it in the integration's secret storage.");
+    } catch { showToast("error", "Could not copy", "Select and copy the API secret manually."); }
+    return;
+  }
+  if (target.dataset.adminRevokeApiKey) {
+    if (!confirm("Revoke this API key now? The integration will immediately lose access.")) return;
+    target.disabled = true;
+    try {
+      await apiFetch(`/api/admin/users/${encodeURIComponent(target.dataset.apiUser)}/api-keys/${encodeURIComponent(target.dataset.adminRevokeApiKey)}`, { method: "DELETE", body: {} });
+      await loadAdmin();
+      await openApiAccessEditor(target.dataset.apiUser);
+      showToast("success", "API key revoked", "The key can no longer authenticate.");
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Could not revoke API key", friendlyError(error));
+    }
+    return;
+  }
+  if (target.dataset.adminRevokeAllApiKeys) {
+    if (!confirm("Revoke every active API key for this user? All connected integrations will immediately lose access.")) return;
+    target.disabled = true;
+    try {
+      await apiFetch(`/api/admin/users/${encodeURIComponent(target.dataset.adminRevokeAllApiKeys)}/api-keys/revoke-all`, { method: "POST", body: {} });
+      await loadAdmin();
+      await openApiAccessEditor(target.dataset.adminRevokeAllApiKeys);
+      showToast("success", "API keys revoked", "All active integration keys were disabled.");
+    } catch (error) {
+      target.disabled = false;
+      showToast("error", "Could not revoke API keys", friendlyError(error));
+    }
+  }
+});
+
+els.editDialog.addEventListener("close", () => {
+  state.apiKeyDraft = null;
+  state.apiKeySecret = null;
+  state.apiAccessEditor = null;
+  const submit = els.editForm.querySelector("button[type='submit']");
+  if (submit) {
+    submit.textContent = "Save changes";
+    submit.disabled = false;
+  }
 });
 
 els.viewRoot.addEventListener("invalid", (event) => {
@@ -3160,6 +3540,10 @@ async function submitSecurityForm(form) {
 els.viewRoot.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
+  if (form.id === "apiKeyCreateForm") {
+    await reviewApiKey(form);
+    return;
+  }
   if (await submitSecurityForm(form)) return;
   if (form.id === "securityPolicyForm") {
     const data = new FormData(form);
@@ -3408,6 +3792,11 @@ window.addEventListener("resize", () => {
   clearTimeout(drawInstanceChart.resizeTimer);
   drawInstanceChart.resizeTimer = setTimeout(drawInstanceChart, 120);
 });
+window.addEventListener("nimbusappearancechange", () => {
+  refreshAppearanceControls();
+  drawInstanceChart();
+});
 document.addEventListener("visibilitychange", scheduleTaskPolling);
 
+refreshAppearanceControls();
 initializeApp();
