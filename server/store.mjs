@@ -128,6 +128,14 @@ function problem(message, code = "invalid_input", status = 400) {
   return Object.assign(new Error(message), { status, code });
 }
 
+function normalizePreferredLanguage(value, fallback = "en") {
+  const language = String(value ?? fallback).trim().toLowerCase();
+  if (!['en', 'de'].includes(language)) {
+    throw problem("Preferred language must be English or German", "invalid_preferred_language");
+  }
+  return language;
+}
+
 function parseJson(value, fallback = {}) {
   try { return JSON.parse(value || "") ?? fallback; } catch { return fallback; }
 }
@@ -157,6 +165,7 @@ function publicUser(row) {
     customerName: row.customer_name || null,
     supportEmail: row.support_email || "",
     planName: row.plan_name || "Managed infrastructure",
+    preferredLanguage: row.preferred_language || "en",
     mfaEnabled: Boolean(row.mfa_enabled),
     passwordSet: row.password_set === undefined ? true : Boolean(row.password_set),
     invitationExpiresAt: row.invitation_expires_at || null,
@@ -889,6 +898,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       display_name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       password_set INTEGER NOT NULL DEFAULT 1,
+      preferred_language TEXT NOT NULL DEFAULT 'en' CHECK(preferred_language IN ('en','de')),
       role TEXT NOT NULL CHECK(role IN ('admin','customer')),
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
       created_at INTEGER NOT NULL,
@@ -1517,6 +1527,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   if (!sessionColumns.has("user_agent")) database.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT");
   const userColumns = new Set(database.prepare("PRAGMA table_info(users)").all().map((column) => column.name));
   if (!userColumns.has("password_set")) database.exec("ALTER TABLE users ADD COLUMN password_set INTEGER NOT NULL DEFAULT 1");
+  if (!userColumns.has("preferred_language")) database.exec("ALTER TABLE users ADD COLUMN preferred_language TEXT NOT NULL DEFAULT 'en' CHECK(preferred_language IN ('en','de'))");
   const apiPolicyColumns = new Set(database.prepare("PRAGMA table_info(user_api_policies)").all().map((column) => column.name));
   if (!apiPolicyColumns.has("all_visible_resources")) database.exec("ALTER TABLE user_api_policies ADD COLUMN all_visible_resources INTEGER NOT NULL DEFAULT 0");
   const emailSettingsColumns = new Set(database.prepare("PRAGMA table_info(email_settings)").all().map((column) => column.name));
@@ -1685,7 +1696,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     const customerFilter = customerIds
       ? `AND u.customer_id IN (${customerIds.map(() => "?").join(",")})`
       : "";
-    return database.prepare(`SELECT u.id,u.customer_id,u.email,u.display_name,
+    return database.prepare(`SELECT u.id,u.customer_id,u.email,u.display_name,u.preferred_language,
       COALESCE(p.email_enabled,0) AS email_enabled,
       COALESCE(p.infrastructure_alerts,1) AS infrastructure_alerts,
       COALESCE(p.resolution_alerts,1) AS resolution_alerts
@@ -1697,6 +1708,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       customerId: row.customer_id,
       email: row.email,
       displayName: row.display_name,
+      preferredLanguage: row.preferred_language || "en",
       emailEnabled: Boolean(row.email_enabled),
       infrastructureAlerts: Boolean(row.infrastructure_alerts),
       resolutionAlerts: Boolean(row.resolution_alerts),
@@ -1704,7 +1716,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   }
 
   function maintenanceDeliveryRecipients(eventId) {
-    return database.prepare(`SELECT d.id AS delivery_id,u.id,u.customer_id,u.email,u.display_name,
+    return database.prepare(`SELECT d.id AS delivery_id,u.id,u.customer_id,u.email,u.display_name,u.preferred_language,
       COALESCE(p.email_enabled,0) AS email_enabled,
       COALESCE(p.infrastructure_alerts,1) AS infrastructure_alerts,
       COALESCE(p.resolution_alerts,1) AS resolution_alerts
@@ -1717,6 +1729,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       customerId: row.customer_id,
       email: row.email,
       displayName: row.display_name,
+      preferredLanguage: row.preferred_language || "en",
       emailEnabled: Boolean(row.email_enabled),
       infrastructureAlerts: Boolean(row.infrastructure_alerts),
       resolutionAlerts: Boolean(row.resolution_alerts),
@@ -1976,7 +1989,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (!result.changes) throw problem("Customer does not exist", "customer_not_found", 404);
     },
 
-    async createUser({ email, displayName, password, role = "customer", customerId = null }) {
+    async createUser({ email, displayName, password, role = "customer", customerId = null, preferredLanguage = "en" }) {
       const normalized = normalizeEmail(email);
       if (!/^\S+@\S+\.\S+$/.test(normalized)) throw problem("A valid email address is required");
       if (getUserByEmailRow.get(normalized)) throw problem("A user with this email address already exists", "email_in_use", 409);
@@ -1984,13 +1997,14 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (role === "customer" && !customerId) throw problem("Customer users must belong to a customer account");
       if (customerId && !getCustomerRow.get(customerId)) throw problem("Customer does not exist", "customer_not_found");
       const name = String(displayName || normalized).trim();
+      const language = normalizePreferredLanguage(preferredLanguage);
       const now = Date.now();
       const id = randomToken(18);
-      database.prepare("INSERT INTO users (id,customer_id,email,display_name,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?, 'active',?,?)")
-        .run(id, customerId, normalized, name, await hashPassword(password), role, now, now);
+      database.prepare("INSERT INTO users (id,customer_id,email,display_name,password_hash,preferred_language,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?, 'active',?,?)")
+        .run(id, customerId, normalized, name, await hashPassword(password), language, role, now, now);
       return publicUser(getUserRow.get(id));
     },
-    async createInvitedUser({ email, displayName, role = "customer", customerId = null }) {
+    async createInvitedUser({ email, displayName, role = "customer", customerId = null, preferredLanguage = "en" }) {
       const normalized = normalizeEmail(email);
       if (!/^\S+@\S+\.\S+$/.test(normalized)) throw problem("A valid email address is required");
       if (getUserByEmailRow.get(normalized)) throw problem("A user with this email address already exists", "email_in_use", 409);
@@ -1999,12 +2013,13 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (customerId && !getCustomerRow.get(customerId)) throw problem("Customer does not exist", "customer_not_found");
       const name = String(displayName || normalized).trim();
       if (!name || name.length > 100) throw problem("Display name must contain 1-100 characters");
+      const language = normalizePreferredLanguage(preferredLanguage);
       const now = Date.now();
       const id = randomToken(18);
       database.prepare(`INSERT INTO users
-        (id,customer_id,email,display_name,password_hash,password_set,role,status,created_at,updated_at)
-        VALUES (?,?,?,?,?,0,?,'active',?,?)`)
-        .run(id, customerId, normalized, name, await hashPassword(randomToken(32)), role, now, now);
+        (id,customer_id,email,display_name,password_hash,password_set,preferred_language,role,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,0,?,?,'active',?,?)`)
+        .run(id, customerId, normalized, name, await hashPassword(randomToken(32)), language, role, now, now);
       return publicUser(getUserRow.get(id));
     },
     findUserForLogin: (email) => getUserByEmailRow.get(normalizeEmail(email)),
@@ -2207,6 +2222,9 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const status = input.status ?? row.status;
       const customerId = input.customerId === undefined ? row.customer_id : (input.customerId || null);
       const displayName = input.displayName === undefined ? row.display_name : String(input.displayName).trim();
+      const preferredLanguage = input.preferredLanguage === undefined
+        ? (row.preferred_language || "en")
+        : normalizePreferredLanguage(input.preferredLanguage);
       if (!["admin", "customer"].includes(role) || !["active", "disabled"].includes(status)) throw problem("Invalid user update");
       if (!displayName || displayName.length > 100) throw problem("Display name must contain 1-100 characters");
       if (role === "customer" && !customerId) throw problem("Customer users must belong to a customer account");
@@ -2215,8 +2233,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (row.role === "admin" && row.status === "active" && (role !== "admin" || status !== "active") && activeAdmins <= 1) {
         throw problem("The last active administrator cannot be disabled or demoted", "last_admin");
       }
-      database.prepare("UPDATE users SET customer_id=?,display_name=?,role=?,status=?,updated_at=? WHERE id=?")
-        .run(customerId, displayName, role, status, Date.now(), id);
+      database.prepare("UPDATE users SET customer_id=?,display_name=?,preferred_language=?,role=?,status=?,updated_at=? WHERE id=?")
+        .run(customerId, displayName, preferredLanguage, role, status, Date.now(), id);
       if (status === "disabled") {
         const now = Date.now();
         database.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
@@ -2238,10 +2256,17 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       }
       database.prepare("DELETE FROM users WHERE id=?").run(id);
     },
-    updateProfile(id, displayName) {
-      const name = String(displayName || "").trim();
+    updateProfile(id, input) {
+      const row = database.prepare("SELECT * FROM users WHERE id=?").get(id);
+      if (!row) throw problem("User does not exist", "user_not_found", 404);
+      const payload = typeof input === "string" ? { displayName: input } : (input || {});
+      const name = payload.displayName === undefined ? row.display_name : String(payload.displayName || "").trim();
+      const preferredLanguage = payload.preferredLanguage === undefined
+        ? (row.preferred_language || "en")
+        : normalizePreferredLanguage(payload.preferredLanguage);
       if (!name || name.length > 100) throw problem("Display name must contain 1-100 characters");
-      database.prepare("UPDATE users SET display_name=?,updated_at=? WHERE id=?").run(name, Date.now(), id);
+      database.prepare("UPDATE users SET display_name=?,preferred_language=?,updated_at=? WHERE id=?")
+        .run(name, preferredLanguage, Date.now(), id);
       return publicUser(getUserRow.get(id));
     },
     async updatePassword(id, password, { revokeSessions = true } = {}) {
@@ -3759,20 +3784,20 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (!row) throw problem("Support ticket does not exist", "support_ticket_not_found", 404);
       if (audience === "admin") {
         if (row.assigned_to) {
-          const assigned = database.prepare(`SELECT id,email,display_name FROM users
+          const assigned = database.prepare(`SELECT id,email,display_name,preferred_language FROM users
             WHERE id=? AND role='admin' AND status='active'`).get(row.assigned_to);
-          if (assigned) return [{ id: assigned.id, email: assigned.email, displayName: assigned.display_name }];
+          if (assigned) return [{ id: assigned.id, email: assigned.email, displayName: assigned.display_name, preferredLanguage: assigned.preferred_language || "en" }];
         }
-        return database.prepare(`SELECT id,email,display_name FROM users
+        return database.prepare(`SELECT id,email,display_name,preferred_language FROM users
           WHERE role='admin' AND status='active' ORDER BY id`).all().map((entry) => ({
-          id: entry.id, email: entry.email, displayName: entry.display_name,
+          id: entry.id, email: entry.email, displayName: entry.display_name, preferredLanguage: entry.preferred_language || "en",
         }));
       }
-      return database.prepare(`SELECT u.id,u.email,u.display_name FROM users u
+      return database.prepare(`SELECT u.id,u.email,u.display_name,u.preferred_language FROM users u
         JOIN customers c ON c.id=u.customer_id
         WHERE u.customer_id=? AND u.role='customer' AND u.status='active' AND c.status='active'
         ORDER BY u.id`).all(row.customer_id).map((entry) => ({
-        id: entry.id, email: entry.email, displayName: entry.display_name,
+        id: entry.id, email: entry.email, displayName: entry.display_name, preferredLanguage: entry.preferred_language || "en",
       }));
     },
     listSupportAssignees() {

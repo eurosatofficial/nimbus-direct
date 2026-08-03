@@ -185,11 +185,14 @@ export const nimbusOpenApi = {
     "/profile": {
       patch: operation({
         tags: "Account",
-        summary: "Update the current user's display name",
+        summary: "Update the current user's profile and email language",
         body: {
           type: "object",
-          required: ["displayName"],
-          properties: { displayName: { type: "string" } },
+          minProperties: 1,
+          properties: {
+            displayName: { type: "string" },
+            preferredLanguage: { type: "string", enum: ["en", "de"] },
+          },
         },
       }),
     },

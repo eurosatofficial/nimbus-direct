@@ -31,8 +31,11 @@ test("invitations are single-use, hashed at rest, and activate a pending account
       email: "invited@example.test",
       displayName: "Invited User",
       customerId: customer.id,
+      preferredLanguage: "de",
     });
     assert.equal(invited.passwordSet, false);
+    assert.equal(invited.preferredLanguage, "de");
+    assert.equal(store.updateProfile(invited.id, { preferredLanguage: "en" }).preferredLanguage, "en");
     assert.equal(store.findUserForLogin(invited.email).password_set, 0);
 
     const first = store.createAccountToken({

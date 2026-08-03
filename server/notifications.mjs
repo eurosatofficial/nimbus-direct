@@ -23,6 +23,63 @@ function actionLabel(action) {
   })[action] || String(action || "Action").replaceAll("_", " ");
 }
 
+function germanActionLabel(action) {
+  return ({
+    start: "Starten",
+    stop: "Stoppen",
+    shutdown: "Herunterfahren",
+    reboot: "Neustart",
+    reset: "Zurücksetzen",
+    suspend: "Pausieren",
+    resume: "Fortsetzen",
+    snapshot_create: "Snapshot-Erstellung",
+    snapshot_restore: "Snapshot-Wiederherstellung",
+    snapshot_delete: "Snapshot-Löschung",
+  })[action] || actionLabel(action);
+}
+
+function localizedEmailEvent(event, resource, language) {
+  if (String(language || "en").toLowerCase() !== "de") return event;
+  const label = resourceLabel(resource);
+  if (event.type?.startsWith("action.")) {
+    const action = event.type.slice("action.".length);
+    const actionName = germanActionLabel(action);
+    const success = event.category === "action_success";
+    return {
+      ...event,
+      title: success ? `${actionName} abgeschlossen` : `${actionName} fehlgeschlagen`,
+      message: success
+        ? `${actionName} wurde auf ${label} erfolgreich abgeschlossen.`
+        : `Proxmox meldet, dass ${actionName.toLowerCase()} auf ${label} fehlgeschlagen ist.`,
+    };
+  }
+  const typeMatch = event.type?.match(/^alert\.(offline|cpu|memory|storage)\.(firing|resolved)$/);
+  if (!typeMatch) return event;
+  const [, metric, state] = typeMatch;
+  const values = [...String(event.message || "").matchAll(/(\d+)%?/g)].map((match) => Number(match[1]));
+  if (metric === "offline") {
+    const minutes = values[0] || resource?.alertPolicy?.sustainMinutes || 1;
+    return state === "firing"
+      ? { ...event, title: `${label} ist offline`, message: `${label} ist seit ${minutes} Minute${minutes === 1 ? "" : "n"} ausgeschaltet.` }
+      : { ...event, title: `${label} ist wieder online`, message: `${label} läuft wieder.` };
+  }
+  const noun = { cpu: "CPU-Auslastung", memory: "Arbeitsspeicherauslastung", storage: "Speicherauslastung" }[metric];
+  const threshold = values[0] ?? resource?.alertPolicy?.[`${metric}Threshold`] ?? 0;
+  const current = values.at(-1) ?? 0;
+  const minutes = values.length > 2 ? values[1] : (resource?.alertPolicy?.sustainMinutes || 1);
+  return state === "firing"
+    ? {
+      ...event,
+      title: metric === "storage" ? `Speicher auf ${label} wird knapp` : `Hohe ${noun} auf ${label}`,
+      message: `${noun} liegt seit ${minutes} Minute${minutes === 1 ? "" : "n"} bei oder über ${threshold} %. Die aktuelle Auslastung beträgt ${current} %.`,
+    }
+    : {
+      ...event,
+      title: `${noun} auf ${label} hat sich normalisiert`,
+      message: `${noun} liegt wieder unter ${threshold} %. Die aktuelle Auslastung beträgt ${current} %.`,
+    };
+}
+
 function categoryEnabled(preferences, category) {
   return {
     action_success: preferences.actionSuccess,
@@ -32,28 +89,30 @@ function categoryEnabled(preferences, category) {
   }[category] !== false;
 }
 
-export function notificationEmailTemplate(event, resource) {
+export function notificationEmailTemplate(event, resource, language = "en") {
+  const german = String(language || "en").toLowerCase() === "de";
+  event = localizedEmailEvent(event, resource, language);
   const sentAt = new Date();
   const label = resourceLabel(resource);
   const badge = {
-    critical: { text: "Action required", background: "#fff0f0", color: "#c23b3b" },
-    warning: { text: "Infrastructure alert", background: "#fff6e7", color: "#b66a12" },
-    success: { text: "Resolved", background: "#eaf8f2", color: "#16865f" },
-    info: { text: "Nimbus update", background: "#eef0ff", color: "#5564dc" },
-  }[event.severity] || { text: "Nimbus update", background: "#eef0ff", color: "#5564dc" };
+    critical: { text: german ? "Handlung erforderlich" : "Action required", background: "#fff0f0", color: "#c23b3b" },
+    warning: { text: german ? "Infrastrukturwarnung" : "Infrastructure alert", background: "#fff6e7", color: "#b66a12" },
+    success: { text: german ? "Behoben" : "Resolved", background: "#eaf8f2", color: "#16865f" },
+    info: { text: german ? "Nimbus-Aktualisierung" : "Nimbus update", background: "#eef0ff", color: "#5564dc" },
+  }[event.severity] || { text: german ? "Nimbus-Aktualisierung" : "Nimbus update", background: "#eef0ff", color: "#5564dc" };
   const details = resource ? `
             <tr><td style="color:#8a93a8;font-size:12px">Server</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(label)}</td></tr>
-            <tr><td style="color:#8a93a8;font-size:12px">Resource</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(resource.type?.toUpperCase())} ${Number(resource.vmid)} · ${escapeHtml(resource.node)}</td></tr>` : "";
+            <tr><td style="color:#8a93a8;font-size:12px">${german ? "Ressource" : "Resource"}</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(resource.type?.toUpperCase())} ${Number(resource.vmid)} · ${escapeHtml(resource.node)}</td></tr>` : "";
   const text = [
     event.title,
     "",
     event.message,
-    ...(resource ? ["", `Server: ${label}`, `Resource: ${resource.type.toUpperCase()} ${resource.vmid}`, `Node: ${resource.node}`] : []),
+    ...(resource ? ["", `Server: ${label}`, `${german ? "Ressource" : "Resource"}: ${resource.type.toUpperCase()} ${resource.vmid}`, `${german ? "Knoten" : "Node"}: ${resource.node}`] : []),
     "",
-    `Sent by Nimbus Direct at ${sentAt.toISOString()}`,
+    german ? `Gesendet von Nimbus Direct am ${sentAt.toLocaleString("de-DE", { timeZone: "UTC" })} UTC` : `Sent by Nimbus Direct at ${sentAt.toISOString()}`,
   ].join("\n");
   const html = `<!doctype html>
-<html lang="en"><body style="margin:0;background:#f4f6fb;color:#1d2740;font-family:Arial,sans-serif">
+<html lang="${german ? "de" : "en"}"><body style="margin:0;background:#f4f6fb;color:#1d2740;font-family:Arial,sans-serif">
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 14px;background:#f4f6fb">
     <tr><td align="center">
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;overflow:hidden;border:1px solid #e0e4ef;border-radius:18px;background:#ffffff">
@@ -64,7 +123,7 @@ export function notificationEmailTemplate(event, resource) {
           <p style="margin:0 0 22px;color:#667087;font-size:15px;line-height:1.65">${escapeHtml(event.message)}</p>
           ${resource ? `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0 8px">${details}</table>` : ""}
         </td></tr>
-        <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">Sent by Nimbus Direct at ${escapeHtml(sentAt.toISOString())}</td></tr>
+        <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">${german ? `Gesendet von Nimbus Direct am ${escapeHtml(sentAt.toLocaleString("de-DE", { timeZone: "UTC" }))} UTC` : `Sent by Nimbus Direct at ${escapeHtml(sentAt.toISOString())}`}</td></tr>
       </table>
     </td></tr>
   </table>
@@ -100,7 +159,7 @@ export function createNotificationService({
       deliveries += 1;
       if (sendEmail) {
         try {
-          const content = notificationEmailTemplate(created.event, resource);
+          const content = notificationEmailTemplate(created.event, resource, user.preferredLanguage);
           const job = store.queueEmail({
             to: user.email,
             ...content,

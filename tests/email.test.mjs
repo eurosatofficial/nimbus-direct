@@ -242,3 +242,52 @@ test("account-action emails contain only escaped, expiring single-use links", ()
   assert.match(recovery.html, /Reset my password/);
   assert.match(recovery.text, /current password remains valid/i);
 });
+
+test("account, security, maintenance, support, and alert templates support German", () => {
+  const invitation = invitationEmailTemplate({
+    displayName: "Liam",
+    customerName: "Beispiel GmbH",
+    actionUrl: "https://panel.example.test/?invite=secret",
+    expiresAt: Date.parse("2026-08-03T18:30:00.000Z"),
+    language: "de",
+  });
+  assert.equal(invitation.subject, "Sie wurden zu Nimbus Direct eingeladen");
+  assert.match(invitation.text, /persönliches Passwort/);
+  assert.match(invitation.html, /lang="de"/);
+
+  const security = securityEmailTemplate({
+    displayName: "Liam",
+    title: "Two-factor authentication enabled",
+    message: "Authenticator protection is active for your account.",
+    language: "de",
+  });
+  assert.equal(security.subject, "Nimbus Direct: Zwei-Faktor-Authentifizierung aktiviert");
+  assert.match(security.html, /Kontosicherheit/);
+
+  const maintenance = maintenanceEmailTemplate({
+    displayName: "Liam",
+    language: "de",
+    event: {
+      kind: "maintenance",
+      status: "scheduled",
+      severity: "warning",
+      title: "Netzwerkwartung",
+      message: "Kurze Unterbrechung möglich.",
+      startsAt: Date.parse("2026-08-03T22:00:00.000Z"),
+      endsAt: Date.parse("2026-08-03T23:00:00.000Z"),
+      lockGroups: [],
+    },
+  });
+  assert.equal(maintenance.subject, "Geplant: Netzwerkwartung");
+  assert.match(maintenance.text, /Geplante Wartung/);
+
+  const support = supportTicketEmailTemplate({
+    displayName: "Liam",
+    ticket: { reference: "ND-1", subject: "Hilfe", status: "waiting_customer" },
+    message: "Bitte erneut testen.",
+    actorName: "Support",
+    language: "de",
+  });
+  assert.equal(support.subject, "[ND-1] Neue Antwort: Hilfe");
+  assert.match(support.text, /Wartet auf Kunden/);
+});

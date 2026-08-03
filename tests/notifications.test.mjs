@@ -18,6 +18,7 @@ async function fixture(callback) {
       displayName: "Operations",
       password: "customer password for notification tests",
       customerId: customer.id,
+      preferredLanguage: "de",
     });
     const admin = await store.createUser({
       email: "admin@example.com",
@@ -97,6 +98,7 @@ test("notification service delivers once per user preference and queues the bran
     assert.equal(store.listNotifications(user.id).unread, 1);
     assert.equal(store.listEmailJobs().total, 1);
     assert.equal(store.listEmailJobs().items[0].category, "notification");
+    assert.equal(store.listEmailJobs().items[0].subject, "Neustart abgeschlossen");
     assert.equal(processCalls, 1);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(pushed.length, 1);
@@ -117,6 +119,10 @@ test("notification service delivers once per user preference and queues the bran
     const content = notificationEmailTemplate(result.event, store.getResource(resourceId));
     assert.match(content.html, /nimbus <span[^>]*>direct/);
     assert.match(content.text, /QEMU 101/);
+    const german = notificationEmailTemplate(result.event, store.getResource(resourceId), "de");
+    assert.equal(german.subject, "Neustart abgeschlossen");
+    assert.match(german.text, /erfolgreich abgeschlossen/);
+    assert.match(german.html, /lang="de"/);
   });
 });
 

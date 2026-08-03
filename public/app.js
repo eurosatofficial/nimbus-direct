@@ -8,7 +8,7 @@ import {
   setLanguage,
   t,
   translateDocument,
-} from "./i18n.js?v=20260803-04";
+} from "./i18n.js?v=20260803-05";
 
 const state = {
   user: null,
@@ -446,6 +446,7 @@ function friendlyError(error) {
     email_not_configured: "Save the SMTP settings before testing email delivery.",
     email_disabled: "Email delivery is currently disabled.",
     invalid_email_address: "Enter a valid email address.",
+    invalid_preferred_language: "Choose English or German for account emails.",
     email_in_use: "A Nimbus account already uses that email address.",
     customer_disabled: "Activate the customer account before sending an invitation.",
     invalid_smtp_host: "Enter an SMTP hostname without a protocol or path.",
@@ -564,11 +565,29 @@ async function loadSession() {
     state.csrfToken = result.csrfToken;
     setAuthenticated(true);
     applyUser();
+    await syncPreferredLanguage();
     await loadDashboard();
     route();
   } catch (error) {
     setDemoReadOnly(error.payload?.demoReadOnly);
     setAuthenticated(false);
+  }
+}
+
+async function syncPreferredLanguage({ quiet = true } = {}) {
+  if (!state.user || state.demoReadOnly) return;
+  const preferredLanguage = getResolvedLanguage();
+  if (state.user.preferredLanguage === preferredLanguage) return;
+  try {
+    const result = await apiFetch("/api/v1/profile", {
+      method: "PATCH",
+      body: { preferredLanguage },
+    });
+    state.user = result.user;
+    if (state.dashboard) state.dashboard.user = result.user;
+    applyUser();
+  } catch (error) {
+    if (!quiet) showToast("error", "Could not save language", friendlyError(error));
   }
 }
 
@@ -2166,6 +2185,7 @@ function renderAdminUsers() {
       <td><div class="server-name"><span class="server-avatar">${escapeHtml(initials(user.displayName))}</span><span class="server-copy"><strong>${escapeHtml(user.displayName)}</strong><small>${escapeHtml(user.email)}</small></span></div></td>
       <td>${escapeHtml(user.customerName || "Global")}</td>
       <td><span class="role-badge ${user.role === "admin" ? "platform" : ""}">${escapeHtml(user.role)}</span></td>
+      <td><span class="status-badge">${escapeHtml((user.preferredLanguage || "en").toUpperCase())}</span></td>
       <td>${onboarding}</td>
       <td><span class="status-badge ${user.mfaEnabled ? "" : "disabled"}">${user.mfaEnabled ? "Enabled" : "Off"}</span></td>
       <td><span class="status-badge ${apiPolicy?.enabled ? "" : "disabled"}">${apiPolicy?.enabled ? `${Number(apiPolicy.activeKeys || 0)} active` : "Off"}</span></td>
@@ -2186,6 +2206,7 @@ function renderAdminUsers() {
         <div class="field"><label for="userEmail">Email</label><input id="userEmail" name="email" type="email" maxlength="254" required></div>
         <div class="field"><label for="userRole">Role</label><select id="userRole" name="role"><option value="customer">Customer</option><option value="admin">Administrator</option></select></div>
         <div class="field"><label for="userCustomer">Customer</label><select id="userCustomer" name="customerId">${customerOptions()}</select></div>
+        <div class="field full"><label for="userPreferredLanguage">Email language</label><select id="userPreferredLanguage" name="preferredLanguage"><option value="en" ${getResolvedLanguage() === "en" ? "selected" : ""}>English</option><option value="de" ${getResolvedLanguage() === "de" ? "selected" : ""}>Deutsch</option></select><small>Used for invitations, security notices, alerts, maintenance, and support emails.</small></div>
         <div class="field full"><label for="userOnboardingMode">Account access</label><select id="userOnboardingMode" name="onboardingMode"><option value="invitation" ${invitationReady ? "" : "disabled"}>Email secure invitation${invitationReady ? "" : " (configure Email Center first)"}</option><option value="password" ${invitationReady ? "" : "selected"}>Set temporary password manually</option></select><small>Invitation links are single-use and expire after 30 minutes.</small></div>
         <div class="field full" data-onboarding-password ${invitationReady ? "hidden" : ""}><label for="userPassword">Temporary password</label><input id="userPassword" name="password" type="password" minlength="12" maxlength="256" ${invitationReady ? "" : "required"} autocomplete="new-password"></div>
       </div>
@@ -2201,7 +2222,7 @@ function renderAdminUsers() {
   </section>
   <section class="panel" style="margin-top:18px">
     <header class="panel-header"><div><h2>Users</h2><p>${plural(users.length, "account")}</p></div></header>
-    <div class="table-wrap"><table class="data-table"><thead><tr><th>User</th><th>Customer</th><th>Role</th><th>Onboarding</th><th>2FA</th><th>API</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${userRows}</tbody></table></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>User</th><th>Customer</th><th>Role</th><th>Language</th><th>Onboarding</th><th>2FA</th><th>API</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${userRows}</tbody></table></div>
   </section>`;
 }
 
@@ -2344,7 +2365,7 @@ function openUserEditor(userId) {
   els.editForm.dataset.kind = "user";
   els.editForm.dataset.id = user.id;
   els.editDialogTitle.textContent = "Edit user";
-  els.editDialogBody.innerHTML = `<div class="form-grid"><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(user.email)}"></div><div class="field"><label for="editUserName">Display name</label><input id="editUserName" name="displayName" maxlength="100" required value="${escapeHtml(user.displayName)}"></div><div class="field"><label for="editUserStatus">Status</label><select id="editUserStatus" name="status"><option value="active" ${user.status === "active" ? "selected" : ""}>Active</option><option value="disabled" ${user.status === "disabled" ? "selected" : ""}>Disabled</option></select></div><div class="field"><label for="editUserRole">Role</label><select id="editUserRole" name="role"><option value="customer" ${user.role === "customer" ? "selected" : ""}>Customer</option><option value="admin" ${user.role === "admin" ? "selected" : ""}>Administrator</option></select></div><div class="field"><label for="editUserCustomer">Customer</label><select id="editUserCustomer" name="customerId">${customerOptions(user.customerId || "")}</select></div><div class="field full"><label for="editUserPassword">${passwordLabel} <span class="optional">(optional)</span></label><input id="editUserPassword" name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="${passwordHelp}"></div>${user.mfaEnabled && user.id !== state.user.id ? `<label class="policy-checkbox full danger-zone"><input name="resetMfa" type="checkbox"><span><strong>Reset two-factor authentication</strong><small>Requires your administrator password below. The user will be signed out everywhere and must enroll again.</small></span></label><div class="field full"><label for="adminPasswordForMfaReset">Your administrator password</label><input id="adminPasswordForMfaReset" name="adminPasswordForMfaReset" type="password" autocomplete="current-password"></div>` : `<div class="field full"><label>Two-factor authentication</label><input disabled value="${user.mfaEnabled ? "Enabled" : "Not enabled"}"></div>`}</div>`;
+  els.editDialogBody.innerHTML = `<div class="form-grid"><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(user.email)}"></div><div class="field"><label for="editUserName">Display name</label><input id="editUserName" name="displayName" maxlength="100" required value="${escapeHtml(user.displayName)}"></div><div class="field"><label for="editUserStatus">Status</label><select id="editUserStatus" name="status"><option value="active" ${user.status === "active" ? "selected" : ""}>Active</option><option value="disabled" ${user.status === "disabled" ? "selected" : ""}>Disabled</option></select></div><div class="field"><label for="editUserRole">Role</label><select id="editUserRole" name="role"><option value="customer" ${user.role === "customer" ? "selected" : ""}>Customer</option><option value="admin" ${user.role === "admin" ? "selected" : ""}>Administrator</option></select></div><div class="field"><label for="editUserCustomer">Customer</label><select id="editUserCustomer" name="customerId">${customerOptions(user.customerId || "")}</select></div><div class="field full"><label for="editUserPreferredLanguage">Email language</label><select id="editUserPreferredLanguage" name="preferredLanguage"><option value="en" ${(user.preferredLanguage || "en") === "en" ? "selected" : ""}>English</option><option value="de" ${user.preferredLanguage === "de" ? "selected" : ""}>Deutsch</option></select><small>Used for invitations and automatic account emails.</small></div><div class="field full"><label for="editUserPassword">${passwordLabel} <span class="optional">(optional)</span></label><input id="editUserPassword" name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="${passwordHelp}"></div>${user.mfaEnabled && user.id !== state.user.id ? `<label class="policy-checkbox full danger-zone"><input name="resetMfa" type="checkbox"><span><strong>Reset two-factor authentication</strong><small>Requires your administrator password below. The user will be signed out everywhere and must enroll again.</small></span></label><div class="field full"><label for="adminPasswordForMfaReset">Your administrator password</label><input id="adminPasswordForMfaReset" name="adminPasswordForMfaReset" type="password" autocomplete="current-password"></div>` : `<div class="field full"><label>Two-factor authentication</label><input disabled value="${user.mfaEnabled ? "Enabled" : "Not enabled"}"></div>`}</div>`;
   els.editDialogError.textContent = "";
   els.editDialog.showModal();
 }
@@ -2819,6 +2840,7 @@ async function completeAuthentication(result) {
   state.mfaChallenge = null;
   setAuthenticated(true);
   applyUser();
+  await syncPreferredLanguage();
   await loadDashboard();
   location.hash = "#overview";
   route();
@@ -3954,7 +3976,10 @@ window.addEventListener("nimbusappearancechange", () => {
 window.addEventListener("nimbuslanguagechange", () => {
   refreshLanguageControls();
   if (state.lastUpdatedAt) els.lastUpdated.textContent = t(`Updated ${formatDate(state.lastUpdatedAt)}`);
-  if (state.user) route();
+  if (state.user) {
+    route();
+    void syncPreferredLanguage({ quiet: false });
+  }
   else translateDocument();
 });
 document.addEventListener("visibilitychange", scheduleTaskPolling);

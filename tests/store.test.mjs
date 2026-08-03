@@ -551,6 +551,7 @@ test("existing databases receive the snapshot limit column without losing assign
       assert.ok(sessionColumns.includes("user_agent"));
       const userColumns = store.database.prepare("PRAGMA table_info(users)").all().map((column) => column.name);
       assert.ok(userColumns.includes("password_set"));
+      assert.ok(userColumns.includes("preferred_language"));
       const emailTables = store.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'email_%' ORDER BY name").all().map((row) => row.name);
       assert.deepEqual(emailTables, ["email_jobs", "email_settings"]);
       const emailColumns = store.database.prepare("PRAGMA table_info(email_settings)").all().map((column) => column.name);

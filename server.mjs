@@ -458,6 +458,7 @@ function queueSecurityNotice(user, { title, message, ipAddress = null }) {
       title,
       message,
       ipAddress,
+      language: user.preferred_language || user.preferredLanguage,
     });
     store.queueEmail({
       to: user.email,
@@ -504,6 +505,7 @@ function queueInvitationEmail(user, accountToken, createdBy) {
     customerName: user.customerName,
     actionUrl: accountActionUrl(settings.appUrl, "invitation", accountToken.token),
     expiresAt: accountToken.expiresAt,
+    language: user.preferredLanguage,
   });
   const job = store.queueEmail({
     to: user.email,
@@ -522,6 +524,7 @@ function queuePasswordResetEmail(user, accountToken) {
     displayName: user.display_name,
     actionUrl: accountActionUrl(settings.appUrl, "password_reset", accountToken.token),
     expiresAt: accountToken.expiresAt,
+    language: user.preferred_language || user.preferredLanguage,
   });
   const job = store.queueEmail({
     to: user.email,
@@ -555,6 +558,7 @@ function queueMaintenanceEmails({ event, deliveries }, { resolution = false, cre
         displayName: delivery.displayName,
         event,
         appUrl: maintenancePanelUrl(),
+        language: delivery.preferredLanguage,
       });
       const job = store.queueEmail({
         to: delivery.email,
@@ -607,6 +611,7 @@ function queueSupportEmails({
         actorName: actor?.displayName || "Nimbus Direct support",
         eventType,
         appUrl: supportPanelUrl(ticket.id),
+        language: recipient.preferredLanguage,
       });
       store.queueEmail({
         to: recipient.email,
@@ -3314,7 +3319,11 @@ async function routeCustomer(request, response, pathname) {
 
   if (pathname === "/api/v1/profile" && request.method === "PATCH") {
     if (!requireCsrf(request, response, session)) return true;
-    const user = store.updateProfile(session.user.id, (await readBody(request)).displayName);
+    const input = await readBody(request);
+    if (input.displayName === undefined && input.preferredLanguage === undefined) {
+      sendJson(response, 400, { error: "profile_update_empty" }); return true;
+    }
+    const user = store.updateProfile(session.user.id, input);
     audit(request, session, "profile.updated");
     sendJson(response, 200, { user }); return true;
   }
