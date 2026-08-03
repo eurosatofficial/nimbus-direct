@@ -92,7 +92,9 @@ svg { display: block; }
 
 .auth-view { min-height: 100vh; padding: 40px 20px; display: grid; place-items: center; background: radial-gradient(circle at 20% 10%, #eef0ff 0, transparent 30%), var(--canvas); }
 .auth-brand { top: 30px; left: max(22px, 4vw); position: fixed; }
-.auth-appearance { top: 24px; right: max(22px, 4vw); position: fixed; border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); }
+.auth-appearance, .auth-language { top: 24px; position: fixed; border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); }
+.auth-appearance { right: max(22px, 4vw); }
+.auth-language { right: calc(max(22px, 4vw) + 54px); }
 .auth-card { width: min(100%, 430px); padding: 38px; border: 1px solid var(--line); border-radius: 20px; background: rgba(255, 255, 255, .94); box-shadow: 0 28px 80px rgba(31, 40, 75, .11); }
 .auth-icon { width: 46px; height: 46px; margin-bottom: 24px; display: grid; place-items: center; border-radius: 13px; color: var(--primary); background: var(--primary-soft); font-size: 25px; }
 .auth-card h1 { margin: 8px 0 10px; font: 800 28px/1.18 Manrope, sans-serif; letter-spacing: -.8px; }
@@ -149,6 +151,9 @@ body.authenticated .auth-view { display: none; }
 .icon-button { min-width: 44px; min-height: 44px; padding: 0; display: inline-grid; place-items: center; border: 0; border-radius: 9px; color: #768096; background: transparent; font-size: 19px; }
 .icon-button:hover { color: var(--ink); background: #f2f4f8; }
 .appearance-cycle { font-family: Inter, sans-serif; font-weight: 800; }
+.language-cycle { min-width: 44px; padding: 0 8px; font: 800 10px/1 Inter, sans-serif; letter-spacing: .06em; }
+.language-cycle [data-language-code] { display: grid; place-items: center; }
+.language-globe { width: 18px; height: 18px; display: block; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .global-search { width: min(280px, 30vw); height: 44px; padding: 0 12px; display: flex; align-items: center; gap: 8px; border: 1px solid #dde1e9; border-radius: 9px; background: #fff; }
 .global-search:focus-within { border-color: var(--primary); box-shadow: var(--focus); }
 .global-search span { color: #8b93a5; font-size: 18px; }
@@ -456,6 +461,8 @@ body.authenticated .auth-view { display: none; }
 .appearance-option:hover { border-color: color-mix(in srgb, var(--primary) 55%, var(--line)); background: var(--surface-hover); }
 .appearance-option.active { color: var(--ink); border-color: var(--primary); background: var(--primary-soft); box-shadow: var(--focus); }
 .appearance-option-icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px; color: var(--primary); background: var(--surface); font-size: 17px; }
+.language-option-icon { font-size: 10px; font-weight: 900; letter-spacing: .06em; }
+.language-option-icon .language-globe { width: 19px; height: 19px; }
 .appearance-option strong, .appearance-option small { display: block; }
 .appearance-option strong { font-size: 12px; }
 .appearance-option small { margin-top: 3px; color: var(--muted); font-size: 9px; }
@@ -864,6 +871,18 @@ body.authenticated .auth-view { display: none; }
 .maintenance-create-form select[multiple], .form-dialog select[multiple] { min-height: 124px; padding: 7px; }
 .maintenance-create-form select[multiple] option, .form-dialog select[multiple] option { padding: 7px 8px; border-radius: 6px; }
 .maintenance-create-form select[multiple] option:checked, .form-dialog select[multiple] option:checked { color: #fff; background: linear-gradient(var(--primary), var(--primary)); }
+.maintenance-lock-policy { min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: #fafbfe; }
+.maintenance-lock-policy legend { padding: 0 6px; color: #4d576d; font-size: 11px; font-weight: 800; }
+.maintenance-lock-policy > p { margin: 0 0 11px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.maintenance-lock-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.maintenance-lock-options .policy-checkbox { background: #fff; }
+.maintenance-lock-notice { margin: -4px 0 18px; padding: 13px 15px; display: flex; align-items: center; gap: 11px; border: 1px solid #efd2c8; border-radius: 12px; background: #fff7f3; color: #8a4938; }
+.maintenance-lock-notice > span:first-child { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; border-radius: 9px; color: #b0523f; background: #ffebe6; font-weight: 900; }
+.maintenance-lock-notice strong, .maintenance-lock-notice small, .maintenance-section-lock strong, .maintenance-section-lock small { display: block; }
+.maintenance-lock-notice strong { font-size: 11px; }
+.maintenance-lock-notice small, .maintenance-section-lock small { margin-top: 3px; color: inherit; opacity: .82; font-size: 9px; line-height: 1.45; }
+.maintenance-section-lock { margin-bottom: 14px; }
+.maintenance-locked:disabled { cursor: not-allowed; filter: saturate(.45); opacity: .56; }
 .maintenance-admin-panel { margin-top: 0; }
 
 /* Tenant-safe support ticket center */
@@ -1154,6 +1173,7 @@ body.authenticated .auth-view { display: none; }
   .maintenance-overview-banner, .maintenance-status-hero { grid-template-columns: 44px minmax(0, 1fr); }
   .maintenance-overview-banner .button, .maintenance-status-hero > .pill { grid-column: 2; justify-self: start; }
   .maintenance-item { grid-template-columns: 40px minmax(0, 1fr); }
+  .maintenance-lock-options { grid-template-columns: 1fr; }
   .maintenance-admin-actions, .maintenance-item > .row-button { grid-column: 2; justify-content: flex-start; justify-self: start; }
   .support-hero { grid-template-columns: 44px minmax(0, 1fr); }
   .support-summary { grid-column: 1 / -1; grid-template-columns: repeat(3, 1fr); }
@@ -1506,6 +1526,15 @@ body.authenticated .auth-view { display: none; }
 :root[data-theme="dark"] :is(.connection-card.offline small, .error-banner small) { color: #d69aa0; }
 
 :root[data-theme="dark"] .notice { color: var(--body); }
+:root[data-theme="dark"] .maintenance-lock-policy { border-color: var(--line); background: var(--surface-alt); }
+:root[data-theme="dark"] .maintenance-lock-policy legend { color: var(--body); }
+:root[data-theme="dark"] .maintenance-lock-options .policy-checkbox { background: var(--surface); }
+:root[data-theme="dark"] .maintenance-lock-notice {
+  color: #f2bd7c;
+  border-color: #5b4630;
+  background: #2e251c;
+}
+:root[data-theme="dark"] .maintenance-lock-notice > span:first-child { color: #f2bd7c; background: #473522; }
 :root[data-theme="dark"] :is(
   .support-summary span,
   .security-coverage,

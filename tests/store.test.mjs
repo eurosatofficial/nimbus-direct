@@ -268,7 +268,7 @@ test("maintenance publishing freezes assignment-derived recipients and preserves
       ]);
       const acmeResource = "production:qemu:101";
       const betaResource = "production:qemu:203";
-      store.assignResource({ customerId: acme.id, resourceId: acmeResource, permissions: ["view_status"] });
+      store.assignResource({ customerId: acme.id, resourceId: acmeResource, permissions: ["view_status", "reboot", "console"] });
       store.assignResource({ customerId: beta.id, resourceId: betaResource, permissions: ["view_status"] });
 
       const now = Date.now();
@@ -280,10 +280,12 @@ test("maintenance publishing freezes assignment-derived recipients and preserves
         startsAt: now + 60_000,
         endsAt: now + 120_000,
         notifyEmail: true,
+        lockGroups: ["power_management"],
         targets: [{ type: "resource", id: acmeResource }],
       }, { userId: admin.id });
       assert.equal(draft.status, "draft");
       assert.equal(draft.targets[0].id, acmeResource);
+      assert.deepEqual(draft.lockGroups.map((group) => group.id), ["power_management"]);
       const published = store.publishMaintenanceEvent(draft.id, { userId: admin.id });
       assert.equal(published.event.status, "scheduled");
       assert.equal(published.event.recipientCount, 2);
@@ -291,6 +293,31 @@ test("maintenance publishing freezes assignment-derived recipients and preserves
       assert.equal(store.listMaintenanceForUser(acmeOne.id).total, 1);
       assert.equal(store.listMaintenanceForUser(acmeTwo.id).total, 1);
       assert.equal(store.listMaintenanceForUser(betaUser.id).total, 0);
+      assert.equal(store.getMaintenanceActionLock(acmeOne.id, store.authorizeResource(acme.id, acmeResource, "view_status"), "reboot", now), null);
+
+      store.advanceMaintenanceEvents(now + 61_000);
+      const acmeLock = store.getMaintenanceActionLock(
+        acmeOne.id,
+        store.authorizeResource(acme.id, acmeResource, "view_status"),
+        "reboot",
+        now + 61_000,
+      );
+      assert.equal(acmeLock.group.id, "power_management");
+      assert.equal(acmeLock.eventId, draft.id);
+      assert.equal(store.getMaintenanceActionLock(
+        acmeOne.id,
+        store.authorizeResource(acme.id, acmeResource, "view_status"),
+        "console",
+        now + 61_000,
+      ), null);
+      assert.deepEqual(
+        store.listActiveMaintenanceLocksForUser(
+          acmeOne.id,
+          [store.authorizeResource(acme.id, acmeResource, "view_status")],
+          now + 61_000,
+        ).items[0].resourceIds,
+        [acmeResource],
+      );
 
       const deliveryId = store.listMaintenanceForUser(acmeOne.id).items[0].deliveryId;
       assert.throws(() => store.markMaintenanceRead(deliveryId, betaUser.id), (error) => error.code === "maintenance_not_found");
@@ -300,8 +327,13 @@ test("maintenance publishing freezes assignment-derived recipients and preserves
       // Reassigning the VM after publication cannot expose the old notice to Beta.
       store.assignResource({ customerId: beta.id, resourceId: acmeResource, permissions: ["view_status"] });
       assert.equal(store.listMaintenanceForUser(betaUser.id).total, 0);
+      assert.equal(store.getMaintenanceActionLock(
+        betaUser.id,
+        store.authorizeResource(beta.id, acmeResource, "view_status"),
+        "reboot",
+        now + 61_000,
+      ), null);
 
-      store.advanceMaintenanceEvents(now + 61_000);
       assert.equal(store.getMaintenanceEvent(draft.id).status, "active");
       store.advanceMaintenanceEvents(now + 121_000);
       assert.equal(store.getMaintenanceEvent(draft.id).status, "resolved");
@@ -328,6 +360,15 @@ test("maintenance publishing freezes assignment-derived recipients and preserves
       const resolved = store.resolveMaintenanceEvent(editable.id, { userId: admin.id });
       assert.equal(resolved.event.status, "resolved");
       assert.equal(resolved.deliveries[0].resolutionAlerts, true);
+      assert.throws(() => store.createMaintenanceEvent({
+        kind: "maintenance",
+        severity: "info",
+        title: "Invalid action lock",
+        message: "This notice must be rejected.",
+        startsAt: now + 300_000,
+        lockGroups: ["unrestricted_proxmox"],
+        targets: [{ type: "all", id: "*" }],
+      }), (error) => error.code === "invalid_maintenance_locks");
     } finally { store.close(); }
   });
 });

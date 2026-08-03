@@ -151,6 +151,23 @@ test("customer ISO boot and Snapshot Center workflows stay assignment-scoped", a
     assert.equal(maintenance.event.status, "scheduled");
     assert.equal(maintenance.event.recipientCount, 1);
     assert.equal(maintenance.queuedEmails, 0);
+    const lockedMaintenance = (await request("/api/admin/maintenance-events", {
+      method: "POST",
+      body: {
+        kind: "maintenance",
+        severity: "warning",
+        title: "Customer power controls paused",
+        message: "Power actions are paused while the hypervisor is serviced.",
+        startsAt: Date.now() - 1_000,
+        endsAt: Date.now() + 120_000,
+        notifyEmail: false,
+        lockGroups: ["power_management"],
+        publication: "publish",
+        targets: [{ type: "resource", id: resource.id }],
+      },
+    })).payload;
+    assert.equal(lockedMaintenance.event.status, "active");
+    assert.deepEqual(lockedMaintenance.event.lockGroups.map((group) => group.id), ["power_management"]);
     await request("/api/auth/logout", { method: "POST", body: {} });
     cookie = "";
     csrfToken = "";
@@ -166,12 +183,25 @@ test("customer ISO boot and Snapshot Center workflows stay assignment-scoped", a
     );
     const customerDashboard = (await request("/api/v1/dashboard")).payload;
     assert.equal(customerDashboard.maintenance.upcomingCount, 1);
+    assert.equal(customerDashboard.maintenance.activeCount, 1);
+    assert.equal(customerDashboard.maintenanceLocks.activeCount, 1);
+    assert.deepEqual(customerDashboard.maintenanceLocks.items[0].resourceIds, [resource.id]);
+    assert.deepEqual(customerDashboard.maintenanceLocks.items[0].groups.map((group) => group.id), ["power_management"]);
     assert.equal(customerDashboard.capabilities.maintenanceCenter, true);
     assert.equal(customerDashboard.capabilities.supportTicketCenter, true);
     const customerNetwork = (await request("/api/v1/network")).payload.networks;
     assert.equal(Object.keys(customerNetwork).length, customerDashboard.resources.length);
     assert.equal(customerNetwork[resource.id].primaryIp, resource.ip);
     assert.equal(customerNetwork[resource.id].source, "demo");
+    await assert.rejects(
+      () => request(`/api/v1/resources/${encodeURIComponent(resource.id)}/actions`, {
+        method: "POST",
+        body: { action: "reboot" },
+      }),
+      (error) => error.response.status === 423
+        && error.payload?.error === "maintenance_action_locked"
+        && error.payload?.lock?.group?.id === "power_management",
+    );
     const consoleLaunch = (await request(`/api/v1/resources/${encodeURIComponent(resource.id)}/console`, {
       method: "POST",
       body: {},
@@ -207,12 +237,42 @@ test("customer ISO boot and Snapshot Center workflows stay assignment-scoped", a
     });
     assert.equal(stolenSession.status, 401);
     const customerMaintenance = (await request("/api/v1/maintenance")).payload.maintenance;
-    assert.equal(customerMaintenance.items[0].title, "Demo hypervisor maintenance");
-    await request(`/api/v1/maintenance/${encodeURIComponent(customerMaintenance.items[0].deliveryId)}/read`, {
-      method: "POST",
-      body: {},
-    });
+    assert.equal(customerMaintenance.items.find((item) => item.id === maintenance.event.id)?.title, "Demo hypervisor maintenance");
+    assert.deepEqual(
+      customerMaintenance.items.find((item) => item.id === lockedMaintenance.event.id)?.lockGroups.map((group) => group.id),
+      ["power_management"],
+    );
+    for (const notice of customerMaintenance.items) {
+      await request(`/api/v1/maintenance/${encodeURIComponent(notice.deliveryId)}/read`, {
+        method: "POST",
+        body: {},
+      });
+    }
     assert.equal((await request("/api/v1/maintenance")).payload.maintenance.unread, 0);
+
+    await request("/api/auth/logout", { method: "POST", body: {} });
+    cookie = "";
+    csrfToken = "";
+    const maintenanceAdminLogin = await request("/api/auth/login", {
+      method: "POST",
+      body: { email: "admin@example.test", password: "admin password for server test" },
+    });
+    cookie = String(maintenanceAdminLogin.response.headers.get("set-cookie") || "").split(";")[0];
+    csrfToken = maintenanceAdminLogin.payload.csrfToken;
+    const resolvedLock = (await request(
+      `/api/admin/maintenance-events/${encodeURIComponent(lockedMaintenance.event.id)}/resolve`,
+      { method: "POST", body: {} },
+    )).payload.event;
+    assert.equal(resolvedLock.status, "resolved");
+    await request("/api/auth/logout", { method: "POST", body: {} });
+    cookie = "";
+    csrfToken = "";
+    const resumedCustomerLogin = await request("/api/auth/login", {
+      method: "POST",
+      body: { email: "customer@example.test", password: "customer password for server test" },
+    });
+    cookie = String(resumedCustomerLogin.response.headers.get("set-cookie") || "").split(";")[0];
+    csrfToken = resumedCustomerLogin.payload.csrfToken;
 
     const supportTicket = (await request("/api/v1/support/tickets", {
       method: "POST",

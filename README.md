@@ -12,7 +12,7 @@ Nimbus Direct is a modern, self-hosted customer control panel for Proxmox VE. Ad
 
 - Administrator control center for clusters, customers, users, inventory, direct assignments, permissions, and audit logs.
 - Administrator Operations Center with cluster reachability, node pressure, storage capacity, failed/stuck tasks, stale assignments, persistent incident history, and acknowledgement.
-- Targeted Maintenance Center for planned work and service incidents, with drafts, scheduling, assignment-derived audiences, frozen per-user deliveries, customer banners/history, resolution, and optional branded email.
+- Targeted Maintenance Center for planned work and service incidents, with drafts, scheduling, assignment-derived audiences, frozen per-user deliveries, optional grouped customer action locks, customer banners/history, resolution, and branded email.
 - Tenant-safe Support Ticket Center with customer conversations, optional assigned-resource context, administrator ownership/status/priority controls, private internal notes, per-login unread state, audit history, and branded email updates.
 - Customer dashboard scoped to active local assignments.
 - Start, stop, shutdown, reboot, reset, suspend, and resume permission model.
@@ -37,8 +37,18 @@ Nimbus Direct is a modern, self-hosted customer control panel for Proxmox VE. Ad
 - Docker deployment with a read-only, unprivileged container.
 - Interactive and public read-only demo modes with automated isolation/security/integration tests.
 - Persistent System, Light, and Dark appearance modes across sign-in, customer, and administrator screens.
+- Complete English and German interfaces with automatic browser-language detection, a persistent manual override, and English fallback.
 
 The complete design—including schema, authorization sequence, API endpoints, least-privilege guidance, and phased MVP plan—is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The mobile/client contract, examples, token lifecycle, and route catalog are in [docs/API.md](docs/API.md).
+
+## Language
+
+Nimbus follows the browser language by default. English and German can also be
+selected explicitly from the sign-in screen, the top navigation, or
+**Settings → Language**. The selection is saved in that browser and applies
+immediately to administrator and customer screens. Unsupported browser
+languages fall back to English. Customer names, resource names, ticket content,
+and other user-provided data are never translated.
 
 ## Requirements
 
@@ -381,12 +391,15 @@ The Maintenance Center is a Nimbus-only feature and requires no additional Proxm
 1. Open **Control center → Maintenance**.
 2. Choose **Planned maintenance** or **Service incident**, enter the customer-facing title/message, severity, start time, and optional end time.
 3. Target all customers, one or more clusters, nodes, assigned resources, or customer accounts.
-4. Publish immediately or save an editable administrator-only draft.
-5. Resolve active work when complete, or cancel a scheduled window that will no longer happen.
+4. Optionally select customer action locks for **Power management**, **Console access**, **Snapshot changes**, or **ISO/CD-ROM changes**.
+5. Publish immediately or save an editable administrator-only draft.
+6. Resolve active work when complete, or cancel a scheduled window that will no longer happen.
 
 At publication, Nimbus resolves the selected infrastructure through its own active assignment database and creates an immutable delivery for each currently affected active customer user. Reassigning a VM later cannot expose the old notice to its new customer. Drafts have no deliveries and are never visible outside the administrator control center.
 
-Affected users see active/upcoming notices on the dashboard and a complete private timeline under **Maintenance**. Read state is scoped to the individual login. When Email Center delivery is enabled and the notice requests email, Nimbus queues the branded message only for users who opted into email infrastructure notices. Resolving a notice can likewise queue a recovery email for users who enabled recovery messages. In-panel maintenance remains visible even when email is disabled.
+Affected users see active/upcoming notices on the dashboard and a complete private timeline under **Maintenance**. Read state is scoped to the individual login. Selected action locks activate only when the window becomes active and are checked by the backend before Proxmox is contacted; hiding or modifying a browser button cannot bypass them. Customers retain read-only access to status, usage, snapshot lists, and ISO libraries, while administrators retain full control. Resolving or ending the window removes its locks automatically.
+
+When Email Center delivery is enabled and the notice requests email, Nimbus queues the branded message only for users who opted into email infrastructure notices. The message identifies any planned action restrictions. Resolving a notice can likewise queue a recovery email for users who enabled recovery messages. In-panel maintenance remains visible even when email is disabled.
 
 ### 14. Use the Support Ticket Center
 
@@ -438,7 +451,7 @@ Mount only the public CA certificate. Never copy a private CA key into Nimbus an
 
 SQLite data is stored in the `nimbus-data` volume. Stop Nimbus before copying it, or use a SQLite-aware backup process. Back up both the database and `APP_SECRET`, store them separately, and test restoration.
 
-The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`, native Nimbus API device/refresh-token state in `migrations/014_nimbus_api.sql`, administrator-governed user integration keys in `migrations/015_user_api_keys.sql`, and encrypted native push-device registrations in `migrations/016_mobile_push.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
+The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`, native Nimbus API device/refresh-token state in `migrations/014_nimbus_api.sql`, administrator-governed user integration keys in `migrations/015_user_api_keys.sql`, encrypted native push-device registrations in `migrations/016_mobile_push.sql`, hybrid console metadata in `migrations/017_hybrid_console.sql`, and grouped maintenance action locks in `migrations/018_maintenance_action_locks.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
 
 ## Operations
 
@@ -454,7 +467,7 @@ The numbered schema is in `migrations/001_initial.sql`, with additive task index
 - Email delivery polls its SQLite queue every five seconds by default. Temporary failures retry with increasing delays; authentication, sender, and recipient errors fail without repeated attempts. Adjust only the worker cadence and SMTP timeout with `EMAIL_QUEUE_INTERVAL_SECONDS` and `EMAIL_SMTP_TIMEOUT_SECONDS`.
 - Resource alert conditions are evaluated after successful inventory synchronization. Alert policies and incident state survive restarts; assignment removal or reassignment resets incident state.
 - Operations telemetry is normalized and stored locally. Optional node/storage permission failures retain the last good readings, while cluster, stale-assignment, and stuck-task incidents continue to evaluate.
-- Maintenance audiences are resolved from active local assignments at publication and stored as per-user delivery snapshots. Scheduled notices activate automatically; notices with an end time resolve automatically even when no browser is open.
+- Maintenance audiences are resolved from active local assignments at publication and stored as per-user delivery snapshots. Scheduled notices and their selected action locks activate automatically; notices with an end time resolve and unlock automatically even when no browser is open.
 - Support tickets are customer-account scoped, while unread markers are user scoped. Internal notes never appear in customer queries, email, or customer-visible counts.
 - TOTP enrollment windows last ten minutes and pre-authentication login challenges last five minutes. Verification and security-setting changes have independent rate limits.
 - Security policy changes are administrator-only, CSRF-protected, rate-limited, and audited. Enforcement is repeated on every request rather than relying on the current page state.

@@ -253,6 +253,14 @@ LXC and serial-display QEMU guests and noVNC for graphical QEMU guests. The
 app's normal bearer token is never injected into JavaScript or a WebSocket
 request.
 
+The dashboard also includes `maintenanceLocks`. Each active item contains a
+customer-safe event title, schedule, grouped restrictions, and only the
+resource IDs visible to that session. Clients should disable matching controls
+for immediate feedback, but this is not the security boundary: Nimbus repeats
+the maintenance lookup on every matching mutation and returns HTTP `423` with
+`maintenance_action_locked` before contacting Proxmox. Administrators are not
+subject to customer maintenance locks.
+
 ## Snapshots and installation media
 
 Snapshot routes:
@@ -286,7 +294,8 @@ SHA-256 while streaming, and forwards the ISO to Proxmox without keeping a
 second copy.
 
 ISO ownership, quota, storage policy, VM assignment, and permission checks stay
-server side.
+server side. Active maintenance can make snapshot and installation-media
+workspaces temporarily read-only while their list endpoints remain available.
 
 ## Notifications, maintenance, and support
 

@@ -69,6 +69,37 @@ export const API_ACTION_DEFINITIONS = Object.freeze([
   { id: "iso_delete", label: "Delete ISO images", group: "installation_media", permission: "iso_delete", resourceScoped: true },
 ]);
 
+export const MAINTENANCE_LOCK_GROUPS = Object.freeze([
+  {
+    id: "power_management",
+    label: "Power management",
+    description: "Start, stop, shut down, reboot, reset, suspend, and resume.",
+    permissions: ["start", "stop", "shutdown", "reboot", "reset", "suspend", "resume"],
+  },
+  {
+    id: "console_access",
+    label: "Console access",
+    description: "Creation of graphical and terminal console sessions.",
+    permissions: ["console"],
+  },
+  {
+    id: "snapshot_management",
+    label: "Snapshot changes",
+    description: "Create, restore, and delete snapshots. Snapshot viewing remains available.",
+    permissions: ["snapshot_create", "snapshot_restore", "snapshot_delete"],
+  },
+  {
+    id: "installation_media",
+    label: "ISO & CD-ROM operations",
+    description: "Upload, mount, eject, boot, and delete ISO images. The library remains visible.",
+    permissions: ["iso_upload", "iso_mount", "iso_boot", "iso_delete"],
+  },
+]);
+
+const MAINTENANCE_LOCK_GROUP_BY_PERMISSION = new Map(
+  MAINTENANCE_LOCK_GROUPS.flatMap((group) => group.permissions.map((permission) => [permission, group])),
+);
+
 export const DEFAULT_SNAPSHOT_LIMIT = 3;
 export const DEFAULT_ALERT_POLICY = Object.freeze({
   enabled: false,
@@ -290,6 +321,9 @@ function publicMaintenanceEvent(row, targets = []) {
     startsAt: row.starts_at,
     endsAt: row.ends_at || null,
     notifyEmail: Boolean(row.notify_email),
+    lockGroups: MAINTENANCE_LOCK_GROUPS
+      .filter((group) => new Set(parseJson(row.lock_groups, [])).has(group.id))
+      .map(({ id, label, description }) => ({ id, label, description })),
     targets,
     recipientCount: Number(row.recipient_count || 0),
     publishedAt: row.published_at || null,
@@ -625,6 +659,8 @@ function normalizeMaintenanceInput(input = {}, existing = null) {
   const startsAt = Number(input.startsAt ?? existing?.starts_at);
   const rawEndsAt = input.endsAt === undefined ? existing?.ends_at : input.endsAt;
   const endsAt = rawEndsAt === null || rawEndsAt === "" || rawEndsAt === undefined ? null : Number(rawEndsAt);
+  const existingLockGroups = parseJson(existing?.lock_groups, []);
+  const requestedLockGroups = input.lockGroups === undefined ? existingLockGroups : input.lockGroups;
   if (!["maintenance", "incident"].includes(kind)) throw problem("Choose planned maintenance or an incident", "invalid_maintenance_kind");
   if (!["info", "warning", "critical"].includes(severity)) throw problem("Choose a valid maintenance severity", "invalid_maintenance_severity");
   if (!title || title.length > 160) throw problem("Maintenance title must contain 1-160 characters", "invalid_maintenance_title");
@@ -635,6 +671,13 @@ function normalizeMaintenanceInput(input = {}, existing = null) {
   if (endsAt !== null && (!Number.isSafeInteger(endsAt) || endsAt <= startsAt)) {
     throw problem("Maintenance end time must be after its start time", "invalid_maintenance_schedule");
   }
+  if (!Array.isArray(requestedLockGroups)) {
+    throw problem("Choose valid maintenance action locks", "invalid_maintenance_locks");
+  }
+  const requestedLockSet = new Set(requestedLockGroups.map((value) => String(value || "").trim()));
+  if ([...requestedLockSet].some((value) => !MAINTENANCE_LOCK_GROUPS.some((group) => group.id === value))) {
+    throw problem("Choose valid maintenance action locks", "invalid_maintenance_locks");
+  }
   return {
     kind,
     severity,
@@ -643,6 +686,7 @@ function normalizeMaintenanceInput(input = {}, existing = null) {
     startsAt,
     endsAt,
     notifyEmail: input.notifyEmail === undefined ? Boolean(existing?.notify_email) : Boolean(input.notifyEmail),
+    lockGroups: MAINTENANCE_LOCK_GROUPS.filter((group) => requestedLockSet.has(group.id)).map((group) => group.id),
   };
 }
 
@@ -1341,6 +1385,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       starts_at INTEGER NOT NULL,
       ends_at INTEGER,
       notify_email INTEGER NOT NULL DEFAULT 1,
+      lock_groups TEXT NOT NULL DEFAULT '[]',
       created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
       updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
       published_at INTEGER,
@@ -1479,6 +1524,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   const consoleSessionColumns = new Set(database.prepare("PRAGMA table_info(console_sessions)").all().map((column) => column.name));
   if (!consoleSessionColumns.has("console_type")) database.exec("ALTER TABLE console_sessions ADD COLUMN console_type TEXT NOT NULL DEFAULT 'graphical' CHECK(console_type IN ('graphical','terminal'))");
   if (!consoleSessionColumns.has("console_user")) database.exec("ALTER TABLE console_sessions ADD COLUMN console_user TEXT");
+  const maintenanceEventColumns = new Set(database.prepare("PRAGMA table_info(maintenance_events)").all().map((column) => column.name));
+  if (!maintenanceEventColumns.has("lock_groups")) database.exec("ALTER TABLE maintenance_events ADD COLUMN lock_groups TEXT NOT NULL DEFAULT '[]'");
   const securityPolicyNow = Date.now();
   database.prepare(`INSERT OR IGNORE INTO security_policy
     (id,require_admin_mfa,require_customer_mfa,new_login_email,created_at,updated_at)
@@ -3252,8 +3299,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       database.exec("BEGIN IMMEDIATE");
       try {
         database.prepare(`INSERT INTO maintenance_events
-          (id,kind,title,message,severity,status,starts_at,ends_at,notify_email,created_by,updated_by,created_at,updated_at)
-          VALUES (?,?,?,?,?,'draft',?,?,?,?,?,?,?)`)
+          (id,kind,title,message,severity,status,starts_at,ends_at,notify_email,lock_groups,created_by,updated_by,created_at,updated_at)
+          VALUES (?,?,?,?,?,'draft',?,?,?,?,?,?,?,?)`)
           .run(
             id,
             event.kind,
@@ -3263,6 +3310,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
             event.startsAt,
             event.endsAt,
             event.notifyEmail ? 1 : 0,
+            JSON.stringify(event.lockGroups),
             userId,
             userId,
             now,
@@ -3287,7 +3335,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       database.exec("BEGIN IMMEDIATE");
       try {
         database.prepare(`UPDATE maintenance_events SET kind=?,title=?,message=?,severity=?,starts_at=?,ends_at=?,
-          notify_email=?,updated_by=?,updated_at=? WHERE id=?`)
+          notify_email=?,lock_groups=?,updated_by=?,updated_at=? WHERE id=?`)
           .run(
             event.kind,
             event.title,
@@ -3296,6 +3344,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
             event.startsAt,
             event.endsAt,
             event.notifyEmail ? 1 : 0,
+            JSON.stringify(event.lockGroups),
             userId,
             now,
             id,
@@ -3397,6 +3446,58 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
         limit: safeLimit,
         offset: safeOffset,
       };
+    },
+    listActiveMaintenanceLocksForUser(userId, resources = [], now = Date.now()) {
+      this.advanceMaintenanceEvents(now);
+      const rows = database.prepare(`SELECT DISTINCT e.*
+        FROM maintenance_deliveries d
+        JOIN maintenance_events e ON e.id=d.event_id
+        WHERE d.user_id=? AND e.status='active' AND e.starts_at<=?
+          AND (e.ends_at IS NULL OR e.ends_at>?) AND e.lock_groups!='[]'
+        ORDER BY CASE e.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,e.starts_at DESC`)
+        .all(userId, now, now);
+      const visibleResources = Array.isArray(resources) ? resources : [];
+      const items = [];
+      for (const row of rows) {
+        const groups = MAINTENANCE_LOCK_GROUPS
+          .filter((group) => new Set(parseJson(row.lock_groups, [])).has(group.id))
+          .map(({ id, label }) => ({ id, label }));
+        if (!groups.length) continue;
+        const targets = maintenanceTargets(row.id);
+        const resourceIds = visibleResources.filter((resource) => targets.some((target) => {
+          if (target.type === "all") return true;
+          if (target.type === "customer") return target.id === resource.customerId;
+          if (target.type === "cluster") return target.id === resource.clusterId;
+          if (target.type === "node") return target.id === `${resource.clusterId}:${resource.node}`;
+          return target.type === "resource" && target.id === resource.id;
+        })).map((resource) => resource.id);
+        if (!resourceIds.length) continue;
+        items.push({
+          eventId: row.id,
+          title: row.title,
+          severity: row.severity,
+          startsAt: row.starts_at,
+          endsAt: row.ends_at || null,
+          groups,
+          resourceIds,
+        });
+      }
+      return { items, activeCount: items.length };
+    },
+    getMaintenanceActionLock(userId, resource, permission, now = Date.now()) {
+      const group = MAINTENANCE_LOCK_GROUP_BY_PERMISSION.get(permission);
+      if (!group || !resource) return null;
+      const locks = this.listActiveMaintenanceLocksForUser(userId, [resource], now).items;
+      const lock = locks.find((item) => item.groups.some((entry) => entry.id === group.id));
+      return lock ? {
+        eventId: lock.eventId,
+        title: lock.title,
+        severity: lock.severity,
+        startsAt: lock.startsAt,
+        endsAt: lock.endsAt,
+        group: { id: group.id, label: group.label },
+        permission,
+      } : null;
     },
     markMaintenanceRead(deliveryId, userId) {
       const result = database.prepare(`UPDATE maintenance_deliveries SET read_at=COALESCE(read_at,?)

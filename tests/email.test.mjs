@@ -164,16 +164,19 @@ test("maintenance emails escape customer-facing content and describe the service
       message: "A brief interruption is possible.\nNo action is required.",
       startsAt: Date.parse("2026-07-26T22:00:00.000Z"),
       endsAt: Date.parse("2026-07-26T23:00:00.000Z"),
+      lockGroups: [{ id: "power_management", label: "Power management" }],
     },
     appUrl: "https://panel.example.test/#maintenance",
   });
   assert.equal(content.subject, "Scheduled: Network maintenance <Berlin>");
   assert.match(content.text, /2026-07-26T22:00:00\.000Z/);
   assert.match(content.text, /View maintenance status/);
+  assert.match(content.text, /Power management/);
   assert.match(content.html, /Planned maintenance · Scheduled/);
   assert.match(content.html, /Network maintenance &lt;Berlin&gt;/);
   assert.equal(content.html.includes("<Customer>"), false);
   assert.match(content.html, /A brief interruption is possible\.<br>No action is required\./);
+  assert.match(content.html, /Temporary action lock/);
 });
 
 test("support emails escape conversation content and link to the private ticket", () => {

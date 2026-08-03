@@ -149,6 +149,12 @@ export function maintenanceEmailTemplate({ displayName, event, appUrl = "" }) {
       : status === "cancelled" ? "Cancelled"
         : "Scheduled";
   const subject = `${statusLabel}: ${title}`;
+  const lockLabels = ["scheduled", "active"].includes(status) && Array.isArray(event?.lockGroups)
+    ? event.lockGroups.map((group) => oneLine(group?.label || group, "Maintenance lock", 80))
+    : [];
+  const lockSummary = lockLabels.length
+    ? `Nimbus will temporarily restrict these controls during the window: ${lockLabels.join(", ")}. Read-only access remains available.`
+    : "";
   const text = [
     `Hello ${name},`,
     "",
@@ -158,6 +164,7 @@ export function maintenanceEmailTemplate({ displayName, event, appUrl = "" }) {
     "",
     `Starts: ${startsAt.toISOString()}`,
     endsAt ? `${status === "resolved" ? "Resolved" : "Ends"}: ${endsAt.toISOString()}` : "Ends: Until further notice",
+    lockSummary || null,
     safeAppUrl ? `View maintenance status: ${safeAppUrl}` : null,
     "",
     "This notice applies only to infrastructure assigned to your Nimbus Direct customer account.",
@@ -171,6 +178,9 @@ export function maintenanceEmailTemplate({ displayName, event, appUrl = "" }) {
       : event?.severity === "warning" ? "#fff4e8"
         : "#eef0ff";
   const htmlMessage = escapeHtml(message).replace(/\r?\n/g, "<br>");
+  const htmlLockSummary = lockSummary
+    ? `<div style="margin-top:18px;padding:14px 16px;border-radius:12px;background:#fff4e8;color:#8a531d;font-size:13px;line-height:1.55"><strong>Temporary action lock</strong><br>${escapeHtml(lockSummary)}</div>`
+    : "";
   const action = safeAppUrl
     ? `<table role="presentation" cellspacing="0" cellpadding="0" style="margin-top:22px"><tr><td style="border-radius:10px;background:#5b67e8"><a href="${escapeHtml(safeAppUrl)}" style="padding:13px 20px;display:inline-block;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700">View maintenance status</a></td></tr></table>`
     : "";
@@ -188,6 +198,7 @@ export function maintenanceEmailTemplate({ displayName, event, appUrl = "" }) {
             <tr><td style="color:#8a93a8;font-size:12px">Starts</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(startsAt.toISOString())}</td></tr>
             <tr><td style="color:#8a93a8;font-size:12px">${status === "resolved" ? "Resolved" : "Ends"}</td><td align="right" style="font-size:13px;font-weight:700">${endsAt ? escapeHtml(endsAt.toISOString()) : "Until further notice"}</td></tr>
           </table>
+          ${htmlLockSummary}
           ${action}
           <div style="margin-top:22px;padding:14px 16px;border-radius:12px;background:#f7f8fb;color:#717b90;font-size:12px;line-height:1.55">This notice applies only to infrastructure assigned to your Nimbus Direct customer account.</div>
         </td></tr>

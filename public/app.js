@@ -1,4 +1,14 @@
 import { mergeNetworkAddresses } from "./network-state.js";
+import {
+  cycleLanguage,
+  getLanguagePreference,
+  getLocale,
+  getResolvedLanguage,
+  installTranslationObserver,
+  setLanguage,
+  t,
+  translateDocument,
+} from "./i18n.js?v=20260803-04";
 
 const state = {
   user: null,
@@ -59,6 +69,16 @@ const permissions = [
   ["iso_delete", "Delete uploaded ISO images"],
 ];
 
+const maintenanceLockGroups = [
+  { id: "power_management", label: "Power management", permissions: ["start", "stop", "shutdown", "reboot", "reset", "suspend", "resume"] },
+  { id: "console_access", label: "Console access", permissions: ["console"] },
+  { id: "snapshot_management", label: "Snapshot changes", permissions: ["snapshot_create", "snapshot_restore", "snapshot_delete"] },
+  { id: "installation_media", label: "ISO & CD-ROM operations", permissions: ["iso_upload", "iso_mount", "iso_boot", "iso_delete"] },
+];
+const maintenanceLockGroupByPermission = new Map(
+  maintenanceLockGroups.flatMap((group) => group.permissions.map((permission) => [permission, group.id])),
+);
+
 const views = {
   overview: ["Infrastructure overview", "Resources assigned directly to this account."],
   instances: ["Virtual machines & containers", "Power controls and detailed resource information."],
@@ -80,7 +100,7 @@ const els = Object.fromEntries([
   "viewRoot", "pageTitle", "pageDescription", "currentSection",
   "tenantPlan", "connectionHealth", "healthTitle", "healthDetail", "instanceCount", "profileName", "profileTenant",
   "profileAvatar", "globalSearch", "refreshButton", "logoutButton", "todayLabel", "lastUpdated", "notificationCount", "maintenanceCount", "supportCount",
-  "appearanceButton", "authAppearanceButton",
+  "appearanceButton", "authAppearanceButton", "languageButton", "authLanguageButton",
   "actionDialog", "actionForm", "actionDialogTitle", "actionDialogDescription",
   "actionDialogResource", "confirmAction", "editDialog", "editForm", "editDialogTitle", "editDialogBody", "editDialogError",
   "snapshotDialog", "snapshotForm", "snapshotDialogEyebrow", "snapshotDialogTitle", "snapshotDialogBody", "snapshotDialogError", "confirmSnapshot",
@@ -90,6 +110,7 @@ const els = Object.fromEntries([
 const readOnlyBrowsingControls = [
   "[data-admin-tab]",
   "[data-appearance]",
+  "[data-language]",
   "[data-details]",
   "[data-open-support]",
   "[data-copy]",
@@ -154,6 +175,51 @@ function appearancePanelMarkup() {
   </section>`;
 }
 
+const systemLanguageIcon = `<svg class="language-globe" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.5 12h17M12 3.5c2.2 2.3 3.4 5.2 3.4 8.5s-1.2 6.2-3.4 8.5c-2.2-2.3-3.4-5.1-3.4-8.5S9.8 5.8 12 3.5Z"></path></svg>`;
+
+const languageOptions = {
+  system: { label: "System", icon: systemLanguageIcon, description: "Match this browser" },
+  en: { label: "English", icon: "EN", description: "Always use English" },
+  de: { label: "Deutsch", icon: "DE", description: "Always use German" },
+};
+
+function refreshLanguageControls() {
+  const preference = getLanguagePreference();
+  const option = languageOptions[preference] || languageOptions.system;
+  [els.languageButton, els.authLanguageButton].filter(Boolean).forEach((button) => {
+    const label = button.querySelector("[data-language-code]");
+    if (label) {
+      if (preference === "system") label.innerHTML = systemLanguageIcon;
+      else label.textContent = preference.toUpperCase();
+    }
+    const description = t(`Language: ${option.label}`);
+    button.setAttribute("aria-label", description);
+    button.title = description;
+  });
+  document.querySelectorAll("button[data-language]").forEach((button) => {
+    const active = button.dataset.language === preference;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  document.querySelectorAll("[data-language-label]").forEach((label) => {
+    label.textContent = option.label;
+  });
+}
+
+function languagePanelMarkup() {
+  const selected = getLanguagePreference();
+  return `<section class="panel form-panel appearance-panel language-panel">
+    <div class="appearance-heading"><span><p class="eyebrow">Personal preference</p><h2>Language</h2><p>Nimbus can follow your browser language or use English or German.</p></span><span class="pill" data-language-label>${escapeHtml(languageOptions[selected]?.label || "System")}</span></div>
+    <div class="appearance-options" role="group" aria-label="Interface language">
+      ${Object.entries(languageOptions).map(([language, option]) => `<button class="appearance-option ${selected === language ? "active" : ""}" type="button" data-language="${language}" aria-pressed="${selected === language}">
+        <span class="appearance-option-icon language-option-icon" aria-hidden="true">${option.icon}</span>
+        <span><strong>${option.label}</strong><small>${option.description}</small></span>
+        <span class="appearance-check" aria-hidden="true">✓</span>
+      </button>`).join("")}
+    </div>
+  </section>`;
+}
+
 function applyDemoReadOnlyUi(root = els.viewRoot) {
   if (!state.demoReadOnly || !root) return;
   root.querySelectorAll("form").forEach((form) => {
@@ -191,7 +257,7 @@ function initials(value) {
   return String(value || "ND").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
 }
 
-function plural(value, word) { return `${value} ${word}${value === 1 ? "" : "s"}`; }
+function plural(value, word) { return t(`${value} ${word}${value === 1 ? "" : "s"}`); }
 function pct(value) { return `${Math.max(0, Math.min(100, Number(value) || 0))}%`; }
 function percent(value, total) { return total > 0 ? Math.max(0, Math.min(100, value / total * 100)) : 0; }
 function storageUsageKnown(resource) { return resource?.storageUsageAvailable !== false; }
@@ -204,11 +270,12 @@ function formatUptime(seconds) {
   if (!seconds) return "—";
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
+  if (getResolvedLanguage() === "de") return days ? `${days} T ${hours} Std.` : `${hours} Std.`;
   return days ? `${days}d ${hours}h` : `${hours}h`;
 }
 function formatDate(value, options = {}) {
   if (!value) return "—";
-  return new Intl.DateTimeFormat(undefined, options.dateOnly
+  return new Intl.DateTimeFormat(getLocale(), options.dateOnly
     ? { dateStyle: "medium" }
     : { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
@@ -226,23 +293,23 @@ function formatBytes(bytes) {
   return `${Math.round(value)} B`;
 }
 function formatRelative(value) {
-  if (!value) return "Just now";
+  if (!value) return t("Just now");
   const seconds = Math.max(0, Math.round((Date.now() - Number(value)) / 1000));
-  if (seconds < 60) return "Just now";
+  if (seconds < 60) return t("Just now");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return getResolvedLanguage() === "de" ? `vor ${minutes} Min.` : `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  if (hours < 24) return getResolvedLanguage() === "de" ? `vor ${hours} Std.` : `${hours}h ago`;
+  return getResolvedLanguage() === "de" ? `vor ${Math.floor(hours / 24)} T` : `${Math.floor(hours / 24)}d ago`;
 }
 function formatDuration(milliseconds) {
   const seconds = Math.max(0, Math.round(Number(milliseconds || 0) / 1000));
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return getResolvedLanguage() === "de" ? `${seconds} Sek.` : `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return getResolvedLanguage() === "de" ? `${minutes} Min.` : `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ${minutes % 60}m`;
-  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+  if (hours < 24) return getResolvedLanguage() === "de" ? `${hours} Std. ${minutes % 60} Min.` : `${hours}h ${minutes % 60}m`;
+  return getResolvedLanguage() === "de" ? `${Math.floor(hours / 24)} T ${hours % 24} Std.` : `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 function actionLabel(action) {
   return ({
@@ -293,6 +360,15 @@ async function apiFetch(path, options = {}) {
 }
 
 function friendlyError(error) {
+  if (error?.code === "maintenance_action_locked") {
+    const lock = error.payload?.lock;
+    if (getResolvedLanguage() === "de") {
+      const until = lock?.endsAt ? ` bis ${formatDate(lock.endsAt)}` : " bis die Wartung beendet ist";
+      return `${lock?.group?.label || "Diese Aktion"} ist durch ${lock?.title || "eine aktive Wartung"} vorübergehend gesperrt${until}.`;
+    }
+    const until = lock?.endsAt ? ` until ${formatDate(lock.endsAt)}` : " until the maintenance is resolved";
+    return `${lock?.group?.label || "This action"} is temporarily locked by ${lock?.title || "active maintenance"}${until}.`;
+  }
   const messages = {
     demo_read_only: "This public demo is read-only. No changes were made.",
     invalid_credentials: "The email address or password is incorrect.",
@@ -417,6 +493,7 @@ function friendlyError(error) {
     invalid_maintenance_message: "Enter a maintenance message with no more than 4,000 characters.",
     invalid_maintenance_schedule: "Choose a valid start time and an optional later end time.",
     invalid_maintenance_targets: "Choose one audience type and at least one target.",
+    invalid_maintenance_locks: "Choose only the available customer action-lock groups.",
     maintenance_target_not_found: "One of the selected maintenance targets no longer exists.",
     maintenance_not_found: "That maintenance notice no longer exists.",
     maintenance_not_editable: "Only unpublished drafts can be edited.",
@@ -441,7 +518,7 @@ function friendlyError(error) {
     support_ticket_rate_limited: "Too many support tickets were opened. Wait before creating another.",
     support_message_rate_limited: "Too many support replies were sent. Wait before trying again.",
   };
-  return messages[error?.code] || error?.message || "Something went wrong.";
+  return t(messages[error?.code] || error?.message || "Something went wrong.");
 }
 
 function showToast(type, title, message) {
@@ -514,7 +591,7 @@ async function loadDashboard() {
   const supportUnread = Number(state.dashboard.support?.unread || 0);
   els.supportCount.textContent = supportUnread > 99 ? "99+" : String(supportUnread);
   els.supportCount.hidden = supportUnread === 0;
-  els.lastUpdated.textContent = `Updated ${formatDate(state.lastUpdatedAt)}`;
+  els.lastUpdated.textContent = t(`Updated ${formatDate(state.lastUpdatedAt)}`);
   setConnection(state.dashboard.mode);
   applyUser();
   scheduleTaskPolling();
@@ -610,7 +687,7 @@ function filteredResources(resources = state.dashboard?.resources || []) {
 }
 
 function statusMarkup(resource) {
-  return `<span class="status ${escapeHtml(resource.status)}"><i></i>${escapeHtml(resource.status || "unknown")}</span>`;
+  return `<span class="status ${escapeHtml(resource.status)}"><i></i>${escapeHtml(t(resource.status || "unknown"))}</span>`;
 }
 
 function resourceIdentity(resource) {
@@ -618,6 +695,30 @@ function resourceIdentity(resource) {
 }
 
 function can(resource, permission) { return state.user?.role === "admin" || resource.permissions?.includes(permission); }
+
+function activeMaintenanceLock(resource, permission) {
+  if (!resource || state.user?.role === "admin") return null;
+  const groupId = maintenanceLockGroupByPermission.get(permission);
+  if (!groupId) return null;
+  return (state.dashboard?.maintenanceLocks?.items || []).find((lock) =>
+    lock.resourceIds?.includes(resource.id) && lock.groups?.some((group) => group.id === groupId)) || null;
+}
+
+function maintenanceLockReason(resource, permission) {
+  const lock = activeMaintenanceLock(resource, permission);
+  if (!lock) return "";
+  return `${maintenanceLockGroups.find((group) => group.id === maintenanceLockGroupByPermission.get(permission))?.label || "Action"} is locked by ${lock.title}.`;
+}
+
+function resourceMaintenanceLockNotice(resource) {
+  const locks = (state.dashboard?.maintenanceLocks?.items || []).filter((lock) => lock.resourceIds?.includes(resource.id));
+  if (!locks.length) return "";
+  const labels = [...new Set(locks.flatMap((lock) => lock.groups || []).map((group) => group.label))];
+  const ending = locks.map((lock) => lock.endsAt).filter(Boolean).sort((left, right) => left - right)[0];
+  return `<section class="maintenance-lock-notice" role="status">
+    <span>!</span><span><strong>Customer controls temporarily restricted</strong><small>${escapeHtml(labels.join(", "))} ${ending ? `until ${escapeHtml(formatDate(ending))}` : "until the active maintenance is resolved"}. Status, usage, and network information remain available.</small></span>
+  </section>`;
+}
 
 function resourceTasks(resourceId) {
   const tasks = [
@@ -638,8 +739,12 @@ function actionButtons(resource, compact = false) {
     return `<div class="row-buttons"><button class="row-button task-running" disabled><span class="button-spinner" aria-hidden="true"></span>${escapeHtml(actionLabel(pending.action))}…</button><button class="row-button" data-details="${escapeHtml(resource.id)}">View progress</button></div>`;
   }
   const main = resource.status === "running" ? [["shutdown", "Shutdown"], ["reboot", "Reboot"]] : resource.status === "suspended" ? [["resume", "Resume"]] : [["start", "Start"]];
-  const controls = main.filter(([permission]) => can(resource, permission)).map(([action, label]) => `<button class="row-button ${action === "shutdown" ? "danger" : ""}" data-action="${action}" data-resource="${escapeHtml(resource.id)}">${label}</button>`).join("");
-  return `<div class="row-buttons">${controls}${can(resource, "console") && !compact ? `<button class="row-button" data-console="${escapeHtml(resource.id)}">Console</button>` : ""}<button class="row-button" data-details="${escapeHtml(resource.id)}">Details</button></div>`;
+  const controls = main.filter(([permission]) => can(resource, permission)).map(([action, label]) => {
+    const reason = maintenanceLockReason(resource, action);
+    return `<button class="row-button ${action === "shutdown" ? "danger" : ""} ${reason ? "maintenance-locked" : ""}" data-action="${action}" data-resource="${escapeHtml(resource.id)}" ${reason ? `disabled title="${escapeHtml(reason)}"` : ""}>${label}</button>`;
+  }).join("");
+  const consoleReason = maintenanceLockReason(resource, "console");
+  return `<div class="row-buttons">${controls}${can(resource, "console") && !compact ? `<button class="row-button ${consoleReason ? "maintenance-locked" : ""}" data-console="${escapeHtml(resource.id)}" ${consoleReason ? `disabled title="${escapeHtml(consoleReason)}"` : ""}>Console</button>` : ""}<button class="row-button" data-details="${escapeHtml(resource.id)}">Details</button></div>`;
 }
 
 function resourceTable(resources, { admin = false, compact = false } = {}) {
@@ -696,13 +801,15 @@ function maintenanceBanner() {
   const highest = items.some((item) => item.severity === "critical") ? "critical"
     : items.some((item) => item.severity === "warning") ? "warning"
       : "info";
+  const activeLocks = state.dashboard.maintenanceLocks?.items || [];
+  const lockedLabels = [...new Set(activeLocks.flatMap((lock) => lock.groups || []).map((group) => group.label))];
   return `<section class="maintenance-overview-banner ${highest}">
     <span class="maintenance-banner-icon">${highest === "critical" ? "!" : "△"}</span>
     <div>
-      <p class="eyebrow">${items.some((item) => item.status === "active") ? "Active service notice" : "Upcoming maintenance"}</p>
+      <p class="eyebrow">${activeLocks.length ? "Customer controls restricted" : items.some((item) => item.status === "active") ? "Active service notice" : "Upcoming maintenance"}</p>
       <h2>${escapeHtml(items[0].title)}</h2>
       <p>${escapeHtml(items[0].message)}</p>
-      <small>${escapeHtml(maintenanceSchedule(items[0]))}${items.length > 1 ? ` · ${items.length - 1} more notice${items.length === 2 ? "" : "s"}` : ""}</small>
+      <small>${escapeHtml(maintenanceSchedule(items[0]))}${lockedLabels.length ? ` · Locked: ${escapeHtml(lockedLabels.join(", "))}` : ""}${items.length > 1 ? ` · ${items.length - 1} more notice${items.length === 2 ? "" : "s"}` : ""}</small>
     </div>
     <a class="button secondary small" href="#maintenance">View details</a>
   </section>`;
@@ -725,14 +832,20 @@ function detailSkeleton() {
 function detailActionButtons(resource) {
   const pending = activeTask(resource.id);
   if (pending) {
-    return `<button class="button secondary task-running" disabled><span class="button-spinner" aria-hidden="true"></span>${escapeHtml(actionLabel(pending.action))}…</button>${can(resource, "console") ? `<button class="button secondary" data-console="${escapeHtml(resource.id)}">Open console</button>` : ""}`;
+    const consoleReason = maintenanceLockReason(resource, "console");
+    return `<button class="button secondary task-running" disabled><span class="button-spinner" aria-hidden="true"></span>${escapeHtml(actionLabel(pending.action))}…</button>${can(resource, "console") ? `<button class="button secondary ${consoleReason ? "maintenance-locked" : ""}" data-console="${escapeHtml(resource.id)}" ${consoleReason ? `disabled title="${escapeHtml(consoleReason)}"` : ""}>Open console</button>` : ""}`;
   }
   const actions = resource.status === "running"
     ? [["shutdown", "Shutdown", "secondary"], ["reboot", "Reboot", "primary"], ["suspend", "Suspend", "secondary"], ["stop", "Force stop", "danger"], ["reset", "Force reset", "danger"]]
     : resource.status === "suspended"
       ? [["resume", "Resume", "primary"], ["stop", "Force stop", "danger"]]
       : [["start", "Start", "primary"]];
-  return `${actions.filter(([permission]) => can(resource, permission)).map(([action, label, style]) => `<button class="button ${style}" data-action="${action}" data-resource="${escapeHtml(resource.id)}">${label}</button>`).join("")}${can(resource, "console") ? `<button class="button secondary" data-console="${escapeHtml(resource.id)}">Open console</button>` : ""}`;
+  const controls = actions.filter(([permission]) => can(resource, permission)).map(([action, label, style]) => {
+    const reason = maintenanceLockReason(resource, action);
+    return `<button class="button ${style} ${reason ? "maintenance-locked" : ""}" data-action="${action}" data-resource="${escapeHtml(resource.id)}" ${reason ? `disabled title="${escapeHtml(reason)}"` : ""}>${label}</button>`;
+  }).join("");
+  const consoleReason = maintenanceLockReason(resource, "console");
+  return `${controls}${can(resource, "console") ? `<button class="button secondary ${consoleReason ? "maintenance-locked" : ""}" data-console="${escapeHtml(resource.id)}" ${consoleReason ? `disabled title="${escapeHtml(consoleReason)}"` : ""}>Open console</button>` : ""}`;
 }
 
 function instanceTasksMarkup(tasks = []) {
@@ -806,23 +919,28 @@ function installationMediaMarkup(resource) {
   const mounted = media?.mounted || null;
   const boot = media?.boot || null;
   const upload = state.instance.upload;
+  const mediaLock = activeMaintenanceLock(resource, "iso_upload")
+    || activeMaintenanceLock(resource, "iso_mount")
+    || activeMaintenanceLock(resource, "iso_boot")
+    || activeMaintenanceLock(resource, "iso_delete");
+  const mediaLockReason = mediaLock ? `ISO & CD-ROM operations are locked by ${mediaLock.title}.` : "";
   const processing = images.some((image) => ["uploading", "processing", "deleting"].includes(image.status));
   if (processing) scheduleMediaPolling();
   const uploadMarkup = can(resource, "iso_upload")
     ? (policies.length
       ? `<form class="iso-upload-form" id="isoUploadForm">
-          <div class="field"><label for="isoFile">ISO image</label><input id="isoFile" name="isoFile" type="file" accept=".iso,application/x-iso9660-image" required ${upload ? "disabled" : ""}><small>The file streams directly to Proxmox; Nimbus does not keep a second copy.</small></div>
-          <div class="field"><label for="isoPolicy">Destination</label><select id="isoPolicy" name="policyId" required ${upload ? "disabled" : ""}>${policies.map((policy) => `<option value="${escapeHtml(policy.id)}">${escapeHtml(policy.displayName)} · ${escapeHtml(formatBytes(policy.remainingBytes))} free</option>`).join("")}</select><small>Maximum per file: ${escapeHtml(formatBytes(Math.max(...policies.map((policy) => policy.maxUploadBytes))))}</small></div>
-          <button class="button primary" type="submit" ${upload ? "disabled" : ""}>${upload ? "Uploading…" : "Upload ISO"}</button>
+          <div class="field"><label for="isoFile">ISO image</label><input id="isoFile" name="isoFile" type="file" accept=".iso,application/x-iso9660-image" required ${upload || mediaLock ? "disabled" : ""}><small>The file streams directly to Proxmox; Nimbus does not keep a second copy.</small></div>
+          <div class="field"><label for="isoPolicy">Destination</label><select id="isoPolicy" name="policyId" required ${upload || mediaLock ? "disabled" : ""}>${policies.map((policy) => `<option value="${escapeHtml(policy.id)}">${escapeHtml(policy.displayName)} · ${escapeHtml(formatBytes(policy.remainingBytes))} free</option>`).join("")}</select><small>Maximum per file: ${escapeHtml(formatBytes(Math.max(...policies.map((policy) => policy.maxUploadBytes))))}</small></div>
+          <button class="button primary ${mediaLock ? "maintenance-locked" : ""}" type="submit" ${upload || mediaLock ? `disabled${mediaLockReason ? ` title="${escapeHtml(mediaLockReason)}"` : ""}` : ""}>${upload ? "Uploading…" : "Upload ISO"}</button>
         </form>`
       : `<div class="notice warning"><span>!</span><span>An administrator must enable an ISO-capable Proxmox storage before uploads are available.</span></div>`)
     : "";
   const uploadProgress = upload ? `<div class="iso-upload-progress" aria-live="polite"><div><span><strong>${escapeHtml(upload.name)}</strong><small>${upload.status === "finishing" ? "Proxmox is finalizing the upload…" : `${upload.progress}% · ${escapeHtml(formatBytes(upload.loaded))} of ${escapeHtml(formatBytes(upload.total))}`}</small></span><b>${upload.progress}%</b></div><div class="usage-bar"><span id="isoUploadProgressBar" style="width:${pct(upload.progress)}"></span></div></div>` : "";
   const bootButton = mounted && can(resource, "iso_boot") && !boot
-    ? `<button class="button primary small" data-arm-iso-boot>Boot ISO once</button>`
+    ? `<button class="button primary small ${mediaLock ? "maintenance-locked" : ""}" data-arm-iso-boot ${mediaLock ? `disabled title="${escapeHtml(mediaLockReason)}"` : ""}>Boot ISO once</button>`
     : "";
   const ejectButton = mounted && can(resource, "iso_mount")
-    ? `<button class="button secondary small" data-eject-iso>${boot ? "Restore & eject" : "Eject"}</button>`
+    ? `<button class="button secondary small ${mediaLock ? "maintenance-locked" : ""}" data-eject-iso ${mediaLock ? `disabled title="${escapeHtml(mediaLockReason)}"` : ""}>${boot ? "Restore & eject" : "Eject"}</button>`
     : "";
   const mountedMarkup = mounted
     ? `<div class="mounted-media"><span class="media-icon">◎</span><span><small>Mounted in ${escapeHtml(mounted.driveSlot)}</small><strong>${escapeHtml(mounted.originalName || mounted.fileName)}</strong><em>Mounted ${escapeHtml(formatRelative(mounted.mountedAt))}</em></span><div class="media-actions">${bootButton}${ejectButton}</div></div>`
@@ -831,7 +949,7 @@ function installationMediaMarkup(resource) {
     ? `<div class="iso-boot-state ${boot.status === "error" ? "error" : ""}">
         <span class="media-icon">${boot.status === "error" ? "!" : "↥"}</span>
         <span><small>${boot.status === "error" ? "Restoration needs attention" : "One-time boot ready"}</small><strong>${boot.status === "error" ? "Nimbus could not verify the original boot order" : `The mounted ISO will boot first on the next ${resource.status === "running" ? "reboot" : "start"}.`}</strong><em>${boot.status === "error" ? "The boot order may have changed outside Nimbus." : "Nimbus restores the previous order after the power task completes."}</em></span>
-        ${can(resource, "iso_boot") ? `<button class="button secondary small" data-cancel-iso-boot>${boot.status === "error" ? "Retry restore" : "Cancel"}</button>` : ""}
+        ${can(resource, "iso_boot") ? `<button class="button secondary small ${mediaLock ? "maintenance-locked" : ""}" data-cancel-iso-boot ${mediaLock ? `disabled title="${escapeHtml(mediaLockReason)}"` : ""}>${boot.status === "error" ? "Retry restore" : "Cancel"}</button>` : ""}
       </div>`
     : "";
   const library = images.length
@@ -839,12 +957,12 @@ function installationMediaMarkup(resource) {
       const isMounted = mounted?.isoImageId === image.id;
       const busy = ["uploading", "processing", "deleting"].includes(image.status);
       const canRemove = image.status === "error" ? can(resource, "iso_upload") : can(resource, "iso_delete") && image.allowDelete;
-      return `<article class="iso-library-item"><span class="media-icon">◉</span><span class="iso-copy"><strong>${escapeHtml(image.originalName)}</strong><small>${escapeHtml(formatBytes(image.sizeBytes))} · ${escapeHtml(image.storageId)} · ${escapeHtml(formatDate(image.createdAt))}</small></span><span class="iso-state ${escapeHtml(image.status)}">${busy ? `<i class="button-spinner"></i>` : ""}${escapeHtml(image.status)}</span><div class="row-buttons">${can(resource, "iso_mount") && image.status === "ready" && !isMounted ? `<button class="row-button" data-mount-iso="${escapeHtml(image.id)}" ${mounted ? "disabled" : ""}>Mount</button>` : ""}${isMounted ? `<span class="pill success">Mounted</span>` : ""}${canRemove && !isMounted && !busy ? `<button class="row-button danger" data-delete-iso="${escapeHtml(image.id)}" ${image.status === "error" ? "data-dismiss-iso" : ""}>${image.status === "error" ? "Dismiss" : "Delete"}</button>` : ""}</div></article>`;
+      return `<article class="iso-library-item"><span class="media-icon">◉</span><span class="iso-copy"><strong>${escapeHtml(image.originalName)}</strong><small>${escapeHtml(formatBytes(image.sizeBytes))} · ${escapeHtml(image.storageId)} · ${escapeHtml(formatDate(image.createdAt))}</small></span><span class="iso-state ${escapeHtml(image.status)}">${busy ? `<i class="button-spinner"></i>` : ""}${escapeHtml(image.status)}</span><div class="row-buttons">${can(resource, "iso_mount") && image.status === "ready" && !isMounted ? `<button class="row-button ${mediaLock ? "maintenance-locked" : ""}" data-mount-iso="${escapeHtml(image.id)}" ${mounted || mediaLock ? `disabled${mediaLockReason ? ` title="${escapeHtml(mediaLockReason)}"` : ""}` : ""}>Mount</button>` : ""}${isMounted ? `<span class="pill success">Mounted</span>` : ""}${canRemove && !isMounted && !busy ? `<button class="row-button danger ${mediaLock ? "maintenance-locked" : ""}" data-delete-iso="${escapeHtml(image.id)}" ${image.status === "error" ? "data-dismiss-iso" : ""} ${mediaLock ? `disabled title="${escapeHtml(mediaLockReason)}"` : ""}>${image.status === "error" ? "Dismiss" : "Delete"}</button>` : ""}</div></article>`;
     }).join("")}</div>`
     : `<div class="detail-empty compact"><span>◉</span><strong>No ISO images yet</strong><small>Upload installation media to this customer-owned library.</small></div>`;
   return `<section class="panel installation-media-panel">
     <header class="panel-header"><div><h2>Installation media</h2><p>Private ISO library for this customer and cluster.</p></div><span class="pill ${processing ? "warning" : ""}">${processing ? "Processing" : `${images.length} images`}</span></header>
-    <div class="installation-media-body">${mountedMarkup}${bootMarkup}${uploadMarkup}${uploadProgress}${library}</div>
+    <div class="installation-media-body">${mediaLock ? `<div class="notice warning maintenance-section-lock"><span>!</span><span><strong>ISO & CD-ROM operations are temporarily locked.</strong><small>${escapeHtml(mediaLock.title)}${mediaLock.endsAt ? ` · until ${escapeHtml(formatDate(mediaLock.endsAt))}` : " · until resolved"}. You can still view the library.</small></span></div>` : ""}${mountedMarkup}${bootMarkup}${uploadMarkup}${uploadProgress}${library}</div>
   </section>`;
 }
 
@@ -855,8 +973,13 @@ function snapshotCenterMarkup(resource, details, pending) {
   const policy = details.snapshotPolicy || { limit: resource.snapshotLimit || 3, count: snapshots.length, remaining: Math.max(0, (resource.snapshotLimit || 3) - snapshots.length) };
   const mediaConflict = Boolean(state.instance.media?.mounted || state.instance.media?.boot);
   const snapshotBusy = Boolean(pending);
-  const createDisabled = snapshotBusy || mediaConflict || policy.remaining < 1;
-  const createReason = mediaConflict
+  const snapshotLock = activeMaintenanceLock(resource, "snapshot_create")
+    || activeMaintenanceLock(resource, "snapshot_restore")
+    || activeMaintenanceLock(resource, "snapshot_delete");
+  const createDisabled = snapshotBusy || mediaConflict || policy.remaining < 1 || Boolean(snapshotLock);
+  const createReason = snapshotLock
+    ? `Snapshot changes are locked by ${snapshotLock.title}.`
+    : mediaConflict
     ? "Restore the normal boot order and eject the mounted ISO first."
     : policy.remaining < 1
       ? `The ${policy.limit}-snapshot limit has been reached.`
@@ -864,11 +987,11 @@ function snapshotCenterMarkup(resource, details, pending) {
         ? "Wait for the current Proxmox task to finish."
         : "";
   const createButton = can(resource, "snapshot_create")
-    ? `<button class="button primary small" data-create-snapshot ${createDisabled ? "disabled" : ""} ${createReason ? `title="${escapeHtml(createReason)}"` : ""}>Create snapshot</button>`
+    ? `<button class="button primary small ${snapshotLock ? "maintenance-locked" : ""}" data-create-snapshot ${createDisabled ? "disabled" : ""} ${createReason ? `title="${escapeHtml(createReason)}"` : ""}>Create snapshot</button>`
     : "";
   const items = snapshots.length
     ? `<div class="snapshot-list">${snapshots.map((snapshot, index) => {
-      const restoreDisabled = snapshotBusy || mediaConflict;
+      const restoreDisabled = snapshotBusy || mediaConflict || Boolean(snapshotLock);
       return `<article class="snapshot-item">
         <span class="snapshot-icon">↶</span>
         <span class="snapshot-copy">
@@ -878,13 +1001,15 @@ function snapshotCenterMarkup(resource, details, pending) {
         </span>
         <div class="snapshot-actions">
           ${snapshot.includesMemory ? `<span class="pill">Memory</span>` : ""}
-          ${can(resource, "snapshot_restore") ? `<button class="row-button" data-restore-snapshot="${escapeHtml(snapshot.name)}" ${restoreDisabled ? "disabled" : ""}>Restore</button>` : ""}
-          ${can(resource, "snapshot_delete") ? `<button class="row-button danger" data-delete-snapshot="${escapeHtml(snapshot.name)}" ${snapshotBusy ? "disabled" : ""}>Delete</button>` : ""}
+          ${can(resource, "snapshot_restore") ? `<button class="row-button ${snapshotLock ? "maintenance-locked" : ""}" data-restore-snapshot="${escapeHtml(snapshot.name)}" ${restoreDisabled ? "disabled" : ""} ${snapshotLock ? `title="Snapshot changes are locked by ${escapeHtml(snapshotLock.title)}."` : ""}>Restore</button>` : ""}
+          ${can(resource, "snapshot_delete") ? `<button class="row-button danger ${snapshotLock ? "maintenance-locked" : ""}" data-delete-snapshot="${escapeHtml(snapshot.name)}" ${snapshotBusy || snapshotLock ? `disabled${snapshotLock ? ` title="Snapshot changes are locked by ${escapeHtml(snapshotLock.title)}."` : ""}` : ""}>Delete</button>` : ""}
         </div>
       </article>`;
     }).join("")}</div>`
     : `<div class="detail-empty compact"><span>↶</span><strong>No snapshots yet</strong><small>Create a short-term recovery point before an upgrade or configuration change.</small></div>`;
-  const warning = mediaConflict
+  const warning = snapshotLock
+    ? `<div class="notice warning snapshot-notice maintenance-section-lock"><span>!</span><span><strong>Snapshot changes are temporarily locked.</strong><small>${escapeHtml(snapshotLock.title)}${snapshotLock.endsAt ? ` · until ${escapeHtml(formatDate(snapshotLock.endsAt))}` : " · until resolved"}. Existing recovery points remain visible.</small></span></div>`
+    : mediaConflict
     ? `<div class="notice warning snapshot-notice"><span>!</span><span>Snapshot creation and restoration are paused while customer ISO media is mounted or a one-time boot is armed.</span></div>`
     : `<div class="notice snapshot-notice"><span>i</span><span>Snapshots live with the server's disks and are not a replacement for an independent Proxmox backup.</span></div>`;
   return `<section class="panel snapshot-center-panel">
@@ -937,6 +1062,8 @@ function renderInstanceDetail(resourceId) {
       <div class="instance-hero-actions">${detailActionButtons(resource)}</div>
       ${pending ? `<div class="task-progress-banner"><span class="button-spinner" aria-hidden="true"></span><span><strong>${escapeHtml(actionProgressTitle(pending.action))}</strong><small>Nimbus is following the Proxmox task automatically. Other operations are paused until it finishes.</small></span><span>${escapeHtml(formatRelative(pending.createdAt))}</span></div>` : ""}
     </section>
+
+    ${resourceMaintenanceLockNotice(resource)}
 
     <section class="instance-metric-grid">
       <article><span class="detail-metric-icon cpu">⌁</span><span><small>CPU usage</small><strong>${Math.round(resource.cpu)}%</strong><em>${resource.vcpu} vCPU</em></span><div class="detail-meter"><i style="width:${pct(resource.cpu)}"></i></div></article>
@@ -1201,6 +1328,7 @@ function renderNotifications() {
 
 function maintenanceItemMarkup(item, { admin = false } = {}) {
   const targets = (item.targets || []).map((target) => target.label).join(", ");
+  const lockLabels = (item.lockGroups || []).map((group) => group.label).join(", ");
   const icon = item.status === "resolved" ? "✓"
     : item.status === "cancelled" ? "×"
       : item.severity === "critical" ? "!"
@@ -1226,6 +1354,7 @@ function maintenanceItemMarkup(item, { admin = false } = {}) {
       <p>${escapeHtml(item.message).replace(/\r?\n/g, "<br>")}</p>
       <div class="maintenance-item-meta">
         <span><strong>Window</strong>${escapeHtml(maintenanceSchedule(item))}</span>
+        <span><strong>Customer actions</strong>${lockLabels ? `${["active", "scheduled"].includes(item.status) ? "Restricted: " : "Restricted during window: "}${escapeHtml(lockLabels)}` : "Notice only · no action lock"}</span>
         ${admin ? `<span><strong>Audience</strong>${escapeHtml(targets || "No target")}</span><span><strong>Recipients</strong>${plural(item.recipientCount || 0, "user")}${item.notifyEmail ? " · email enabled" : " · in-panel only"}</span>` : ""}
       </div>
     </div>
@@ -1360,7 +1489,7 @@ function renderSupport() {
     ? result.tickets.items.filter((ticket) => [ticket.reference, ticket.subject, ticket.customerName, ticket.resourceName, ticket.status, ticket.priority].some((value) => String(value || "").toLowerCase().includes(query)))
     : result.tickets.items;
   const heroTitle = state.user.role === "admin"
-    ? result.tickets.waitingSupport ? `${plural(result.tickets.waitingSupport, "request")} waiting for support` : "Customer support queue is clear"
+    ? result.tickets.waitingSupport ? `${plural(result.tickets.waitingSupport, "request")} ${t("waiting for support")}` : "Customer support queue is clear"
     : result.tickets.active ? `${plural(result.tickets.active, "active support ticket")}` : "Your support inbox is clear";
   els.viewRoot.innerHTML = `<section class="support-hero">
       <span class="support-hero-icon">?</span>
@@ -1370,7 +1499,7 @@ function renderSupport() {
     ${supportCreateMarkup()}
     <section class="support-workspace">
       <article class="panel support-queue-panel">
-        <header class="panel-header"><div><h2>${state.user.role === "admin" ? "Ticket queue" : "Your tickets"}</h2><p>${plural(result.tickets.total, "conversation")} · newest activity first</p></div><span class="pill ${result.tickets.waitingSupport ? "warning" : "success"}">${state.user.role === "admin" ? `${result.tickets.waitingSupport} waiting` : `${result.tickets.unread} unread`}</span></header>
+        <header class="panel-header"><div><h2>${state.user.role === "admin" ? "Ticket queue" : "Your tickets"}</h2><p>${plural(result.tickets.total, "conversation")} · ${t("newest activity first")}</p></div><span class="pill ${result.tickets.waitingSupport ? "warning" : "success"}">${state.user.role === "admin" ? `${result.tickets.waitingSupport} waiting` : `${result.tickets.unread} unread`}</span></header>
         ${supportTicketListMarkup(tickets)}
       </article>
       ${supportConversationMarkup(result.selected)}
@@ -1495,17 +1624,19 @@ function renderSettings() {
     <button class="row-button ${item.current ? "danger" : ""}" type="button" data-revoke-session="${escapeHtml(item.id)}">${item.current ? "Sign out" : "Revoke"}</button>
   </article>`).join("");
   if (enrollmentRequired) {
-    els.viewRoot.innerHTML = `${appearancePanelMarkup()}${policyBanner}${mfaPanel}`;
+    els.viewRoot.innerHTML = `${languagePanelMarkup()}${appearancePanelMarkup()}${policyBanner}${mfaPanel}`;
+    refreshLanguageControls();
     refreshAppearanceControls();
     return;
   }
-  els.viewRoot.innerHTML = `${appearancePanelMarkup()}${recoveryPanel}<section class="layout-grid equal">
+  els.viewRoot.innerHTML = `${languagePanelMarkup()}${appearancePanelMarkup()}${recoveryPanel}<section class="layout-grid equal">
     <form class="panel form-panel" id="profileForm"><h2>Profile</h2><p>Update your display name.</p><div class="form-grid"><div class="field full"><label for="settingsName">Display name</label><input id="settingsName" name="displayName" maxlength="100" required value="${escapeHtml(state.user.displayName)}"></div><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(state.user.email)}"></div></div><div class="form-actions"><button class="button primary">Save profile</button><p class="form-message"></p></div></form>
     <form class="panel form-panel" id="passwordForm"><h2>Password</h2><p>Changing your password revokes all active sessions.</p><div class="form-grid"><div class="field full"><label for="currentPassword">Current password</label><input id="currentPassword" type="password" name="currentPassword" required autocomplete="current-password"></div><div class="field full"><label for="newPassword">New password</label><input id="newPassword" type="password" name="password" minlength="12" required autocomplete="new-password"></div></div><div class="form-actions"><button class="button primary">Change password</button><p class="form-message"></p></div></form>
   </section>
   <div class="settings-security-grid">${mfaPanel}
     <section class="panel form-panel security-panel"><div class="security-heading"><span class="security-icon">◷</span><span><h2>Active sessions</h2><p>Review devices signed in to this account.</p></span><span class="pill">${plural(sessions.length, "session")}</span></div><div class="session-list">${sessionRows || `<p>No active sessions.</p>`}</div>${sessions.length > 1 ? `<form id="revokeOtherSessionsForm"><div class="field"><label for="revokeSessionsPassword">Current password</label><input id="revokeSessionsPassword" name="currentPassword" type="password" required autocomplete="current-password"></div><div class="form-actions"><button class="button secondary" type="submit">Revoke all other sessions</button><p class="form-message"></p></div></form>` : ""}</section>
   </div>${apiKeyCenterMarkup(mfa)}`;
+  refreshLanguageControls();
   refreshAppearanceControls();
 }
 
@@ -1593,7 +1724,7 @@ function renderAdminOperations() {
     </span>
   </article>`).join("");
   const nodeRows = nodes.map((node) => `<tr>
-    <td><div class="server-copy"><strong>${escapeHtml(node.node)}</strong><small>${escapeHtml(node.clusterName)} · ${Number(node.cpuCores)} cores · ${formatUptime(node.uptime)} uptime</small></div></td>
+    <td><div class="server-copy"><strong>${escapeHtml(node.node)}</strong><small>${escapeHtml(node.clusterName)} · ${escapeHtml(t(`${Number(node.cpuCores)} cores`))} · ${formatUptime(node.uptime)} ${t("uptime")}</small></div></td>
     <td>${operationsStatusPill(node.status)}</td>
     <td>${operationsUsage(node.cpuPercent, { compact: true })}</td>
     <td><div class="operations-capacity"><span><strong>${escapeHtml(formatBytes(node.memoryUsedBytes))}</strong><small>of ${escapeHtml(formatBytes(node.memoryTotalBytes))}</small></span>${operationsUsage(node.memoryPercent, { compact: true })}</div></td>
@@ -1704,6 +1835,7 @@ function maintenanceFormMarkup(item = null) {
   const selectedIds = (item?.targets || []).map((target) => target.id);
   const defaultStart = Math.ceil((Date.now() + 60 * 60_000) / (15 * 60_000)) * 15 * 60_000;
   const emailReady = Boolean(state.admin.emailSettings?.enabled);
+  const selectedLocks = new Set((item?.lockGroups || []).map((group) => group.id));
   return `<div class="form-grid">
       <div class="field"><label for="${prefix}Kind">Notice type</label><select id="${prefix}Kind" name="kind"><option value="maintenance" ${item?.kind !== "incident" ? "selected" : ""}>Planned maintenance</option><option value="incident" ${item?.kind === "incident" ? "selected" : ""}>Service incident</option></select></div>
       <div class="field"><label for="${prefix}Severity">Severity</label><select id="${prefix}Severity" name="severity"><option value="info" ${item?.severity === "info" || !item ? "selected" : ""}>Information</option><option value="warning" ${item?.severity === "warning" ? "selected" : ""}>Warning</option><option value="critical" ${item?.severity === "critical" ? "selected" : ""}>Critical</option></select></div>
@@ -1713,6 +1845,11 @@ function maintenanceFormMarkup(item = null) {
       <div class="field"><label for="${prefix}EndsAt">Ends <span class="optional">(optional)</span></label><input id="${prefix}EndsAt" name="endsAt" type="datetime-local" value="${escapeHtml(datetimeLocalValue(item?.endsAt))}"><small>Leave empty for an open-ended incident.</small></div>
       <div class="field"><label for="${prefix}Audience">Affected audience</label><select id="${prefix}Audience" name="targetType" data-maintenance-audience><option value="all" ${targetType === "all" ? "selected" : ""}>All customers</option><option value="cluster" ${targetType === "cluster" ? "selected" : ""}>Clusters</option><option value="node" ${targetType === "node" ? "selected" : ""}>Nodes</option><option value="resource" ${targetType === "resource" ? "selected" : ""}>Individual resources</option><option value="customer" ${targetType === "customer" ? "selected" : ""}>Customer accounts</option></select></div>
       <div class="field"><label for="${prefix}TargetIds">Targets</label><select id="${prefix}TargetIds" name="targetIds" multiple size="5" ${targetType === "all" ? "disabled" : "required"}>${maintenanceTargetOptions(targetType, selectedIds)}</select><small>${targetType === "all" ? "Every active customer user receives the notice." : "Hold Ctrl or Command to choose multiple targets."}</small></div>
+      <fieldset class="maintenance-lock-policy full">
+        <legend>Customer action locks <span class="optional">(optional)</span></legend>
+        <p>Selected controls are blocked by the backend only while this published window is active. Administrators keep access.</p>
+        <div class="maintenance-lock-options">${maintenanceLockGroups.map((group) => `<label class="policy-checkbox"><input name="lockGroups" type="checkbox" value="${escapeHtml(group.id)}" ${selectedLocks.has(group.id) ? "checked" : ""}><span><strong>${escapeHtml(group.label)}</strong><small>${group.id === "power_management" ? "Start, stop, shutdown, reboot, reset, suspend, and resume." : group.id === "console_access" ? "Graphical and terminal console tickets." : group.id === "snapshot_management" ? "Create, restore, and delete; viewing remains available." : "Upload, mount, eject, one-time boot, and deletion."}</small></span></label>`).join("")}</div>
+      </fieldset>
       <label class="policy-checkbox full"><input name="notifyEmail" type="checkbox" ${item?.notifyEmail === false ? "" : "checked"}><span><strong>Queue email for opted-in users</strong><small>${emailReady ? "Uses the branded Email Center template when this notice is published." : "SMTP is disabled; the notice will still appear inside the panel."}</small></span></label>
       ${item ? "" : `<div class="field full"><label for="${prefix}Publication">Publication</label><select id="${prefix}Publication" name="publication"><option value="publish">Create and publish now</option><option value="draft">Save as editable draft</option></select><small>Publishing freezes the recipient list from current assignments. Drafts remain private to administrators.</small></div>`}
     </div>`;
@@ -1732,6 +1869,7 @@ function maintenanceFormPayload(form) {
     startsAt,
     endsAt: rawEnd ? new Date(rawEnd).getTime() : null,
     notifyEmail: data.has("notifyEmail"),
+    lockGroups: data.getAll("lockGroups").map(String),
     publication: data.get("publication") || undefined,
     targets: targetIds.map((id) => ({ type: targetType, id })),
   };
@@ -2112,7 +2250,7 @@ function route() {
   els.pageTitle.textContent = title;
   els.pageDescription.textContent = description;
   els.currentSection.textContent = view === "instance" ? "Instance details" : title;
-  els.todayLabel.textContent = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(new Date());
+  els.todayLabel.textContent = new Intl.DateTimeFormat(getLocale(), { weekday: "long", month: "long", day: "numeric" }).format(new Date());
   document.querySelectorAll(".nav-item").forEach((link) => link.classList.toggle("active", link.dataset.view === (view === "instance" ? "instances" : view)));
   if (view === "admin" && !state.admin) {
     els.viewRoot.innerHTML = `<div class="loading-inline"><span class="spinner"></span>Loading control center</div>`;
@@ -2352,6 +2490,11 @@ function showDetails(resourceId) {
 function confirmAction(resourceId, action) {
   const resource = state.dashboard.resources.find((item) => item.id === resourceId);
   if (!resource) return;
+  const lock = activeMaintenanceLock(resource, action);
+  if (lock) {
+    showToast("error", "Action locked for maintenance", maintenanceLockReason(resource, action));
+    return;
+  }
   els.actionDialogTitle.textContent = `${action[0].toUpperCase()}${action.slice(1)} this resource?`;
   els.actionDialogDescription.textContent = action === "reset" || action === "stop" ? "This is a forceful operation and may cause data loss." : "Nimbus will validate your assignment and permission before contacting Proxmox.";
   els.actionDialogResource.innerHTML = resourceIdentity(resource);
@@ -2629,6 +2772,12 @@ async function pollActiveTasks() {
 }
 
 async function openConsole(resourceId) {
+  const resource = state.dashboard?.resources?.find((item) => item.id === resourceId);
+  const lock = activeMaintenanceLock(resource, "console");
+  if (lock) {
+    showToast("error", "Console locked for maintenance", maintenanceLockReason(resource, "console"));
+    return;
+  }
   const popup = window.open("about:blank", "nimbus-console", "popup,width=1180,height=760");
   try {
     const result = await apiFetch(`/api/v1/resources/${encodeURIComponent(resourceId)}/console`, { method: "POST", body: {} });
@@ -2865,6 +3014,8 @@ els.logoutButton.addEventListener("click", async () => {
 els.refreshButton.addEventListener("click", () => refresh());
 els.appearanceButton.addEventListener("click", cycleAppearance);
 els.authAppearanceButton.addEventListener("click", cycleAppearance);
+els.languageButton.addEventListener("click", cycleLanguage);
+els.authLanguageButton.addEventListener("click", cycleLanguage);
 els.toastClose.addEventListener("click", () => els.toast.classList.remove("show"));
 els.globalSearch.addEventListener("input", (event) => { state.search = event.target.value; route(); });
 window.addEventListener("hashchange", route);
@@ -3010,6 +3161,10 @@ els.viewRoot.addEventListener("click", async (event) => {
   if (!target) return;
   if (target.dataset.appearance) {
     setAppearance(target.dataset.appearance);
+    return;
+  }
+  if (target.dataset.language) {
+    setLanguage(target.dataset.language);
     return;
   }
   if (target.dataset.copyApiSecret !== undefined) {
@@ -3796,7 +3951,15 @@ window.addEventListener("nimbusappearancechange", () => {
   refreshAppearanceControls();
   drawInstanceChart();
 });
+window.addEventListener("nimbuslanguagechange", () => {
+  refreshLanguageControls();
+  if (state.lastUpdatedAt) els.lastUpdated.textContent = t(`Updated ${formatDate(state.lastUpdatedAt)}`);
+  if (state.user) route();
+  else translateDocument();
+});
 document.addEventListener("visibilitychange", scheduleTaskPolling);
 
+installTranslationObserver();
+refreshLanguageControls();
 refreshAppearanceControls();
 initializeApp();

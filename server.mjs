@@ -678,8 +678,32 @@ function resourcesFor(user) {
 
 function requireResource(response, user, resourceId, permission) {
   const resource = resourceFor(user, resourceId, permission);
-  if (!resource) sendJson(response, 404, { error: "resource_not_found" });
+  if (!resource) {
+    sendJson(response, 404, { error: "resource_not_found" });
+    return null;
+  }
+  if (!enforceMaintenanceAction(response, user, resource, permission)) return null;
   return resource;
+}
+
+function enforceMaintenanceAction(response, user, resource, permission) {
+  if (user.role === "admin") return true;
+  const lock = store.getMaintenanceActionLock(user.id, resource, permission);
+  if (!lock) return true;
+  store.writeAudit({
+    customerId: user.customerId,
+    userId: user.id,
+    actorRole: user.role,
+    action: "resource.action_blocked_by_maintenance",
+    resourceId: resource.id,
+    detail: {
+      requestedPermission: permission,
+      maintenanceId: lock.eventId,
+      lockGroup: lock.group.id,
+    },
+  });
+  sendJson(response, 423, { error: "maintenance_action_locked", lock });
+  return false;
 }
 
 function clientFor(resource) {
@@ -1342,6 +1366,7 @@ async function routeAdmin(request, response, pathname) {
         severity: result.severity,
         status: result.status,
         recipientCount: result.recipientCount,
+        lockGroups: result.lockGroups.map((group) => group.id),
         queuedEmails,
       },
     });
@@ -1356,7 +1381,12 @@ async function routeAdmin(request, response, pathname) {
       { userId: session.user.id },
     );
     audit(request, session, "admin.maintenance.draft_updated", {
-      detail: { maintenanceId: event.id, kind: event.kind, severity: event.severity },
+      detail: {
+        maintenanceId: event.id,
+        kind: event.kind,
+        severity: event.severity,
+        lockGroups: event.lockGroups.map((group) => group.id),
+      },
     });
     sendJson(response, 200, { event });
     return true;
@@ -1401,6 +1431,7 @@ async function routeAdmin(request, response, pathname) {
         kind: event.kind,
         status: event.status,
         recipientCount: event.recipientCount,
+        lockGroups: event.lockGroups.map((group) => group.id),
         queuedEmails,
       },
     });
@@ -2028,6 +2059,7 @@ async function routeCustomer(request, response, pathname) {
         customerIsoMedia: true,
         notificationCenter: true,
         maintenanceCenter: true,
+        maintenanceActionLocks: true,
         supportTicketCenter: true,
         twoFactorAuthentication: true,
         demoReadOnly: config.demoReadOnly,
@@ -2168,6 +2200,9 @@ async function routeCustomer(request, response, pathname) {
       tasks: enrollmentRequired ? [] : store.listTasks(user, { limit: 12 }),
       notifications: enrollmentRequired ? { items: [], unread: 0, total: 0 } : store.listNotifications(user.id, { limit: 8 }),
       maintenance: enrollmentRequired ? { items: [], unread: 0, total: 0 } : store.listMaintenanceForUser(user.id, { limit: 8 }),
+      maintenanceLocks: enrollmentRequired || user.role !== "customer"
+        ? { items: [], activeCount: 0 }
+        : store.listActiveMaintenanceLocksForUser(user.id, resources),
       support: enrollmentRequired ? { items: [], unread: 0, total: 0 } : store.listSupportTickets(user, { limit: 6 }),
       notificationPreferences: store.getNotificationPreferences(user.id),
       emailDeliveryAvailable: store.getEmailSettings().enabled,
@@ -2186,6 +2221,7 @@ async function routeCustomer(request, response, pathname) {
         customerIsoMedia: true,
         notificationCenter: true,
         maintenanceCenter: true,
+        maintenanceActionLocks: true,
         supportTicketCenter: true,
         twoFactorAuthentication: true,
         customerInvitations: true,
@@ -2814,6 +2850,7 @@ async function routeCustomer(request, response, pathname) {
     const uploadAuthorized = resourceFor(user, resourceId, "iso_upload");
     const resource = deleteAuthorized || uploadAuthorized;
     if (!resource) { sendJson(response, 404, { error: "resource_not_found" }); return true; }
+    if (!enforceMaintenanceAction(response, user, resource, "iso_delete")) return true;
     requireQemu(resource);
     const owner = isoCustomer(resource, user);
     const imageRow = store.getIsoImageRow(decodeURIComponent(match[2]), owner.scope);
