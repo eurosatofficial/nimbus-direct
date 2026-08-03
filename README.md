@@ -434,31 +434,6 @@ storage requirements, examples, route families, error model, and deployment
 notes. The API itself requires no additional Proxmox privilege; it can invoke
 only the features already granted to Nimbus's central service account.
 
-### 16. Enable native iOS push notifications (optional)
-
-Push is disabled unless every APNs value is configured. The panel and iOS app
-continue to work without it.
-
-Create an Apple APNs `.p8` key, record the Key ID and Team ID, and set:
-
-```env
-APNS_KEY_ID=XXXXXXXXXX
-APNS_TEAM_ID=YOURTEAMID
-APNS_TOPIC=de.liamjayden.nimbusdirect
-APNS_PRIVATE_KEY_BASE64=BASE64_ENCODED_P8_FILE
-```
-
-Generate the one-line private-key value with:
-
-```bash
-base64 < AuthKey_XXXXXXXXXX.p8 | tr -d '\n'
-```
-
-The APNs topic must exactly match the iOS bundle identifier. Device tokens are
-stored as `APP_SECRET`-bound hashes plus AES-256-GCM encrypted delivery values.
-Invalid or unregistered tokens are disabled automatically after an APNs
-response. The Apple private key and Proxmox credentials never reach the app.
-
 ## Internal Proxmox addresses and private CAs
 
 Keep the TLS certificate hostname in the cluster API URL. To resolve it to an internal address only inside the container, configure the variables at the end of `.env.example` and use:
