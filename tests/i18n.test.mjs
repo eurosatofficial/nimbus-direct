@@ -4,6 +4,8 @@ import test from "node:test";
 
 import {
   germanMessages,
+  getAvailableLanguages,
+  getLocale,
   getResolvedLanguage,
   translateText,
 } from "../public/i18n.js";
@@ -11,6 +13,17 @@ import {
 test("supports explicit English and German language choices", () => {
   assert.equal(getResolvedLanguage("en"), "en");
   assert.equal(getResolvedLanguage("de"), "de");
+});
+
+test("discovers language metadata and catalogues from JSON", async () => {
+  assert.deepEqual(getAvailableLanguages().map(({ code }) => code), ["en", "de"]);
+  assert.equal(getLocale("de"), "de-DE");
+  const registry = JSON.parse(await readFile(new URL("../public/locales/languages.json", import.meta.url), "utf8"));
+  assert.equal(registry.defaultLanguage, "en");
+  for (const language of registry.languages) {
+    const catalogue = JSON.parse(await readFile(new URL(`../public/locales/${language.code}.json`, import.meta.url), "utf8"));
+    assert.equal(typeof catalogue.Overview, "string");
+  }
 });
 
 test("translates core navigation and security text to German", () => {
@@ -43,6 +56,8 @@ test("uses a consistent globe icon for the system language preference", async ()
   ]);
 
   assert.match(appSource, /const systemLanguageIcon = `<svg class="language-globe"/);
+  assert.match(appSource, /getAvailableLanguages\(\)/);
+  assert.doesNotMatch(appSource, /de:\s*\{\s*label:\s*"Deutsch"/);
   assert.doesNotMatch(appSource, /icon: "◎"/);
   assert.equal((indexSource.match(/class="language-globe"/g) || []).length, 2);
   assert.match(stylesSource, /\.language-globe \{/);

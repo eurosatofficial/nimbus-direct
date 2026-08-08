@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 import { connect as connectNet } from "node:net";
 import { connect as connectTls } from "node:tls";
+import { defaultLanguage, localeFor, normalizeLanguage } from "./locales.mjs";
 
 const EMAIL_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
@@ -50,15 +51,26 @@ function escapeHtml(value) {
 }
 
 export function normalizeEmailLanguage(value) {
-  return String(value || "").toLowerCase() === "de" ? "de" : "en";
+  return normalizeLanguage(value) || defaultLanguage;
 }
 
-function emailDate(value, language) {
+function normalizeEmailTimeZone(value) {
+  const timeZone = String(value || "UTC").trim();
+  try {
+    return new Intl.DateTimeFormat("en", { timeZone }).resolvedOptions().timeZone;
+  } catch {
+    return "UTC";
+  }
+}
+
+function emailDate(value, language, timeZone = null) {
   const date = value instanceof Date ? value : new Date(value);
-  if (normalizeEmailLanguage(language) !== "de") return date.toISOString();
-  return new Intl.DateTimeFormat("de-DE", {
+  const lang = normalizeEmailLanguage(language);
+  if (lang === defaultLanguage && !timeZone) return date.toISOString();
+  return new Intl.DateTimeFormat(localeFor(lang), {
     day: "2-digit", month: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit", timeZone: "UTC", timeZoneName: "short",
+    hour: "2-digit", minute: "2-digit",
+    timeZone: normalizeEmailTimeZone(timeZone), timeZoneName: "short",
   }).format(date);
 }
 
@@ -200,6 +212,7 @@ export function maintenanceEmailTemplate({ displayName, event, appUrl = "", lang
   if (!Number.isFinite(startsAt.getTime()) || (endsAt && !Number.isFinite(endsAt.getTime()))) {
     throw problem("Maintenance schedule is invalid", "invalid_email_message", 400);
   }
+  const timeZone = normalizeEmailTimeZone(event?.timeZone || "UTC");
   const safeAppUrl = appUrl ? oneLine(appUrl, "Panel URL", 2048) : "";
   const statusLabel = status === "resolved" ? (de ? "Behoben" : "Resolved")
     : status === "active" ? (de ? "In Bearbeitung" : "In progress")
@@ -227,9 +240,9 @@ export function maintenanceEmailTemplate({ displayName, event, appUrl = "", lang
     title,
     message,
     "",
-    `${de ? "Beginn" : "Starts"}: ${emailDate(startsAt, lang)}`,
+    `${de ? "Beginn" : "Starts"}: ${emailDate(startsAt, lang, timeZone)}`,
     endsAt
-      ? `${status === "resolved" ? statusLabel : (de ? "Ende" : "Ends")}: ${emailDate(endsAt, lang)}`
+      ? `${status === "resolved" ? statusLabel : (de ? "Ende" : "Ends")}: ${emailDate(endsAt, lang, timeZone)}`
       : `${de ? "Ende" : "Ends"}: ${de ? "Bis auf Weiteres" : "Until further notice"}`,
     lockSummary || null,
     safeAppUrl ? `${de ? "Wartungsstatus anzeigen" : "View maintenance status"}: ${safeAppUrl}` : null,
@@ -264,8 +277,8 @@ export function maintenanceEmailTemplate({ displayName, event, appUrl = "", lang
           <h1 style="margin:18px 0 10px;font-size:26px;line-height:1.25">${escapeHtml(title)}</h1>
           <p style="margin:0 0 22px;color:#667087;font-size:15px;line-height:1.65">${de ? `Hallo${name ? ` ${escapeHtml(name)}` : ""},` : `Hello ${escapeHtml(name)},`}<br>${htmlMessage}</p>
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0 8px">
-            <tr><td style="color:#8a93a8;font-size:12px">${de ? "Beginn" : "Starts"}</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(emailDate(startsAt, lang))}</td></tr>
-            <tr><td style="color:#8a93a8;font-size:12px">${status === "resolved" ? statusLabel : (de ? "Ende" : "Ends")}</td><td align="right" style="font-size:13px;font-weight:700">${endsAt ? escapeHtml(emailDate(endsAt, lang)) : (de ? "Bis auf Weiteres" : "Until further notice")}</td></tr>
+            <tr><td style="color:#8a93a8;font-size:12px">${de ? "Beginn" : "Starts"}</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(emailDate(startsAt, lang, timeZone))}</td></tr>
+            <tr><td style="color:#8a93a8;font-size:12px">${status === "resolved" ? statusLabel : (de ? "Ende" : "Ends")}</td><td align="right" style="font-size:13px;font-weight:700">${endsAt ? escapeHtml(emailDate(endsAt, lang, timeZone)) : (de ? "Bis auf Weiteres" : "Until further notice")}</td></tr>
           </table>
           ${htmlLockSummary}
           ${action}

@@ -16,6 +16,7 @@ test("Nimbus API publishes a versioned mobile and administration contract", () =
     "/api-keys/preview",
     "/api-keys/{keyId}",
     "/resources",
+    "/resources/refresh",
     "/resources/{resourceId}",
     "/resources/{resourceId}/actions",
     "/resources/{resourceId}/snapshots",

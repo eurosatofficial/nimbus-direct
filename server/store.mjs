@@ -12,6 +12,7 @@ import {
   safeEqual,
 } from "./security.mjs";
 import { normalizeMfaCode } from "./mfa.mjs";
+import { defaultLanguage, normalizeLanguage } from "./locales.mjs";
 
 export const ASSIGNMENT_PERMISSIONS = [
   "view_status", "start", "stop", "shutdown", "reboot", "reset", "suspend", "resume",
@@ -128,12 +129,25 @@ function problem(message, code = "invalid_input", status = 400) {
   return Object.assign(new Error(message), { status, code });
 }
 
-function normalizePreferredLanguage(value, fallback = "en") {
-  const language = String(value ?? fallback).trim().toLowerCase();
-  if (!['en', 'de'].includes(language)) {
-    throw problem("Preferred language must be English or German", "invalid_preferred_language");
-  }
+function normalizePreferredLanguage(value, fallback = defaultLanguage) {
+  const language = normalizeLanguage(value, fallback);
+  if (!language) throw problem("Preferred language is not installed", "invalid_preferred_language");
   return language;
+}
+
+function preferredLanguageForRow(row) {
+  const locale = normalizeLanguage(row?.preferred_locale);
+  const legacy = normalizeLanguage(row?.preferred_language);
+  // During the extensible-language migration an older German preference may
+  // temporarily coexist with the new column's English default. Preserve the
+  // explicit legacy choice instead of silently switching that recipient back
+  // to English. Normal profile updates always write both columns.
+  if (locale === defaultLanguage && legacy && legacy !== defaultLanguage) return legacy;
+  return locale || legacy || defaultLanguage;
+}
+
+function legacyPreferredLanguage(language) {
+  return language === "de" ? "de" : "en";
 }
 
 function parseJson(value, fallback = {}) {
@@ -165,7 +179,7 @@ function publicUser(row) {
     customerName: row.customer_name || null,
     supportEmail: row.support_email || "",
     planName: row.plan_name || "Managed infrastructure",
-    preferredLanguage: row.preferred_language || "en",
+    preferredLanguage: preferredLanguageForRow(row),
     mfaEnabled: Boolean(row.mfa_enabled),
     passwordSet: row.password_set === undefined ? true : Boolean(row.password_set),
     invitationExpiresAt: row.invitation_expires_at || null,
@@ -329,6 +343,7 @@ function publicMaintenanceEvent(row, targets = []) {
     status: row.status,
     startsAt: row.starts_at,
     endsAt: row.ends_at || null,
+    timeZone: row.time_zone || "UTC",
     notifyEmail: Boolean(row.notify_email),
     lockGroups: MAINTENANCE_LOCK_GROUPS
       .filter((group) => new Set(parseJson(row.lock_groups, [])).has(group.id))
@@ -668,6 +683,7 @@ function normalizeMaintenanceInput(input = {}, existing = null) {
   const startsAt = Number(input.startsAt ?? existing?.starts_at);
   const rawEndsAt = input.endsAt === undefined ? existing?.ends_at : input.endsAt;
   const endsAt = rawEndsAt === null || rawEndsAt === "" || rawEndsAt === undefined ? null : Number(rawEndsAt);
+  const timeZone = normalizeTimeZone(input.timeZone ?? existing?.time_zone ?? "UTC");
   const existingLockGroups = parseJson(existing?.lock_groups, []);
   const requestedLockGroups = input.lockGroups === undefined ? existingLockGroups : input.lockGroups;
   if (!["maintenance", "incident"].includes(kind)) throw problem("Choose planned maintenance or an incident", "invalid_maintenance_kind");
@@ -694,9 +710,20 @@ function normalizeMaintenanceInput(input = {}, existing = null) {
     message,
     startsAt,
     endsAt,
+    timeZone,
     notifyEmail: input.notifyEmail === undefined ? Boolean(existing?.notify_email) : Boolean(input.notifyEmail),
     lockGroups: MAINTENANCE_LOCK_GROUPS.filter((group) => requestedLockSet.has(group.id)).map((group) => group.id),
   };
+}
+
+function normalizeTimeZone(value) {
+  const timeZone = String(value || "UTC").trim();
+  if (!timeZone || timeZone.length > 100) throw problem("Maintenance timezone is invalid", "invalid_maintenance_timezone");
+  try {
+    return new Intl.DateTimeFormat("en", { timeZone }).resolvedOptions().timeZone;
+  } catch {
+    throw problem("Maintenance timezone is invalid", "invalid_maintenance_timezone");
+  }
 }
 
 function normalizeSupportTicketInput(input = {}) {
@@ -899,6 +926,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       password_hash TEXT NOT NULL,
       password_set INTEGER NOT NULL DEFAULT 1,
       preferred_language TEXT NOT NULL DEFAULT 'en' CHECK(preferred_language IN ('en','de')),
+      preferred_locale TEXT NOT NULL DEFAULT 'en',
       role TEXT NOT NULL CHECK(role IN ('admin','customer')),
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
       created_at INTEGER NOT NULL,
@@ -1394,6 +1422,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','scheduled','active','resolved','cancelled')),
       starts_at INTEGER NOT NULL,
       ends_at INTEGER,
+      time_zone TEXT NOT NULL DEFAULT 'UTC',
       notify_email INTEGER NOT NULL DEFAULT 1,
       lock_groups TEXT NOT NULL DEFAULT '[]',
       created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
@@ -1528,6 +1557,10 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   const userColumns = new Set(database.prepare("PRAGMA table_info(users)").all().map((column) => column.name));
   if (!userColumns.has("password_set")) database.exec("ALTER TABLE users ADD COLUMN password_set INTEGER NOT NULL DEFAULT 1");
   if (!userColumns.has("preferred_language")) database.exec("ALTER TABLE users ADD COLUMN preferred_language TEXT NOT NULL DEFAULT 'en' CHECK(preferred_language IN ('en','de'))");
+  if (!userColumns.has("preferred_locale")) {
+    database.exec("ALTER TABLE users ADD COLUMN preferred_locale TEXT NOT NULL DEFAULT 'en'");
+    database.exec("UPDATE users SET preferred_locale=preferred_language");
+  }
   const apiPolicyColumns = new Set(database.prepare("PRAGMA table_info(user_api_policies)").all().map((column) => column.name));
   if (!apiPolicyColumns.has("all_visible_resources")) database.exec("ALTER TABLE user_api_policies ADD COLUMN all_visible_resources INTEGER NOT NULL DEFAULT 0");
   const emailSettingsColumns = new Set(database.prepare("PRAGMA table_info(email_settings)").all().map((column) => column.name));
@@ -1537,6 +1570,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   if (!consoleSessionColumns.has("console_user")) database.exec("ALTER TABLE console_sessions ADD COLUMN console_user TEXT");
   const maintenanceEventColumns = new Set(database.prepare("PRAGMA table_info(maintenance_events)").all().map((column) => column.name));
   if (!maintenanceEventColumns.has("lock_groups")) database.exec("ALTER TABLE maintenance_events ADD COLUMN lock_groups TEXT NOT NULL DEFAULT '[]'");
+  if (!maintenanceEventColumns.has("time_zone")) database.exec("ALTER TABLE maintenance_events ADD COLUMN time_zone TEXT NOT NULL DEFAULT 'UTC'");
   const securityPolicyNow = Date.now();
   database.prepare(`INSERT OR IGNORE INTO security_policy
     (id,require_admin_mfa,require_customer_mfa,new_login_email,created_at,updated_at)
@@ -1696,7 +1730,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     const customerFilter = customerIds
       ? `AND u.customer_id IN (${customerIds.map(() => "?").join(",")})`
       : "";
-    return database.prepare(`SELECT u.id,u.customer_id,u.email,u.display_name,u.preferred_language,
+    return database.prepare(`SELECT u.id,u.customer_id,u.email,u.display_name,u.preferred_language,u.preferred_locale,
       COALESCE(p.email_enabled,0) AS email_enabled,
       COALESCE(p.infrastructure_alerts,1) AS infrastructure_alerts,
       COALESCE(p.resolution_alerts,1) AS resolution_alerts
@@ -1708,7 +1742,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       customerId: row.customer_id,
       email: row.email,
       displayName: row.display_name,
-      preferredLanguage: row.preferred_language || "en",
+      preferredLanguage: preferredLanguageForRow(row),
       emailEnabled: Boolean(row.email_enabled),
       infrastructureAlerts: Boolean(row.infrastructure_alerts),
       resolutionAlerts: Boolean(row.resolution_alerts),
@@ -1716,7 +1750,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
   }
 
   function maintenanceDeliveryRecipients(eventId) {
-    return database.prepare(`SELECT d.id AS delivery_id,u.id,u.customer_id,u.email,u.display_name,u.preferred_language,
+    return database.prepare(`SELECT d.id AS delivery_id,u.id,u.customer_id,u.email,u.display_name,u.preferred_language,u.preferred_locale,
       COALESCE(p.email_enabled,0) AS email_enabled,
       COALESCE(p.infrastructure_alerts,1) AS infrastructure_alerts,
       COALESCE(p.resolution_alerts,1) AS resolution_alerts
@@ -1729,7 +1763,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       customerId: row.customer_id,
       email: row.email,
       displayName: row.display_name,
-      preferredLanguage: row.preferred_language || "en",
+      preferredLanguage: preferredLanguageForRow(row),
       emailEnabled: Boolean(row.email_enabled),
       infrastructureAlerts: Boolean(row.infrastructure_alerts),
       resolutionAlerts: Boolean(row.resolution_alerts),
@@ -2000,8 +2034,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const language = normalizePreferredLanguage(preferredLanguage);
       const now = Date.now();
       const id = randomToken(18);
-      database.prepare("INSERT INTO users (id,customer_id,email,display_name,password_hash,preferred_language,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?, 'active',?,?)")
-        .run(id, customerId, normalized, name, await hashPassword(password), language, role, now, now);
+      database.prepare("INSERT INTO users (id,customer_id,email,display_name,password_hash,preferred_language,preferred_locale,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?, 'active',?,?)")
+        .run(id, customerId, normalized, name, await hashPassword(password), legacyPreferredLanguage(language), language, role, now, now);
       return publicUser(getUserRow.get(id));
     },
     async createInvitedUser({ email, displayName, role = "customer", customerId = null, preferredLanguage = "en" }) {
@@ -2017,9 +2051,9 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const now = Date.now();
       const id = randomToken(18);
       database.prepare(`INSERT INTO users
-        (id,customer_id,email,display_name,password_hash,password_set,preferred_language,role,status,created_at,updated_at)
-        VALUES (?,?,?,?,?,0,?,?,'active',?,?)`)
-        .run(id, customerId, normalized, name, await hashPassword(randomToken(32)), language, role, now, now);
+        (id,customer_id,email,display_name,password_hash,password_set,preferred_language,preferred_locale,role,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,0,?,?,?,'active',?,?)`)
+        .run(id, customerId, normalized, name, await hashPassword(randomToken(32)), legacyPreferredLanguage(language), language, role, now, now);
       return publicUser(getUserRow.get(id));
     },
     findUserForLogin: (email) => getUserByEmailRow.get(normalizeEmail(email)),
@@ -2223,7 +2257,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const customerId = input.customerId === undefined ? row.customer_id : (input.customerId || null);
       const displayName = input.displayName === undefined ? row.display_name : String(input.displayName).trim();
       const preferredLanguage = input.preferredLanguage === undefined
-        ? (row.preferred_language || "en")
+        ? preferredLanguageForRow(row)
         : normalizePreferredLanguage(input.preferredLanguage);
       if (!["admin", "customer"].includes(role) || !["active", "disabled"].includes(status)) throw problem("Invalid user update");
       if (!displayName || displayName.length > 100) throw problem("Display name must contain 1-100 characters");
@@ -2233,8 +2267,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (row.role === "admin" && row.status === "active" && (role !== "admin" || status !== "active") && activeAdmins <= 1) {
         throw problem("The last active administrator cannot be disabled or demoted", "last_admin");
       }
-      database.prepare("UPDATE users SET customer_id=?,display_name=?,preferred_language=?,role=?,status=?,updated_at=? WHERE id=?")
-        .run(customerId, displayName, preferredLanguage, role, status, Date.now(), id);
+      database.prepare("UPDATE users SET customer_id=?,display_name=?,preferred_language=?,preferred_locale=?,role=?,status=?,updated_at=? WHERE id=?")
+        .run(customerId, displayName, legacyPreferredLanguage(preferredLanguage), preferredLanguage, role, status, Date.now(), id);
       if (status === "disabled") {
         const now = Date.now();
         database.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
@@ -2262,11 +2296,11 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const payload = typeof input === "string" ? { displayName: input } : (input || {});
       const name = payload.displayName === undefined ? row.display_name : String(payload.displayName || "").trim();
       const preferredLanguage = payload.preferredLanguage === undefined
-        ? (row.preferred_language || "en")
+        ? preferredLanguageForRow(row)
         : normalizePreferredLanguage(payload.preferredLanguage);
       if (!name || name.length > 100) throw problem("Display name must contain 1-100 characters");
-      database.prepare("UPDATE users SET display_name=?,preferred_language=?,updated_at=? WHERE id=?")
-        .run(name, preferredLanguage, Date.now(), id);
+      database.prepare("UPDATE users SET display_name=?,preferred_language=?,preferred_locale=?,updated_at=? WHERE id=?")
+        .run(name, legacyPreferredLanguage(preferredLanguage), preferredLanguage, Date.now(), id);
       return publicUser(getUserRow.get(id));
     },
     async updatePassword(id, password, { revokeSessions = true } = {}) {
@@ -3324,8 +3358,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       database.exec("BEGIN IMMEDIATE");
       try {
         database.prepare(`INSERT INTO maintenance_events
-          (id,kind,title,message,severity,status,starts_at,ends_at,notify_email,lock_groups,created_by,updated_by,created_at,updated_at)
-          VALUES (?,?,?,?,?,'draft',?,?,?,?,?,?,?,?)`)
+          (id,kind,title,message,severity,status,starts_at,ends_at,time_zone,notify_email,lock_groups,created_by,updated_by,created_at,updated_at)
+          VALUES (?,?,?,?,?,'draft',?,?,?,?,?,?,?,?,?)`)
           .run(
             id,
             event.kind,
@@ -3334,6 +3368,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
             event.severity,
             event.startsAt,
             event.endsAt,
+            event.timeZone,
             event.notifyEmail ? 1 : 0,
             JSON.stringify(event.lockGroups),
             userId,
@@ -3359,7 +3394,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const now = Date.now();
       database.exec("BEGIN IMMEDIATE");
       try {
-        database.prepare(`UPDATE maintenance_events SET kind=?,title=?,message=?,severity=?,starts_at=?,ends_at=?,
+        database.prepare(`UPDATE maintenance_events SET kind=?,title=?,message=?,severity=?,starts_at=?,ends_at=?,time_zone=?,
           notify_email=?,lock_groups=?,updated_by=?,updated_at=? WHERE id=?`)
           .run(
             event.kind,
@@ -3368,6 +3403,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
             event.severity,
             event.startsAt,
             event.endsAt,
+            event.timeZone,
             event.notifyEmail ? 1 : 0,
             JSON.stringify(event.lockGroups),
             userId,
@@ -3784,20 +3820,20 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (!row) throw problem("Support ticket does not exist", "support_ticket_not_found", 404);
       if (audience === "admin") {
         if (row.assigned_to) {
-          const assigned = database.prepare(`SELECT id,email,display_name,preferred_language FROM users
+          const assigned = database.prepare(`SELECT id,email,display_name,preferred_language,preferred_locale FROM users
             WHERE id=? AND role='admin' AND status='active'`).get(row.assigned_to);
-          if (assigned) return [{ id: assigned.id, email: assigned.email, displayName: assigned.display_name, preferredLanguage: assigned.preferred_language || "en" }];
+          if (assigned) return [{ id: assigned.id, email: assigned.email, displayName: assigned.display_name, preferredLanguage: preferredLanguageForRow(assigned) }];
         }
-        return database.prepare(`SELECT id,email,display_name,preferred_language FROM users
+        return database.prepare(`SELECT id,email,display_name,preferred_language,preferred_locale FROM users
           WHERE role='admin' AND status='active' ORDER BY id`).all().map((entry) => ({
-          id: entry.id, email: entry.email, displayName: entry.display_name, preferredLanguage: entry.preferred_language || "en",
+          id: entry.id, email: entry.email, displayName: entry.display_name, preferredLanguage: preferredLanguageForRow(entry),
         }));
       }
-      return database.prepare(`SELECT u.id,u.email,u.display_name,u.preferred_language FROM users u
+      return database.prepare(`SELECT u.id,u.email,u.display_name,u.preferred_language,u.preferred_locale FROM users u
         JOIN customers c ON c.id=u.customer_id
         WHERE u.customer_id=? AND u.role='customer' AND u.status='active' AND c.status='active'
         ORDER BY u.id`).all(row.customer_id).map((entry) => ({
-        id: entry.id, email: entry.email, displayName: entry.display_name, preferredLanguage: entry.preferred_language || "en",
+        id: entry.id, email: entry.email, displayName: entry.display_name, preferredLanguage: preferredLanguageForRow(entry),
       }));
     },
     listSupportAssignees() {

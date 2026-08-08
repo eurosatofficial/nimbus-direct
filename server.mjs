@@ -17,6 +17,7 @@ import {
 } from "./server/email.mjs";
 import { createTotpEnrollment, generateRecoveryCodes, verifyTotp } from "./server/mfa.mjs";
 import { createNotificationService } from "./server/notifications.mjs";
+import { availableLanguages, defaultLanguage } from "./server/locales.mjs";
 import { createPushService } from "./server/push.mjs";
 import { nimbusOpenApi } from "./server/openapi.mjs";
 import { ProxmoxRegistry } from "./server/proxmox-registry.mjs";
@@ -59,6 +60,7 @@ const uploadLimiter = new RateLimiter({ limit: 5, windowMs: 60 * 60 * 1000 });
 const emailConnectionTestLimiter = new RateLimiter({ limit: 12, windowMs: 5 * 60 * 1000 });
 const emailMessageTestLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
 const operationsRefreshLimiter = new RateLimiter({ limit: 6, windowMs: 5 * 60 * 1000 });
+const resourceRefreshLimiter = new RateLimiter({ limit: 20, windowMs: 5 * 60 * 1000 });
 const maintenancePublishLimiter = new RateLimiter({ limit: 30, windowMs: 60 * 60 * 1000 });
 const supportTicketCreateLimiter = new RateLimiter({ limit: 10, windowMs: 60 * 60 * 1000 });
 const supportTicketMessageLimiter = new RateLimiter({ limit: 60, windowMs: 60 * 60 * 1000 });
@@ -332,7 +334,7 @@ function authorizeIntegrationKeyRequest(request, response, pathname, session) {
   }
 
   let required = null;
-  if (pathname === "/api/v1/resources" || pathname === "/api/v1/network"
+  if (pathname === "/api/v1/resources" || pathname === "/api/v1/resources/refresh" || pathname === "/api/v1/network"
     || pathname === "/api/v1/tasks" || /^\/api\/v1\/tasks\/[^/]+$/.test(pathname)) required = "server_overview";
   else if (/^\/api\/v1\/console\/session\/[^/]+$/.test(pathname)) required = "console_access";
   else if (pathname.startsWith("/api/v1/notifications")) required = "notifications";
@@ -1030,11 +1032,25 @@ async function syncCluster(clusterId) {
   }
 }
 
+const clusterSyncs = new Map();
+
+async function syncClusterOnce(clusterId) {
+  const active = clusterSyncs.get(clusterId);
+  if (active) return active;
+  const operation = syncCluster(clusterId);
+  clusterSyncs.set(clusterId, operation);
+  try {
+    return await operation;
+  } finally {
+    if (clusterSyncs.get(clusterId) === operation) clusterSyncs.delete(clusterId);
+  }
+}
+
 async function syncAllClusters() {
   const results = [];
   for (const cluster of store.listClusters().filter((entry) => entry.status !== "disabled")) {
     try {
-      await syncCluster(cluster.id);
+      await syncClusterOnce(cluster.id);
       results.push({ clusterId: cluster.id, success: true });
     } catch (error) {
       results.push({ clusterId: cluster.id, success: false, error: error.code || "proxmox_sync_failed" });
@@ -1768,7 +1784,7 @@ async function routeAdmin(request, response, pathname) {
     const clusterId = decodeURIComponent(match[1]);
     const operation = match[2];
     const result = operation === "sync"
-      ? await syncCluster(clusterId)
+      ? await syncClusterOnce(clusterId)
       : (config.allowDemoData && clusterId === "demo-eu" ? { version: "9.0", nodes: [{ name: "pve-ber-01", status: "online" }] } : await proxmox.forCluster(clusterId).testConnection());
     audit(request, session, `admin.cluster.${operation}ed`, { detail: { clusterId } });
     sendJson(response, 200, operation === "sync" ? { resources: result.length } : { result }); return true;
@@ -2179,6 +2195,51 @@ async function routeCustomer(request, response, pathname) {
         limit,
         offset,
       },
+    });
+    return true;
+  }
+
+  if (pathname === "/api/v1/resources/refresh" && request.method === "POST") {
+    if (!requireCsrf(request, response, session)) return true;
+    const limit = resourceRefreshLimiter.consume(`${user.id}:${clientIp(request)}`);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "resource_refresh_rate_limited" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const enabledClusters = new Set(store.listClusters()
+      .filter((cluster) => cluster.status !== "disabled")
+      .map((cluster) => cluster.id));
+    const visibleResources = filterApiKeyResources(session, resourcesFor(user));
+    const clusterIds = user.role === "admin" && session.authType !== "api_key"
+      ? [...enabledClusters]
+      : [...new Set(visibleResources.map((resource) => resource.clusterId))]
+        .filter((clusterId) => enabledClusters.has(clusterId));
+    const results = await Promise.all(clusterIds.map(async (clusterId) => {
+      try {
+        await syncClusterOnce(clusterId);
+        return { clusterId, success: true };
+      } catch (error) {
+        log("error", "manual_resource_refresh_failed", {
+          clusterId,
+          userId: user.id,
+          error: error.code || error.message,
+        });
+        return { clusterId, success: false };
+      }
+    }));
+    const succeeded = results.filter((result) => result.success).length;
+    audit(request, session, "resource.inventory_refreshed", {
+      detail: { clusters: results.length, succeeded, failed: results.length - succeeded },
+    });
+    if (results.length > 0 && succeeded === 0) {
+      sendJson(response, 502, { error: "resource_refresh_failed" });
+      return true;
+    }
+    sendJson(response, 200, {
+      refreshedAt: Date.now(),
+      clusters: results.length,
+      succeeded,
+      failed: results.length - succeeded,
     });
     return true;
   }
@@ -3376,6 +3437,10 @@ async function routeApi(request, response, pathname) {
         administration: true,
         integrationApiKeys: true,
       },
+      localization: {
+        defaultLanguage,
+        languages: availableLanguages,
+      },
       demoReadOnly: config.demoReadOnly,
     });
     return;
@@ -3413,7 +3478,7 @@ async function routeApi(request, response, pathname) {
 
 const mime = {
   ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
-  ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json", ".txt": "text/plain; charset=utf-8",
+  ".svg": "image/svg+xml", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json", ".txt": "text/plain; charset=utf-8",
 };
 
 const server = createServer(async (request, response) => {

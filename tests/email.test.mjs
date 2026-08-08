@@ -164,12 +164,14 @@ test("maintenance emails escape customer-facing content and describe the service
       message: "A brief interruption is possible.\nNo action is required.",
       startsAt: Date.parse("2026-07-26T22:00:00.000Z"),
       endsAt: Date.parse("2026-07-26T23:00:00.000Z"),
+      timeZone: "Europe/Berlin",
       lockGroups: [{ id: "power_management", label: "Power management" }],
     },
     appUrl: "https://panel.example.test/#maintenance",
   });
   assert.equal(content.subject, "Scheduled: Network maintenance <Berlin>");
-  assert.match(content.text, /2026-07-26T22:00:00\.000Z/);
+  assert.match(content.text, /07\/27\/2026, 12:00 AM GMT\+2/);
+  assert.equal(content.text.includes("2026-07-26T22:00:00.000Z"), false);
   assert.match(content.text, /View maintenance status/);
   assert.match(content.text, /Power management/);
   assert.match(content.html, /Planned maintenance · Scheduled/);
@@ -273,13 +275,17 @@ test("account, security, maintenance, support, and alert templates support Germa
       severity: "warning",
       title: "Netzwerkwartung",
       message: "Kurze Unterbrechung möglich.",
-      startsAt: Date.parse("2026-08-03T22:00:00.000Z"),
-      endsAt: Date.parse("2026-08-03T23:00:00.000Z"),
+      startsAt: Date.parse("2026-08-04T17:00:00.000Z"),
+      endsAt: Date.parse("2026-08-04T17:30:00.000Z"),
+      timeZone: "Europe/Berlin",
       lockGroups: [],
     },
   });
   assert.equal(maintenance.subject, "Geplant: Netzwerkwartung");
   assert.match(maintenance.text, /Geplante Wartung/);
+  assert.match(maintenance.text, /Beginn: 04\.08\.2026, 19:00 MESZ/);
+  assert.match(maintenance.text, /Ende: 04\.08\.2026, 19:30 MESZ/);
+  assert.match(maintenance.html, /Geplante Wartung · Geplant/);
 
   const support = supportTicketEmailTemplate({
     displayName: "Liam",

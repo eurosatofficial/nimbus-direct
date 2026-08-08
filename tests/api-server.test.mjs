@@ -66,6 +66,11 @@ test("Nimbus API authenticates a device and preserves assignment authorization",
     assert.equal(discovery.response.status, 200);
     assert.equal(discovery.payload.version, "v1");
     assert.equal(discovery.payload.authentication.refreshRotation, true);
+    assert.equal(discovery.payload.localization.defaultLanguage, "en");
+    assert.deepEqual(
+      discovery.payload.localization.languages.map(({ code }) => code),
+      ["en", "de"],
+    );
     const openapi = await request("/api/v1/openapi.json");
     assert.equal(openapi.response.status, 200);
     assert.equal(openapi.payload.openapi, "3.1.0");
@@ -90,6 +95,15 @@ test("Nimbus API authenticates a device and preserves assignment authorization",
     assert.equal(resources.response.status, 200);
     assert.equal(resources.payload.resources.total, 3);
     assert.ok(resources.payload.resources.items.every((resource) => resource.customerId === "acme"));
+
+    const resourceRefresh = await request("/api/v1/resources/refresh", {
+      method: "POST",
+      accessToken,
+      body: {},
+    });
+    assert.equal(resourceRefresh.response.status, 200);
+    assert.equal(resourceRefresh.payload.clusters, 1);
+    assert.equal(resourceRefresh.payload.succeeded, 1);
 
     const ownResource = resources.payload.resources.items[0];
     const action = await request(`/api/v1/resources/${encodeURIComponent(ownResource.id)}/actions`, {

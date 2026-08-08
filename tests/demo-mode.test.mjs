@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { assertDemoReadOnlyStore, isDemoReadOnlyRequestAllowed } from "../server/demo-mode.mjs";
 
-test("public demo allows reads and only the authentication writes needed for sessions", () => {
+test("public demo allows reads, session lifecycle, and a safe inventory refresh", () => {
   assert.equal(isDemoReadOnlyRequestAllowed("GET", "/api/v1/dashboard"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("HEAD", "/"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/login"), true);
@@ -12,6 +12,7 @@ test("public demo allows reads and only the authentication writes needed for ses
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/mfa"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/refresh"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/logout"), true);
+  assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/resources/refresh"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/resources/demo/actions"), false);
   assert.equal(isDemoReadOnlyRequestAllowed("PATCH", "/api/v1/profile"), false);
   assert.equal(isDemoReadOnlyRequestAllowed("PUT", "/api/admin/email/settings"), false);

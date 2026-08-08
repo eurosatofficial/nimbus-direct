@@ -254,9 +254,13 @@ test("maintenance publishing freezes assignment-derived recipients and preserves
       const acme = store.createCustomer({ id: "acme", name: "Acme" });
       const beta = store.createCustomer({ id: "beta", name: "Beta" });
       const admin = await store.createUser({ email: "maintenance-admin@example.com", displayName: "Admin", password: "admin password for tests", role: "admin" });
-      const acmeOne = await store.createUser({ email: "maintenance-acme-one@example.com", displayName: "Acme One", password: "customer password test", customerId: acme.id });
+      const acmeOne = await store.createUser({ email: "maintenance-acme-one@example.com", displayName: "Acme One", password: "customer password test", customerId: acme.id, preferredLanguage: "de" });
       const acmeTwo = await store.createUser({ email: "maintenance-acme-two@example.com", displayName: "Acme Two", password: "customer password test", customerId: acme.id });
       const betaUser = await store.createUser({ email: "maintenance-beta@example.com", displayName: "Beta", password: "customer password test", customerId: beta.id });
+      // Simulate an account upgraded while the new locale column still held
+      // its default. The explicit historic German choice must win.
+      store.database.prepare("UPDATE users SET preferred_locale='en' WHERE id=?").run(acmeOne.id);
+      assert.equal(store.getUser(acmeOne.id).preferredLanguage, "de");
       store.updateNotificationPreferences(acmeOne.id, { emailEnabled: true, infrastructureAlerts: true, resolutionAlerts: true });
       store.createCluster({
         id: "production", name: "Production", apiUrl: "https://pve.example.test:8006",
@@ -279,6 +283,7 @@ test("maintenance publishing freezes assignment-derived recipients and preserves
         message: "The assigned VM may reboot once.",
         startsAt: now + 60_000,
         endsAt: now + 120_000,
+        timeZone: "Europe/Berlin",
         notifyEmail: true,
         lockGroups: ["power_management"],
         targets: [{ type: "resource", id: acmeResource }],
@@ -288,8 +293,10 @@ test("maintenance publishing freezes assignment-derived recipients and preserves
       assert.deepEqual(draft.lockGroups.map((group) => group.id), ["power_management"]);
       const published = store.publishMaintenanceEvent(draft.id, { userId: admin.id });
       assert.equal(published.event.status, "scheduled");
+      assert.equal(published.event.timeZone, "Europe/Berlin");
       assert.equal(published.event.recipientCount, 2);
       assert.equal(published.deliveries.filter((delivery) => delivery.emailEnabled).length, 1);
+      assert.equal(published.deliveries.find((delivery) => delivery.id === acmeOne.id).preferredLanguage, "de");
       assert.equal(store.listMaintenanceForUser(acmeOne.id).total, 1);
       assert.equal(store.listMaintenanceForUser(acmeTwo.id).total, 1);
       assert.equal(store.listMaintenanceForUser(betaUser.id).total, 0);
@@ -552,6 +559,7 @@ test("existing databases receive the snapshot limit column without losing assign
       const userColumns = store.database.prepare("PRAGMA table_info(users)").all().map((column) => column.name);
       assert.ok(userColumns.includes("password_set"));
       assert.ok(userColumns.includes("preferred_language"));
+      assert.ok(userColumns.includes("preferred_locale"));
       const emailTables = store.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'email_%' ORDER BY name").all().map((row) => row.name);
       assert.deepEqual(emailTables, ["email_jobs", "email_settings"]);
       const emailColumns = store.database.prepare("PRAGMA table_info(email_settings)").all().map((column) => column.name);
@@ -561,6 +569,8 @@ test("existing databases receive the snapshot limit column without losing assign
       assert.deepEqual(notificationTables, ["notification_events", "notification_preferences", "notifications"]);
       const maintenanceTables = store.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'maintenance_%' ORDER BY name").all().map((row) => row.name);
       assert.deepEqual(maintenanceTables, ["maintenance_deliveries", "maintenance_events", "maintenance_targets"]);
+      const maintenanceColumns = store.database.prepare("PRAGMA table_info(maintenance_events)").all().map((column) => column.name);
+      assert.ok(maintenanceColumns.includes("time_zone"));
       const assignment = store.database.prepare("SELECT * FROM customer_resource_assignments WHERE id='assignment-1'").get();
       assert.equal(assignment.snapshot_limit, 3);
       assert.equal(assignment.resource_id, "production:qemu:101");

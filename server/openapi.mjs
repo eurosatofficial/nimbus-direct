@@ -191,7 +191,7 @@ export const nimbusOpenApi = {
           minProperties: 1,
           properties: {
             displayName: { type: "string" },
-            preferredLanguage: { type: "string", enum: ["en", "de"] },
+            preferredLanguage: { type: "string", description: "Language code installed in public/locales/languages.json" },
           },
         },
       }),
@@ -337,6 +337,13 @@ export const nimbusOpenApi = {
           { name: "clusterId", in: "query", schema: { type: "string" } },
           { name: "search", in: "query", schema: { type: "string" } },
         ],
+      }),
+    },
+    "/resources/refresh": {
+      post: operation({
+        tags: "Resources",
+        summary: "Synchronize visible resource state from Proxmox",
+        description: "Nimbus derives the eligible clusters from the authenticated user's role, assignments, API-key resource restrictions, and enabled cluster configuration. Clients cannot select arbitrary clusters, nodes, or VMIDs.",
       }),
     },
     "/resources/{resourceId}": {

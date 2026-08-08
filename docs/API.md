@@ -27,8 +27,11 @@ GET /api/v1/openapi.json
 ```
 
 `/api/v1` reports the API version, token lifetimes, supported feature families,
-and whether the installation is a public read-only demo. The OpenAPI 3.1
-document is the source contract for mobile-client generation and API testing.
+the installed language registry, and whether the installation is a public
+read-only demo. Native clients can use `localization.defaultLanguage` and
+`localization.languages` to present the same language choices as the panel.
+The OpenAPI 3.1 document is the source contract for mobile-client generation
+and API testing.
 
 ## Native authentication
 
