@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/overview.jpg" alt="Nimbus Dashboard" width="800">
+  <img src="docs/screenshots/darkmode/web-overview.png" alt="Nimbus Dashboard" width="800">
 </p>
 
 # Nimbus Direct
