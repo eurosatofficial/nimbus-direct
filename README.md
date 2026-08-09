@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/dark-mode/web-overview.png" alt="Nimbus Dashboard" width="800">
+  <img src="docs/screenshots/overview.jpg" alt="Nimbus Dashboard" width="800">
 </p>
 
 # Nimbus Direct
@@ -440,6 +440,31 @@ storage requirements, examples, route families, error model, and deployment
 notes. The API itself requires no additional Proxmox privilege; it can invoke
 only the features already granted to Nimbus's central service account.
 
+### 16. Enable native iOS push notifications (optional)
+
+Push is disabled unless every APNs value is configured. The panel and iOS app
+continue to work without it.
+
+Create an Apple APNs `.p8` key, record the Key ID and Team ID, and set:
+
+```env
+APNS_KEY_ID=XXXXXXXXXX
+APNS_TEAM_ID=YOURTEAMID
+APNS_TOPIC=de.liamjayden.nimbusdirect
+APNS_PRIVATE_KEY_BASE64=BASE64_ENCODED_P8_FILE
+```
+
+Generate the one-line private-key value with:
+
+```bash
+base64 < AuthKey_XXXXXXXXXX.p8 | tr -d '\n'
+```
+
+The APNs topic must exactly match the iOS bundle identifier. Device tokens are
+stored as `APP_SECRET`-bound hashes plus AES-256-GCM encrypted delivery values.
+Invalid or unregistered tokens are disabled automatically after an APNs
+response. The Apple private key and Proxmox credentials never reach the app.
+
 ## Internal Proxmox addresses and private CAs
 
 Keep the TLS certificate hostname in the cluster API URL. To resolve it to an internal address only inside the container, configure the variables at the end of `.env.example` and use:
@@ -484,7 +509,9 @@ The numbered schema is in `migrations/001_initial.sql`, with additive task index
 
 ## Console security
 
-The panel pins noVNC 1.7 and xterm.js 6.0. A console launch checks the local assignment and permission before automatically selecting Proxmox `termproxy` for LXC and serial-display QEMU guests or `vncproxy` for graphical QEMU guests. The resulting ticket is encrypted in a short-lived, single-use Nimbus session. Both clients connect only to a same-origin Nimbus WebSocket URL; Nimbus consumes the local launch token, authenticates the upstream Proxmox `vncwebsocket` upgrade with the encrypted service-account credential, and pipes binary data. The scoped Proxmox ticket and termproxy username are released only to the authenticated, still-authorized console page over HTTPS and held in browser memory for the handshake. Native clients exchange the same 45-second launch token for a path-restricted, HttpOnly console cookie; the normal mobile bearer and refresh token never enter the web view. The long-lived Proxmox API token never reaches the browser or app. Both console types use the existing `VM.Console` privilege.
+The panel pins noVNC 1.7 and xterm.js 6.0. A console launch checks the local assignment and permission before automatically selecting Proxmox `termproxy` for LXC and serial-display QEMU guests or `vncproxy` for graphical QEMU guests. The resulting ticket is encrypted in a short-lived, single-use Nimbus session. Both clients connect only to a same-origin Nimbus WebSocket URL; Nimbus consumes the local launch token, authenticates the upstream Proxmox `vncwebsocket` upgrade with the encrypted service-account credential, and pipes binary data with low-latency TCP settings. The scoped Proxmox ticket and termproxy username are released only to the authenticated, still-authorized console page over HTTPS and held in browser memory for the handshake. Native clients exchange the same 45-second launch token for a path-restricted, HttpOnly console cookie; the normal mobile bearer and refresh token never enter the web view. Sensitive console responses stay non-cacheable, while the pinned public renderer modules are cached and reused. The long-lived Proxmox API token never reaches the browser or app. Both console types use the existing `VM.Console` privilege.
+
+If Nimbus is placed behind Nginx or another reverse proxy, WebSocket upgrades must be forwarded without response buffering. Use HTTP/1.1, preserve the `Upgrade` and `Connection` headers, disable proxy buffering for the Nimbus route, and keep a sufficiently long WebSocket read timeout. Cloudflare Tunnel supports WebSockets, but any additional proxy between the tunnel and Nimbus must do the same. Buffering or missing upgrade headers makes the console slow or prevents it from connecting entirely.
 
 ## Verification
 

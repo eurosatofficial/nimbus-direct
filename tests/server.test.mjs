@@ -230,8 +230,13 @@ test("customer ISO boot and Snapshot Center workflows stay assignment-scoped", a
     const xtermFitModule = await fetch(`${baseUrl}/vendor/xterm-fit/lib/addon-fit.mjs`);
     assert.equal(xtermModule.status, 200);
     assert.match(xtermModule.headers.get("content-type"), /^text\/javascript/);
+    assert.match(xtermModule.headers.get("cache-control"), /max-age=86400/);
     assert.equal(xtermFitModule.status, 200);
     assert.match(xtermFitModule.headers.get("content-type"), /^text\/javascript/);
+    assert.match(xtermFitModule.headers.get("cache-control"), /max-age=86400/);
+    const consolePage = await fetch(`${baseUrl}/console.html`);
+    assert.equal(consolePage.status, 200);
+    assert.equal(consolePage.headers.get("cache-control"), "no-store");
     const stolenSession = await fetch(`${baseUrl}/api/v1/console/session/${encodeURIComponent(consoleToken)}`, {
       headers: { Accept: "application/json", Cookie: "nimbus_console=wrong-token" },
     });

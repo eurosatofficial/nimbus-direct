@@ -1,0 +1,34 @@
+name: Localization
+
+on:
+  pull_request:
+    paths:
+      - "public/locales/**"
+      - "server/email.mjs"
+      - "server/notifications.mjs"
+      - "scripts/validate-locales.mjs"
+      - ".github/workflows/localization.yml"
+  push:
+    branches: [main]
+    paths:
+      - "public/locales/**"
+      - "server/email.mjs"
+      - "server/notifications.mjs"
+      - "scripts/validate-locales.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate language catalogues
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Nimbus Direct
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Validate catalogues and placeholders
+        run: node scripts/validate-locales.mjs

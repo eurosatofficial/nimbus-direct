@@ -16,7 +16,7 @@ import {
   supportTicketEmailTemplate,
 } from "./server/email.mjs";
 import { createTotpEnrollment, generateRecoveryCodes, verifyTotp } from "./server/mfa.mjs";
-import { createNotificationService } from "./server/notifications.mjs";
+import { createNotificationService, localizeNotificationPage } from "./server/notifications.mjs";
 import { availableLanguages, defaultLanguage } from "./server/locales.mjs";
 import { createPushService } from "./server/push.mjs";
 import { nimbusOpenApi } from "./server/openapi.mjs";
@@ -1333,7 +1333,10 @@ async function routeAdmin(request, response, pathname) {
       resources: store.listResources(), isoPolicies: store.listIsoPolicies(),
       apiPolicies: store.listUserApiPolicies(),
       emailSettings: store.getEmailSettings(), emailJobs: store.listEmailJobs({ limit: 30 }),
-      notificationEvents: store.listNotificationEvents({ limit: 50 }),
+      notificationEvents: localizeNotificationPage(
+        store.listNotificationEvents({ limit: 50 }),
+        session.user.preferredLanguage,
+      ),
       maintenanceEvents: store.listMaintenanceEvents({ limit: 100 }),
       operations: store.getOperationsCenter(),
       security: demoSafeSecurityCenter(store.getSecurityCenter({ limit: 100 })),
@@ -2264,7 +2267,9 @@ async function routeCustomer(request, response, pathname) {
         ? { items: [], total: 0, limit: 10, offset: 0 }
         : demoSafeEventPage(store.listAudit(user.customerId, { limit: 10, customerVisible: user.role !== "admin" })),
       tasks: enrollmentRequired ? [] : store.listTasks(user, { limit: 12 }),
-      notifications: enrollmentRequired ? { items: [], unread: 0, total: 0 } : store.listNotifications(user.id, { limit: 8 }),
+      notifications: enrollmentRequired
+        ? { items: [], unread: 0, total: 0 }
+        : localizeNotificationPage(store.listNotifications(user.id, { limit: 8 }), user.preferredLanguage),
       maintenance: enrollmentRequired ? { items: [], unread: 0, total: 0 } : store.listMaintenanceForUser(user.id, { limit: 8 }),
       maintenanceLocks: enrollmentRequired || user.role !== "customer"
         ? { items: [], activeCount: 0 }
@@ -2561,10 +2566,10 @@ async function routeCustomer(request, response, pathname) {
   if (pathname === "/api/v1/notifications" && request.method === "GET") {
     const search = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams;
     sendJson(response, 200, {
-      notifications: store.listNotifications(user.id, {
+      notifications: localizeNotificationPage(store.listNotifications(user.id, {
         limit: search.get("limit") || 50,
         offset: search.get("offset") || 0,
-      }),
+      }), user.preferredLanguage),
       preferences: store.getNotificationPreferences(user.id),
       emailDeliveryAvailable: store.getEmailSettings().enabled,
     });
@@ -3508,7 +3513,14 @@ const server = createServer(async (request, response) => {
     const file = resolve(staticRoot, requested);
     if (file !== staticRoot && !file.startsWith(`${staticRoot}${sep}`)) return sendJson(response, 403, { error: "forbidden" });
     const contents = await readFile(file);
-    response.writeHead(200, { ...headers, "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": "no-store" });
+    // The console HTML/session responses remain non-cacheable, while pinned
+    // third-party renderers may be reused. This avoids downloading noVNC's
+    // module graph and xterm.js again for every console launch, particularly
+    // inside the native app's WKWebView.
+    const cacheControl = vendor
+      ? "public, max-age=86400, stale-while-revalidate=604800"
+      : "no-store";
+    response.writeHead(200, { ...headers, "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": cacheControl });
     if (request.method === "HEAD") response.end(); else response.end(contents);
   } catch (error) {
     const status = error.status || (error.code === "ENOENT" ? 404 : 500);
@@ -3528,6 +3540,11 @@ function rejectUpgrade(socket, status = "401 Unauthorized") {
 
 server.on("upgrade", (request, socket, head) => {
   void (async () => {
+    // Console traffic consists of many tiny keyboard, pointer, and terminal
+    // frames. Explicitly bypass TCP's small-packet batching on both legs so a
+    // keystroke is forwarded immediately instead of waiting for a later frame.
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 15_000);
     if (config.demoReadOnly) return rejectUpgrade(socket, "403 Forbidden");
     const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
     const match = url.pathname.match(/^\/api\/v1\/console\/ws\/([^/]+)$/);
@@ -3556,6 +3573,8 @@ server.on("upgrade", (request, socket, head) => {
     });
     const remotePath = `/api2/json/nodes/${encodeURIComponent(resource.node)}/${resource.type}/${resource.vmid}/vncwebsocket?port=${consoleSession.port}&vncticket=${encodeURIComponent(consoleSession.ticket)}`;
     remote.once("secureConnect", () => {
+      remote.setNoDelay(true);
+      remote.setKeepAlive(true, 15_000);
       remote.write([
         `GET ${remotePath} HTTP/1.1`,
         `Host: ${target.host}`,

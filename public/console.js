@@ -7,10 +7,12 @@ const countdown = document.getElementById("countdown");
 const terminalTools = document.getElementById("terminalTools");
 let activeSocket = null;
 let activeTerminal = null;
+let disconnectConsole = () => {};
 let terminalConnected = false;
+const textEncoder = new TextEncoder();
 
 document.getElementById("closeButton").addEventListener("click", () => {
-  activeSocket?.close();
+  disconnectConsole();
   window.close();
 });
 
@@ -32,7 +34,7 @@ function markDisconnected(message) {
 }
 
 function byteLength(value) {
-  return new TextEncoder().encode(value).byteLength;
+  return textEncoder.encode(value).byteLength;
 }
 
 function sendTerminalInput(value) {
@@ -82,7 +84,11 @@ async function startTerminalConsole(data) {
     fontSize: matchMedia("(max-width: 620px)").matches ? 13 : 14,
     letterSpacing: 0,
     lineHeight: 1.15,
-    scrollback: 5000,
+    // Large scrollback buffers are expensive in a mobile web view and do not
+    // improve the live console itself. Keep enough useful history without
+    // making sustained command output progressively slower.
+    scrollback: matchMedia("(max-width: 620px)").matches ? 1500 : 3000,
+    smoothScrollDuration: 0,
     theme: {
       background: "#06090f",
       foreground: "#d7dcec",
@@ -108,9 +114,13 @@ async function startTerminalConsole(data) {
 
   const socket = new WebSocket(websocketUrl(data.websocketUrl), "binary");
   activeSocket = socket;
+  disconnectConsole = () => socket.close();
   socket.binaryType = "arraybuffer";
   let authBuffer = new Uint8Array();
   let resizeTimer;
+  let renderFrame = 0;
+  let renderBytes = 0;
+  let renderQueue = [];
   const ping = setInterval(() => {
     if (socket.readyState === WebSocket.OPEN) socket.send("2");
   }, 30_000);
@@ -121,7 +131,35 @@ async function startTerminalConsole(data) {
   };
   const fitSoon = () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(fit, 100);
+    resizeTimer = setTimeout(fit, 75);
+  };
+
+  // xterm can receive dozens of small WebSocket messages for one screen
+  // update. Render them once per display frame to reduce layout and canvas
+  // overhead without delaying keyboard input sent in the opposite direction.
+  const flushTerminal = () => {
+    renderFrame = 0;
+    if (!renderQueue.length) return;
+    let payload;
+    if (renderQueue.length === 1) {
+      payload = renderQueue[0];
+    } else {
+      payload = new Uint8Array(renderBytes);
+      let offset = 0;
+      for (const chunk of renderQueue) {
+        payload.set(chunk, offset);
+        offset += chunk.length;
+      }
+    }
+    renderQueue = [];
+    renderBytes = 0;
+    terminal.write(payload);
+  };
+  const queueTerminalWrite = (value) => {
+    if (!value.length) return;
+    renderQueue.push(value);
+    renderBytes += value.length;
+    if (!renderFrame) renderFrame = requestAnimationFrame(flushTerminal);
   };
 
   terminal.onData(sendTerminalInput);
@@ -154,7 +192,7 @@ async function startTerminalConsole(data) {
       data.credentials.user = "";
       status.textContent = "Terminal connected";
       session.classList.add("ready");
-      if (authBuffer.length > 2) terminal.write(authBuffer.slice(2));
+      if (authBuffer.length > 2) queueTerminalWrite(authBuffer.slice(2));
       authBuffer = new Uint8Array();
       requestAnimationFrame(() => requestAnimationFrame(() => {
         fit();
@@ -162,11 +200,13 @@ async function startTerminalConsole(data) {
       }));
       return;
     }
-    terminal.write(incoming);
+    queueTerminalWrite(incoming);
   });
   socket.addEventListener("close", () => {
     clearInterval(ping);
     clearTimeout(resizeTimer);
+    if (renderFrame) cancelAnimationFrame(renderFrame);
+    flushTerminal();
     markDisconnected(terminalConnected ? "Terminal closed" : "Terminal connection failed");
   });
   socket.addEventListener("error", () => markDisconnected("Terminal connection lost"));
@@ -182,9 +222,17 @@ async function startGraphicalConsole(data) {
     wsProtocols: ["binary"],
     credentials: { password: data.credentials.password },
   });
+  disconnectConsole = () => rfb.disconnect();
   let credentialRetry = false;
   rfb.scaleViewport = true;
-  rfb.resizeSession = false;
+  // A modest quality reduction saves substantial bandwidth across a tunnel,
+  // while a little extra compression keeps interactive redraws responsive.
+  rfb.qualityLevel = 5;
+  rfb.compressionLevel = 3;
+  rfb.showDotCursor = true;
+  // On narrow screens, ask capable QEMU displays to match the viewport rather
+  // than continuously transferring a much larger desktop and scaling it down.
+  rfb.resizeSession = matchMedia("(max-width: 900px)").matches;
   rfb.viewOnly = false;
   rfb.addEventListener("connect", () => {
     data.credentials.password = "";
@@ -224,7 +272,7 @@ async function initialize() {
       clearInterval(timer);
       markDisconnected("Ticket expired");
     }
-  }, 250);
+  }, 1000);
 
   output.textContent = "";
   if (data.demo) {
@@ -243,7 +291,7 @@ async function initialize() {
   else await startGraphicalConsole(data);
 }
 
-window.addEventListener("pagehide", () => activeSocket?.close());
+window.addEventListener("pagehide", () => disconnectConsole());
 
 initialize().catch((error) => {
   status.textContent = "Console unavailable";

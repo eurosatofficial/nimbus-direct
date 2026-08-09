@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createNotificationService, notificationEmailTemplate } from "../server/notifications.mjs";
+import {
+  createNotificationService,
+  localizeNotificationPage,
+  notificationEmailTemplate,
+} from "../server/notifications.mjs";
 import { openStore } from "../server/store.mjs";
 
 const APP_SECRET = "notification-test-secret-that-is-long-and-unique";
@@ -104,6 +108,10 @@ test("notification service delivers once per user preference and queues the bran
     assert.equal(pushed.length, 1);
     assert.equal(pushed[0].userId, user.id);
     assert.equal(pushed[0].notification.resourceId, resourceId);
+    assert.equal(pushed[0].notification.title, "Neustart abgeschlossen");
+    const localizedPage = localizeNotificationPage(store.listNotifications(user.id), "de");
+    assert.equal(localizedPage.items[0].title, "Neustart abgeschlossen");
+    assert.match(localizedPage.items[0].message, /erfolgreich abgeschlossen/);
     assert.equal((await service.emitEvent({
       customerId: customer.id,
       resourceId,

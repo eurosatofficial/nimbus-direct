@@ -1,3 +1,5 @@
+import { defaultLanguage, localeFor, normalizeLanguage, translate } from "./locales.mjs";
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
@@ -5,15 +7,19 @@ function escapeHtml(value) {
 }
 
 function resourceLabel(resource) {
-  return resource?.displayName || resource?.name || (resource ? `${resource.type.toUpperCase()} ${resource.vmid}` : "Server");
+  return resource?.displayName || resource?.resourceName || resource?.name || (resource ? `${resource.type.toUpperCase()} ${resource.vmid}` : "Server");
 }
 
-function actionLabel(action) {
-  return ({
+function notificationCopy(language, source, replacements = {}) {
+  return translate(normalizeLanguage(language) || defaultLanguage, source, replacements);
+}
+
+function actionLabel(action, language = defaultLanguage) {
+  const source = ({
     start: "Start",
     stop: "Stop",
     shutdown: "Shutdown",
-    reboot: "Reboot",
+    reboot: "Reboot operation",
     reset: "Reset",
     suspend: "Suspend",
     resume: "Resume",
@@ -21,36 +27,22 @@ function actionLabel(action) {
     snapshot_restore: "Snapshot restoration",
     snapshot_delete: "Snapshot deletion",
   })[action] || String(action || "Action").replaceAll("_", " ");
+  return notificationCopy(language, source);
 }
 
-function germanActionLabel(action) {
-  return ({
-    start: "Starten",
-    stop: "Stoppen",
-    shutdown: "Herunterfahren",
-    reboot: "Neustart",
-    reset: "Zurücksetzen",
-    suspend: "Pausieren",
-    resume: "Fortsetzen",
-    snapshot_create: "Snapshot-Erstellung",
-    snapshot_restore: "Snapshot-Wiederherstellung",
-    snapshot_delete: "Snapshot-Löschung",
-  })[action] || actionLabel(action);
-}
-
-function localizedEmailEvent(event, resource, language) {
-  if (String(language || "en").toLowerCase() !== "de") return event;
+export function localizedNotificationEvent(event, resource, language = defaultLanguage) {
+  const lang = normalizeLanguage(language) || defaultLanguage;
   const label = resourceLabel(resource);
   if (event.type?.startsWith("action.")) {
     const action = event.type.slice("action.".length);
-    const actionName = germanActionLabel(action);
+    const actionName = actionLabel(action, lang);
     const success = event.category === "action_success";
     return {
       ...event,
-      title: success ? `${actionName} abgeschlossen` : `${actionName} fehlgeschlagen`,
+      title: notificationCopy(lang, success ? "{action} completed" : "{action} failed", { action: actionName }),
       message: success
-        ? `${actionName} wurde auf ${label} erfolgreich abgeschlossen.`
-        : `Proxmox meldet, dass ${actionName.toLowerCase()} auf ${label} fehlgeschlagen ist.`,
+        ? notificationCopy(lang, "{action} completed successfully on {resource}.", { action: actionName, resource: label })
+        : notificationCopy(lang, "Proxmox reported that {action} failed on {resource}.", { action: actionName, resource: label }),
     };
   }
   const typeMatch = event.type?.match(/^alert\.(offline|cpu|memory|storage)\.(firing|resolved)$/);
@@ -60,24 +52,41 @@ function localizedEmailEvent(event, resource, language) {
   if (metric === "offline") {
     const minutes = values[0] || resource?.alertPolicy?.sustainMinutes || 1;
     return state === "firing"
-      ? { ...event, title: `${label} ist offline`, message: `${label} ist seit ${minutes} Minute${minutes === 1 ? "" : "n"} ausgeschaltet.` }
-      : { ...event, title: `${label} ist wieder online`, message: `${label} läuft wieder.` };
+      ? {
+        ...event,
+        title: notificationCopy(lang, "{resource} is offline", { resource: label }),
+        message: notificationCopy(lang, minutes === 1
+          ? "{resource} has remained stopped for {count} minute."
+          : "{resource} has remained stopped for {count} minutes.", { resource: label, count: minutes }),
+      }
+      : {
+        ...event,
+        title: notificationCopy(lang, "{resource} is online again", { resource: label }),
+        message: notificationCopy(lang, "{resource} is running again.", { resource: label }),
+      };
   }
-  const noun = { cpu: "CPU-Auslastung", memory: "Arbeitsspeicherauslastung", storage: "Speicherauslastung" }[metric];
+  const noun = notificationCopy(lang, { cpu: "CPU", memory: "Memory", storage: "Storage" }[metric]);
   const threshold = values[0] ?? resource?.alertPolicy?.[`${metric}Threshold`] ?? 0;
   const current = values.at(-1) ?? 0;
   const minutes = values.length > 2 ? values[1] : (resource?.alertPolicy?.sustainMinutes || 1);
   return state === "firing"
     ? {
       ...event,
-      title: metric === "storage" ? `Speicher auf ${label} wird knapp` : `Hohe ${noun} auf ${label}`,
-      message: `${noun} liegt seit ${minutes} Minute${minutes === 1 ? "" : "n"} bei oder über ${threshold} %. Die aktuelle Auslastung beträgt ${current} %.`,
+      title: notificationCopy(lang, metric === "storage" ? "Storage is filling up on {resource}" : "High {metric} usage on {resource}", { metric: noun, resource: label }),
+      message: notificationCopy(lang, minutes === 1
+        ? "{metric} usage has remained at or above {threshold}% for {count} minute. Current usage is {current}%."
+        : "{metric} usage has remained at or above {threshold}% for {count} minutes. Current usage is {current}%.",
+      { metric: noun, threshold, count: minutes, current }),
     }
     : {
       ...event,
-      title: `${noun} auf ${label} hat sich normalisiert`,
-      message: `${noun} liegt wieder unter ${threshold} %. Die aktuelle Auslastung beträgt ${current} %.`,
+      title: notificationCopy(lang, "{metric} usage recovered on {resource}", { metric: noun, resource: label }),
+      message: notificationCopy(lang, "{metric} usage is back below {threshold}%. Current usage is {current}%.", { metric: noun, threshold, current }),
     };
+}
+
+export function localizeNotificationPage(page, language) {
+  return { ...page, items: page.items.map((event) => localizedNotificationEvent(event, event, language)) };
 }
 
 function categoryEnabled(preferences, category) {
@@ -90,29 +99,34 @@ function categoryEnabled(preferences, category) {
 }
 
 export function notificationEmailTemplate(event, resource, language = "en") {
-  const german = String(language || "en").toLowerCase() === "de";
-  event = localizedEmailEvent(event, resource, language);
+  const lang = normalizeLanguage(language) || defaultLanguage;
+  event = localizedNotificationEvent(event, resource, lang);
   const sentAt = new Date();
   const label = resourceLabel(resource);
   const badge = {
-    critical: { text: german ? "Handlung erforderlich" : "Action required", background: "#fff0f0", color: "#c23b3b" },
-    warning: { text: german ? "Infrastrukturwarnung" : "Infrastructure alert", background: "#fff6e7", color: "#b66a12" },
-    success: { text: german ? "Behoben" : "Resolved", background: "#eaf8f2", color: "#16865f" },
-    info: { text: german ? "Nimbus-Aktualisierung" : "Nimbus update", background: "#eef0ff", color: "#5564dc" },
-  }[event.severity] || { text: german ? "Nimbus-Aktualisierung" : "Nimbus update", background: "#eef0ff", color: "#5564dc" };
+    critical: { text: notificationCopy(lang, "Action required"), background: "#fff0f0", color: "#c23b3b" },
+    warning: { text: notificationCopy(lang, "Infrastructure alert"), background: "#fff6e7", color: "#b66a12" },
+    success: { text: notificationCopy(lang, "Resolved"), background: "#eaf8f2", color: "#16865f" },
+    info: { text: notificationCopy(lang, "Nimbus update"), background: "#eef0ff", color: "#5564dc" },
+  }[event.severity] || { text: notificationCopy(lang, "Nimbus update"), background: "#eef0ff", color: "#5564dc" };
   const details = resource ? `
             <tr><td style="color:#8a93a8;font-size:12px">Server</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(label)}</td></tr>
-            <tr><td style="color:#8a93a8;font-size:12px">${german ? "Ressource" : "Resource"}</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(resource.type?.toUpperCase())} ${Number(resource.vmid)} · ${escapeHtml(resource.node)}</td></tr>` : "";
+            <tr><td style="color:#8a93a8;font-size:12px">${escapeHtml(notificationCopy(lang, "Resource"))}</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(resource.type?.toUpperCase())} ${Number(resource.vmid)} · ${escapeHtml(resource.node)}</td></tr>` : "";
+  const sentDate = new Intl.DateTimeFormat(localeFor(lang), {
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    timeZone: "UTC", timeZoneName: "short",
+  }).format(sentAt);
   const text = [
     event.title,
     "",
     event.message,
-    ...(resource ? ["", `Server: ${label}`, `${german ? "Ressource" : "Resource"}: ${resource.type.toUpperCase()} ${resource.vmid}`, `${german ? "Knoten" : "Node"}: ${resource.node}`] : []),
+    ...(resource ? ["", `Server: ${label}`, `${notificationCopy(lang, "Resource")}: ${resource.type.toUpperCase()} ${resource.vmid}`, `${notificationCopy(lang, "Node")}: ${resource.node}`] : []),
     "",
-    german ? `Gesendet von Nimbus Direct am ${sentAt.toLocaleString("de-DE", { timeZone: "UTC" })} UTC` : `Sent by Nimbus Direct at ${sentAt.toISOString()}`,
+    notificationCopy(lang, "Sent by Nimbus Direct at {date}", { date: sentDate }),
   ].join("\n");
   const html = `<!doctype html>
-<html lang="${german ? "de" : "en"}"><body style="margin:0;background:#f4f6fb;color:#1d2740;font-family:Arial,sans-serif">
+<html lang="${lang}"><body style="margin:0;background:#f4f6fb;color:#1d2740;font-family:Arial,sans-serif">
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 14px;background:#f4f6fb">
     <tr><td align="center">
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;overflow:hidden;border:1px solid #e0e4ef;border-radius:18px;background:#ffffff">
@@ -123,7 +137,7 @@ export function notificationEmailTemplate(event, resource, language = "en") {
           <p style="margin:0 0 22px;color:#667087;font-size:15px;line-height:1.65">${escapeHtml(event.message)}</p>
           ${resource ? `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0 8px">${details}</table>` : ""}
         </td></tr>
-        <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">${german ? `Gesendet von Nimbus Direct am ${escapeHtml(sentAt.toLocaleString("de-DE", { timeZone: "UTC" }))} UTC` : `Sent by Nimbus Direct at ${escapeHtml(sentAt.toISOString())}`}</td></tr>
+        <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">${escapeHtml(notificationCopy(lang, "Sent by Nimbus Direct at {date}", { date: sentDate }))}</td></tr>
       </table>
     </td></tr>
   </table>
@@ -177,9 +191,10 @@ export function createNotificationService({
         }
       }
       if (sendInApp && push?.configured) {
+        const localized = localizedNotificationEvent(created.event, resource, user.preferredLanguage);
         void push.sendUser(user.id, {
-          title: created.event.title,
-          message: created.event.message,
+          title: localized.title,
+          message: localized.message,
           type: created.event.type,
           resourceId: created.event.resourceId,
           notificationId: delivery.id,

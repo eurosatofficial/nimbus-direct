@@ -60,7 +60,19 @@ contain a unique `code`, an English `name`, a `nativeName`, and an Intl-compatib
 `locale`. The catalogue filename must exactly match `<code>.json`.
 
 The validator rejects malformed catalogues, unregistered JSON files, duplicate
-language codes, non-string translations, and missing or renamed placeholders.
+language codes, unknown keys, empty or non-string translations, missing or
+renamed placeholders, and application copy that was not added to the English
+source catalogue. Missing translations remain valid and fall back to English.
+
+Every pull request that touches a catalogue or a localized backend template runs
+the same validator in GitHub Actions. Its check summary includes a coverage table
+for every registered language, while a broken placeholder fails the check and
+prevents the contribution from being merged when the check is required by the
+repository's branch protection.
+
+Account, security, maintenance, support, infrastructure-alert, push, and in-app
+notification messages use these catalogues too. A new language therefore does
+not require a separate backend template or notification implementation.
 
 ## iOS catalogue
 
