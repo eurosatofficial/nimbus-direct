@@ -1,4 +1,5 @@
 import { mergeNetworkAddresses } from "./network-state.js";
+import { authenticateWithPasskey, createPasskey, passkeysSupported } from "./passkeys.js?v=20260809-01";
 import {
   cycleLanguage,
   getAvailableLanguages,
@@ -94,7 +95,7 @@ const views = {
 };
 
 const els = Object.fromEntries([
-  "authView", "appShell", "loginForm", "authError", "mfaForm", "mfaLoginCode", "mfaAuthError", "mfaBackButton",
+  "authView", "appShell", "loginForm", "authError", "passkeyLoginButton", "mfaForm", "mfaLoginCode", "mfaAuthError", "mfaBackButton",
   "authDescription", "demoLoginNotice", "demoReadOnlyBanner", "forgotPasswordButton", "forgotPasswordForm", "forgotPasswordEmail", "forgotPasswordMessage",
   "forgotPasswordBackButton", "accountCompletionForm", "accountFlowRecipient", "accountPassword",
   "accountConfirmPassword", "accountCompletionMessage", "accountCompletionBackButton",
@@ -384,6 +385,16 @@ function friendlyError(error) {
     invalid_password: "Passwords must contain between 12 and 256 characters.",
     too_many_attempts: "Too many sign-in attempts. Please wait and try again.",
     too_many_mfa_attempts: "Too many verification attempts. Wait a few minutes and try again.",
+    too_many_passkey_attempts: "Too many passkey attempts. Wait a few minutes and try again.",
+    passkeys_not_configured: "Passkeys are not configured for this Nimbus Direct hostname.",
+    passkeys_not_supported: "This browser or device does not support passkeys.",
+    passkey_cancelled: "The passkey request was cancelled.",
+    invalid_passkey: "Nimbus could not verify that passkey.",
+    invalid_passkey_challenge: "This passkey request expired. Start again.",
+    invalid_passkey_name: "Enter a passkey name between 1 and 100 characters.",
+    passkey_already_registered: "This passkey is already registered.",
+    passkey_not_found: "That passkey is no longer registered.",
+    passkey_self_reset_forbidden: "Manage your own passkeys from Account settings.",
     too_many_security_actions: "Too many account-security changes were requested. Wait a few minutes and try again.",
     invalid_mfa_challenge: "This verification request expired. Sign in again.",
     invalid_mfa_code: "That authenticator or recovery code is not valid.",
@@ -1610,6 +1621,8 @@ function apiKeyCenterMarkup(mfa) {
 function renderSettings() {
   const security = state.dashboard.security || { mfa: {}, sessions: [] };
   const mfa = security.mfa || {};
+  const passkeyState = security.passkeys || { enabled: false, items: [] };
+  const passkeyItems = passkeyState.items || [];
   const sessions = security.sessions || [];
   const enrollment = state.mfaEnrollment;
   const enrollmentRequired = Boolean(mfa.enrollmentRequired);
@@ -1646,6 +1659,16 @@ function renderSettings() {
     <div class="field"><label for="mfaSetupPassword">Current password</label><input id="mfaSetupPassword" type="password" name="currentPassword" required autocomplete="current-password"></div>
     <div class="form-actions"><button class="button primary" type="submit">${enrollmentRequired ? "Set up required 2FA" : "Set up authenticator"}</button><p class="form-message"></p></div>
   </form>`;
+  const passkeyRows = passkeyItems.map((passkey) => `<article class="session-row passkey-row">
+    <span class="session-icon">⌁</span>
+    <span class="session-copy"><strong>${escapeHtml(passkey.name)}</strong><small>${passkey.backedUp ? "Synced passkey" : "Device-bound passkey"} · Added ${formatDate(passkey.createdAt, { dateOnly: true })}${passkey.lastUsedAt ? ` · Used ${formatRelative(passkey.lastUsedAt)}` : ""}</small></span>
+    <span class="row-buttons"><button class="row-button" type="button" data-rename-passkey="${escapeHtml(passkey.id)}">Rename</button><button class="row-button danger" type="button" data-revoke-passkey="${escapeHtml(passkey.id)}">Remove</button></span>
+  </article>`).join("");
+  const passkeyPanel = passkeyState.enabled ? `<section class="panel form-panel security-panel passkey-panel">
+    <div class="security-heading"><span class="security-icon enabled">⌁</span><span><h2>Passkeys</h2><p>Sign in securely with Face ID, Touch ID, Windows Hello, or a hardware security key.</p></span><span class="pill ${passkeyItems.length ? "success" : "warning"}">${plural(passkeyItems.length, "passkey")}</span></div>
+    <div class="session-list">${passkeyRows || `<div class="empty-state compact"><div><span class="empty-icon">⌁</span><h3>No passkeys yet</h3><p>Add one to sign in without typing your password.</p></div></div>`}</div>
+    ${passkeysSupported() ? `<form id="passkeySetupForm"><div class="form-grid"><div class="field"><label for="passkeyName">Passkey name</label><input id="passkeyName" name="name" maxlength="100" required placeholder="MacBook Touch ID"></div><div class="field"><label for="passkeyPassword">Current password</label><input id="passkeyPassword" name="currentPassword" type="password" required autocomplete="current-password"></div></div><div class="form-actions"><button class="button primary" type="submit">Add passkey</button><p class="form-message"></p></div></form>` : `<div class="notice warning"><span>!</span><span>This browser does not support passkeys. Open Nimbus in a current Safari, Chrome, Edge, or Firefox release.</span></div>`}
+  </section>` : `<section class="panel form-panel security-panel"><div class="security-heading"><span class="security-icon">⌁</span><span><h2>Passkeys</h2><p>Your administrator can enable passkeys by configuring the public Nimbus hostname.</p></span><span class="pill warning">Not configured</span></div></section>`;
   const sessionRows = sessions.map((item) => `<article class="session-row">
     <span class="session-icon">${item.current ? "●" : "◉"}</span>
     <span class="session-copy"><strong>${escapeHtml(sessionDevice(item.userAgent))}${item.kind === "api" ? ` <em>Nimbus API</em>` : ""}${item.current ? ` <em>Current</em>` : ""}</strong><small>${escapeHtml(item.ipAddress)} · Last active ${formatRelative(item.lastSeenAt)} · Expires ${formatDate(item.expiresAt)}</small></span>
@@ -1661,7 +1684,7 @@ function renderSettings() {
     <form class="panel form-panel" id="profileForm"><h2>Profile</h2><p>Update your display name.</p><div class="form-grid"><div class="field full"><label for="settingsName">Display name</label><input id="settingsName" name="displayName" maxlength="100" required value="${escapeHtml(state.user.displayName)}"></div><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(state.user.email)}"></div></div><div class="form-actions"><button class="button primary">Save profile</button><p class="form-message"></p></div></form>
     <form class="panel form-panel" id="passwordForm"><h2>Password</h2><p>Changing your password revokes all active sessions.</p><div class="form-grid"><div class="field full"><label for="currentPassword">Current password</label><input id="currentPassword" type="password" name="currentPassword" required autocomplete="current-password"></div><div class="field full"><label for="newPassword">New password</label><input id="newPassword" type="password" name="password" minlength="12" required autocomplete="new-password"></div></div><div class="form-actions"><button class="button primary">Change password</button><p class="form-message"></p></div></form>
   </section>
-  <div class="settings-security-grid">${mfaPanel}
+  <div class="settings-security-grid">${passkeyPanel}${mfaPanel}
     <section class="panel form-panel security-panel"><div class="security-heading"><span class="security-icon">◷</span><span><h2>Active sessions</h2><p>Review devices signed in to this account.</p></span><span class="pill">${plural(sessions.length, "session")}</span></div><div class="session-list">${sessionRows || `<p>No active sessions.</p>`}</div>${sessions.length > 1 ? `<form id="revokeOtherSessionsForm"><div class="field"><label for="revokeSessionsPassword">Current password</label><input id="revokeSessionsPassword" name="currentPassword" type="password" required autocomplete="current-password"></div><div class="form-actions"><button class="button secondary" type="submit">Revoke all other sessions</button><p class="form-message"></p></div></form>` : ""}</section>
   </div>${apiKeyCenterMarkup(mfa)}`;
   refreshLanguageControls();
@@ -2107,7 +2130,7 @@ function customerOptions(selected = "") {
 
 function securityEventTone(action) {
   if (String(action).includes("failed")) return "warning";
-  if (action === "auth.login" || action === "auth.api_login" || action === "security.mfa_enabled") return "success";
+  if (action === "auth.login" || action === "auth.api_login" || action === "auth.passkey_login" || action === "security.mfa_enabled" || action === "security.passkey_registered") return "success";
   if (String(action).includes("reset") || String(action).includes("disabled")) return "critical";
   return "neutral";
 }
@@ -2128,6 +2151,7 @@ function renderAdminSecurity() {
       <td><div class="server-name"><span class="server-avatar">${escapeHtml(initials(user.displayName))}</span><span class="server-copy"><strong>${escapeHtml(user.displayName)}</strong><small>${escapeHtml(user.email)}</small></span></div></td>
       <td>${escapeHtml(user.role === "admin" ? "Administrator" : user.customerName || "Customer")}</td>
       <td><span class="status-badge ${protectedAccount ? "" : "disabled"}">${protectedAccount ? "Protected" : "Not enabled"}</span></td>
+      <td><span class="status-badge ${user.passkeyCount ? "" : "disabled"}">${user.passkeyCount ? plural(user.passkeyCount, "passkey") : "None"}</span></td>
       <td><span class="status-badge ${required ? "pending" : "disabled"}">${required ? "Required" : "Optional"}</span></td>
       <td><span class="status-badge ${user.status === "disabled" ? "disabled" : ""}">${escapeHtml(user.status)}</span></td>
     </tr>`;
@@ -2150,6 +2174,7 @@ function renderAdminSecurity() {
     <section class="security-summary-grid">
       <article><small>Required enrollment</small><strong>${Number(summary.requiredPending || 0)}</strong><span>${summary.requiredPending ? "Accounts awaiting setup" : "Policy requirements satisfied"}</span></article>
       <article><small>Active sessions</small><strong>${Number(summary.activeSessions || 0)}</strong><span>Across enabled accounts</span></article>
+      <article><small>Passkey adoption</small><strong>${Number(summary.passkeyCoverage || 0)}%</strong><span>${escapeHtml(t("{credentials} credentials across {accounts} accounts", { credentials: Number(summary.passkeys || 0), accounts: Number(summary.passkeyAccounts || 0) }))}</span></article>
       <article><small>Successful logins</small><strong>${Number(summary.successfulLogins24h || 0)}</strong><span>During the last 24 hours</span></article>
       <article class="${summary.failedLogins24h ? "warning" : ""}"><small>Failed logins</small><strong>${Number(summary.failedLogins24h || 0)}</strong><span>During the last 24 hours</span></article>
     </section>
@@ -2173,7 +2198,7 @@ function renderAdminSecurity() {
     </section>
     <section class="panel security-posture-panel">
       <header class="panel-header"><div><h2>Account posture</h2><p>2FA coverage and enforcement status for every Nimbus login.</p></div><span class="pill">${plural(users.length, "account")}</span></header>
-      ${postureRows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Account</th><th>Scope</th><th>2FA</th><th>Policy</th><th>Status</th></tr></thead><tbody>${postureRows}</tbody></table></div>` : emptyState("◎", "No matching accounts", "Try another filter.")}
+      ${postureRows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Account</th><th>Scope</th><th>2FA</th><th>Passkeys</th><th>Policy</th><th>Status</th></tr></thead><tbody>${postureRows}</tbody></table></div>` : emptyState("◎", "No matching accounts", "Try another filter.")}
     </section>
     <section class="panel security-events-panel">
       <header class="panel-header"><div><h2>Security events</h2><p>Successful and failed authentication, password, MFA, session, and policy actions.</p></div><span class="pill">${Number(security.events?.total || 0)} events</span></header>
@@ -2198,6 +2223,7 @@ function renderAdminUsers() {
       <td><span class="status-badge">${escapeHtml((user.preferredLanguage || "en").toUpperCase())}</span></td>
       <td>${onboarding}</td>
       <td><span class="status-badge ${user.mfaEnabled ? "" : "disabled"}">${user.mfaEnabled ? "Enabled" : "Off"}</span></td>
+      <td><span class="status-badge ${user.passkeyCount ? "" : "disabled"}">${user.passkeyCount ? Number(user.passkeyCount) : "Off"}</span></td>
       <td><span class="status-badge ${apiPolicy?.enabled ? "" : "disabled"}">${apiPolicy?.enabled ? `${Number(apiPolicy.activeKeys || 0)} active` : "Off"}</span></td>
       <td><span class="status-badge ${user.status === "disabled" ? "disabled" : ""}">${escapeHtml(user.status)}</span></td>
       <td><div class="row-buttons">
@@ -2232,7 +2258,7 @@ function renderAdminUsers() {
   </section>
   <section class="panel" style="margin-top:18px">
     <header class="panel-header"><div><h2>Users</h2><p>${plural(users.length, "account")}</p></div></header>
-    <div class="table-wrap"><table class="data-table"><thead><tr><th>User</th><th>Customer</th><th>Role</th><th>Language</th><th>Onboarding</th><th>2FA</th><th>API</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${userRows}</tbody></table></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>User</th><th>Customer</th><th>Role</th><th>Language</th><th>Onboarding</th><th>2FA</th><th>Passkeys</th><th>API</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${userRows}</tbody></table></div>
   </section>`;
 }
 
@@ -2372,10 +2398,16 @@ function openUserEditor(userId) {
   if (!user) return;
   const passwordLabel = user.passwordSet ? "New password" : "Set password manually";
   const passwordHelp = user.passwordSet ? "Leave blank to keep the current password" : "Setting a password completes onboarding and revokes invitation links";
+  const mfaReset = user.mfaEnabled && user.id !== state.user.id
+    ? `<label class="policy-checkbox full danger-zone"><input name="resetMfa" type="checkbox"><span><strong>Reset two-factor authentication</strong><small>Requires your administrator password below. The user will be signed out everywhere and must enroll again.</small></span></label><div class="field full"><label for="adminPasswordForMfaReset">Your administrator password</label><input id="adminPasswordForMfaReset" name="adminPasswordForMfaReset" type="password" autocomplete="current-password"></div>`
+    : `<div class="field full"><label>Two-factor authentication</label><input disabled value="${user.mfaEnabled ? "Enabled" : "Not enabled"}"></div>`;
+  const passkeyReset = user.passkeyCount && user.id !== state.user.id
+    ? `<label class="policy-checkbox full danger-zone"><input name="resetPasskeys" type="checkbox"><span><strong>Remove all passkeys</strong><small>Requires your administrator password below and signs the user out everywhere.</small></span></label><div class="field full"><label for="adminPasswordForPasskeyReset">Your administrator password</label><input id="adminPasswordForPasskeyReset" name="adminPasswordForPasskeyReset" type="password" autocomplete="current-password"></div>`
+    : `<div class="field full"><label>Passkeys</label><input disabled value="${plural(Number(user.passkeyCount || 0), "registered passkey")}"></div>`;
   els.editForm.dataset.kind = "user";
   els.editForm.dataset.id = user.id;
   els.editDialogTitle.textContent = "Edit user";
-  els.editDialogBody.innerHTML = `<div class="form-grid"><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(user.email)}"></div><div class="field"><label for="editUserName">Display name</label><input id="editUserName" name="displayName" maxlength="100" required value="${escapeHtml(user.displayName)}"></div><div class="field"><label for="editUserStatus">Status</label><select id="editUserStatus" name="status"><option value="active" ${user.status === "active" ? "selected" : ""}>Active</option><option value="disabled" ${user.status === "disabled" ? "selected" : ""}>Disabled</option></select></div><div class="field"><label for="editUserRole">Role</label><select id="editUserRole" name="role"><option value="customer" ${user.role === "customer" ? "selected" : ""}>Customer</option><option value="admin" ${user.role === "admin" ? "selected" : ""}>Administrator</option></select></div><div class="field"><label for="editUserCustomer">Customer</label><select id="editUserCustomer" name="customerId">${customerOptions(user.customerId || "")}</select></div><div class="field full"><label for="editUserPreferredLanguage">Email language</label><select id="editUserPreferredLanguage" name="preferredLanguage">${languageSelectOptions(user.preferredLanguage || "en")}</select><small>Used for invitations and automatic account emails.</small></div><div class="field full"><label for="editUserPassword">${passwordLabel} <span class="optional">(optional)</span></label><input id="editUserPassword" name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="${passwordHelp}"></div>${user.mfaEnabled && user.id !== state.user.id ? `<label class="policy-checkbox full danger-zone"><input name="resetMfa" type="checkbox"><span><strong>Reset two-factor authentication</strong><small>Requires your administrator password below. The user will be signed out everywhere and must enroll again.</small></span></label><div class="field full"><label for="adminPasswordForMfaReset">Your administrator password</label><input id="adminPasswordForMfaReset" name="adminPasswordForMfaReset" type="password" autocomplete="current-password"></div>` : `<div class="field full"><label>Two-factor authentication</label><input disabled value="${user.mfaEnabled ? "Enabled" : "Not enabled"}"></div>`}</div>`;
+  els.editDialogBody.innerHTML = `<div class="form-grid"><div class="field full"><label>Email address</label><input disabled value="${escapeHtml(user.email)}"></div><div class="field"><label for="editUserName">Display name</label><input id="editUserName" name="displayName" maxlength="100" required value="${escapeHtml(user.displayName)}"></div><div class="field"><label for="editUserStatus">Status</label><select id="editUserStatus" name="status"><option value="active" ${user.status === "active" ? "selected" : ""}>Active</option><option value="disabled" ${user.status === "disabled" ? "selected" : ""}>Disabled</option></select></div><div class="field"><label for="editUserRole">Role</label><select id="editUserRole" name="role"><option value="customer" ${user.role === "customer" ? "selected" : ""}>Customer</option><option value="admin" ${user.role === "admin" ? "selected" : ""}>Administrator</option></select></div><div class="field"><label for="editUserCustomer">Customer</label><select id="editUserCustomer" name="customerId">${customerOptions(user.customerId || "")}</select></div><div class="field full"><label for="editUserPreferredLanguage">Email language</label><select id="editUserPreferredLanguage" name="preferredLanguage">${languageSelectOptions(user.preferredLanguage || "en")}</select><small>Used for invitations and automatic account emails.</small></div><div class="field full"><label for="editUserPassword">${passwordLabel} <span class="optional">(optional)</span></label><input id="editUserPassword" name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="${passwordHelp}"></div>${mfaReset}${passkeyReset}</div>`;
   els.editDialogError.textContent = "";
   els.editDialog.showModal();
 }
@@ -2931,6 +2963,7 @@ async function initializeAccountFlow(purpose, token) {
 }
 
 async function initializeApp() {
+  void configurePasskeyLogin();
   const params = new URLSearchParams(location.search);
   const inviteToken = params.get("invite");
   const resetToken = params.get("reset");
@@ -2942,6 +2975,16 @@ async function initializeApp() {
     return;
   }
   await loadSession();
+}
+
+async function configurePasskeyLogin() {
+  if (!passkeysSupported()) return;
+  try {
+    const status = await apiFetch("/api/auth/passkeys/status");
+    els.passkeyLoginButton.hidden = !status.enabled;
+  } catch {
+    els.passkeyLoginButton.hidden = true;
+  }
 }
 
 els.loginForm.addEventListener("submit", async (event) => {
@@ -2958,6 +3001,27 @@ els.loginForm.addEventListener("submit", async (event) => {
     await completeAuthentication(result);
   } catch (error) { els.authError.textContent = friendlyError(error); }
   finally { button.disabled = false; }
+});
+
+els.passkeyLoginButton.addEventListener("click", async () => {
+  els.authError.textContent = "";
+  els.passkeyLoginButton.disabled = true;
+  try {
+    const challenge = await apiFetch("/api/auth/passkeys/options", { method: "POST", body: {} });
+    const assertion = await authenticateWithPasskey(challenge.options);
+    const result = await apiFetch("/api/auth/passkeys/verify", {
+      method: "POST",
+      body: { challengeToken: challenge.challengeToken, response: assertion },
+    });
+    await completeAuthentication(result);
+  } catch (error) {
+    const normalized = error?.name === "NotAllowedError"
+      ? Object.assign(error, { code: "passkey_cancelled" })
+      : error;
+    els.authError.textContent = friendlyError(normalized);
+  } finally {
+    els.passkeyLoginButton.disabled = false;
+  }
 });
 
 els.mfaForm.addEventListener("submit", async (event) => {
@@ -3105,18 +3169,32 @@ els.editForm.addEventListener("submit", async (event) => {
       const password = payload.password;
       const resetMfa = data.has("resetMfa");
       const adminPasswordForMfaReset = payload.adminPasswordForMfaReset;
+      const resetPasskeys = data.has("resetPasskeys");
+      const adminPasswordForPasskeyReset = payload.adminPasswordForPasskeyReset;
       delete payload.password;
       delete payload.resetMfa;
       delete payload.adminPasswordForMfaReset;
+      delete payload.resetPasskeys;
+      delete payload.adminPasswordForPasskeyReset;
       if (payload.role === "admin") payload.customerId = null;
       if (resetMfa && !adminPasswordForMfaReset) {
         els.editDialogError.textContent = "Enter your administrator password to reset 2FA.";
+        return;
+      }
+      if (resetPasskeys && !adminPasswordForPasskeyReset) {
+        els.editDialogError.textContent = "Enter your administrator password to remove passkeys.";
         return;
       }
       if (resetMfa) {
         await apiFetch(`/api/admin/users/${encodeURIComponent(id)}/mfa/reset`, {
           method: "POST",
           body: { currentPassword: adminPasswordForMfaReset },
+        });
+      }
+      if (resetPasskeys) {
+        await apiFetch(`/api/admin/users/${encodeURIComponent(id)}/passkeys/reset`, {
+          method: "POST",
+          body: { currentPassword: adminPasswordForPasskeyReset },
         });
       }
       await apiFetch(`/api/admin/users/${encodeURIComponent(id)}`, { method: "PATCH", body: payload });
@@ -3228,6 +3306,37 @@ els.viewRoot.addEventListener("click", async (event) => {
   if (target.dataset.cancelMfaSetup !== undefined) {
     state.mfaEnrollment = null;
     renderSettings();
+    return;
+  }
+  if (target.dataset.renamePasskey) {
+    const passkey = state.dashboard.security?.passkeys?.items?.find((item) => item.id === target.dataset.renamePasskey);
+    const name = prompt(t("Choose a name for this passkey:"), passkey?.name || t("Passkey"));
+    if (name === null) return;
+    try {
+      await apiFetch(`/api/v1/security/passkeys/${encodeURIComponent(target.dataset.renamePasskey)}`, {
+        method: "PATCH",
+        body: { name },
+      });
+      await loadDashboard();
+      renderSettings();
+      showToast("success", "Passkey renamed", "The new name is visible in Account settings.");
+    } catch (error) { showToast("error", "Could not rename passkey", friendlyError(error)); }
+    return;
+  }
+  if (target.dataset.revokePasskey) {
+    const passkey = state.dashboard.security?.passkeys?.items?.find((item) => item.id === target.dataset.revokePasskey);
+    if (!confirm(t("Remove “{name}”? It will no longer be able to sign in.", { name: passkey?.name || t("this passkey") }))) return;
+    const currentPassword = prompt(t("Enter your current Nimbus password to confirm:"));
+    if (currentPassword === null) return;
+    try {
+      await apiFetch(`/api/v1/security/passkeys/${encodeURIComponent(target.dataset.revokePasskey)}`, {
+        method: "DELETE",
+        body: { currentPassword },
+      });
+      await loadDashboard();
+      renderSettings();
+      showToast("success", "Passkey removed", "That credential can no longer sign in.");
+    } catch (error) { showToast("error", "Could not remove passkey", friendlyError(error)); }
     return;
   }
   if (target.dataset.revokeSession) {
@@ -3689,6 +3798,38 @@ els.viewRoot.addEventListener("invalid", (event) => {
 }, true);
 
 async function submitSecurityForm(form) {
+  if (form.id === "passkeySetupForm") {
+    if (!form.checkValidity()) { form.reportValidity(); return true; }
+    const message = form.querySelector(".form-message");
+    const button = form.querySelector("button[type='submit']");
+    const payload = formPayload(form);
+    message.className = "form-message";
+    message.textContent = "Waiting for your device…";
+    button.disabled = true;
+    try {
+      const challenge = await apiFetch("/api/v1/security/passkeys/registration/options", {
+        method: "POST",
+        body: { currentPassword: payload.currentPassword },
+      });
+      const credential = await createPasskey(challenge.options);
+      await apiFetch("/api/v1/security/passkeys/registration/verify", {
+        method: "POST",
+        body: { challengeToken: challenge.challengeToken, response: credential, name: payload.name },
+      });
+      await loadDashboard();
+      renderSettings();
+      showToast("success", "Passkey added", "You can now use it from the Nimbus sign-in screen.");
+    } catch (error) {
+      const normalized = error?.name === "NotAllowedError"
+        ? Object.assign(error, { code: "passkey_cancelled" })
+        : error;
+      message.className = "form-message error";
+      message.textContent = friendlyError(normalized);
+      showToast("error", "Could not add passkey", friendlyError(normalized));
+      button.disabled = false;
+    }
+    return true;
+  }
   const endpoints = {
     mfaSetupForm: ["/api/v1/security/mfa/setup", "Two-factor setup started"],
     mfaConfirmForm: ["/api/v1/security/mfa/confirm", "Two-factor authentication enabled"],

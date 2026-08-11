@@ -52,6 +52,8 @@ Core tables:
 
 - `users`: login identity, password hash, password-onboarding state, role, status, optional customer membership.
 - `user_mfa`: AES-256-GCM encrypted TOTP secret, enrollment/confirmation state, and one-way recovery-code hashes.
+- `user_passkeys`: public WebAuthn credentials, authenticator counters, transports, backup state, and usage timestamps.
+- `webauthn_challenges`: short-lived, purpose-bound, single-use registration and authentication challenges identified by keyed token hashes.
 - `customers`: customer account and support/plan metadata.
 - `proxmox_clusters`: cluster name, HTTPS API URL, health, and sync state.
 - `proxmox_credentials`: token ID and AES-256-GCM encrypted token secret.
@@ -120,6 +122,14 @@ The canonical resource ID is `cluster-id:type:vmid`. The node is stored and upda
 ## 3. Authentication and authorization
 
 Authentication uses scrypt password hashing and opaque HTTP-only sessions. Optional TOTP authentication is compatible with standard authenticator apps. A password-valid account with MFA enabled receives only a short-lived challenge; Nimbus creates the real session only after a current six-digit code or an unused recovery code succeeds. TOTP secrets are encrypted with `APP_SECRET`, while recovery codes are normalized, secret-bound hashed, displayed once, and atomically consumed. Administrators have platform scope. Customer users must belong to one active customer account.
+
+Optional WebAuthn passkeys provide a passwordless browser login. Nimbus requires
+discoverable credentials and authenticator user verification, validates the
+exact configured HTTPS origin and relying-party ID, consumes every registration
+or authentication challenge once, and checks credential counters. SQLite stores
+the credential public key and safe metadata only. The authenticator retains the
+private key. A returned credential maps back to exactly one local Nimbus user;
+the same account and customer-status checks still run before session creation.
 
 Native clients authenticate against the same account and TOTP services but
 receive an opaque short-lived `nmb_at_` bearer access token and a longer-lived
@@ -232,7 +242,7 @@ Power operations use idempotency keys and return either an immediate result or a
 
 For assignments with snapshot permissions, Snapshot Center lists normalized Proxmox recovery points and exposes create, restore, and delete independently. The backend enforces the assignment's 1-50 snapshot limit against live Proxmox inventory, validates snapshot names, requires exact-name confirmation for restore/delete, applies the shared action rate limit, tracks the returned UPID, and rejects overlapping resource tasks. Snapshot create/restore fails closed while customer ISO media or a one-time boot override is active.
 
-Console launch creates a short-lived, encrypted, one-time ticket record containing the server-selected console type. LXC and QEMU guests whose display is explicitly `serial0` through `serial3` use Proxmox termproxy with the bundled xterm.js client; other QEMU guests use noVNC. Both clients connect to the same-origin WebSocket gateway, which consumes the local launch token once, completes the authenticated Proxmox `vncwebsocket` upgrade server-side, and then pipes binary frames. The authenticated console page receives the scoped ticket and, for termproxy, its username only in memory for the handshake. The long-lived Proxmox API token never reaches the browser.
+Console launch creates a short-lived, encrypted, one-time ticket record containing the server-selected console type. LXC and QEMU guests whose display is explicitly `serial0` through `serial3` use Proxmox termproxy with the bundled xterm.js client; other QEMU guests use noVNC. The noVNC client includes mobile keyboard input, latched Ctrl/Alt/Super modifiers, special keys, Ctrl+Alt+Delete, bounded text paste, persistent display preferences, fullscreen, and disconnect. noVNC machine-power extensions are not exposed because they would bypass Nimbus assignment permissions, rate limits, task tracking, and auditing. Both clients connect to the same-origin WebSocket gateway, which consumes the local launch token once, completes the authenticated Proxmox `vncwebsocket` upgrade server-side, and then pipes binary frames. The authenticated console page receives the scoped ticket and, for termproxy, its username only in memory for the handshake. The long-lived Proxmox API token never reaches the browser.
 
 For QEMU assignments with explicit media permissions, the detail page exposes a customer-private ISO library. The server derives the customer from the active VM assignment, scopes every ISO lookup to that customer and cluster, validates the enabled storage policy/quota, and then uses resource coordinates loaded from the database. Customers cannot supply a node, VMID, storage ID, or Proxmox volume ID. LXC media requests are rejected server-side.
 
@@ -244,9 +254,9 @@ The Maintenance Center likewise returns only delivery rows for the authenticated
 
 The Support Ticket Center is shared by active users within one customer account, while read state is private to each login. Customers can open a ticket, optionally link an actively assigned resource, reply, close, and reopen resolved/closed requests. They cannot choose another customer, see internal notes, assign administrators, or change workflow metadata. Ticket create/reply actions have independent user/IP rate limits and every mutation is CSRF-protected.
 
-Account Settings includes TOTP enrollment, recovery-code replacement, password-and-code-protected disablement, and user-scoped session management. Enabling or disabling MFA revokes every other session. An administrator can reset another user's MFA only after re-entering the administrator password; the reset revokes all target sessions and cannot be used on the currently signed-in administrator. Security changes and recovery-code logins are audited, and queued security notices use the existing encrypted SMTP path when enabled.
+Account Settings includes passkey enrollment/rename/removal, TOTP enrollment, recovery-code replacement, password-and-code-protected disablement, and user-scoped session management. Starting passkey enrollment and removing a passkey require the current password. Enabling or disabling MFA revokes every other session. An administrator can reset another user's MFA or all passkeys only after re-entering the administrator password; either reset revokes all target sessions and cannot be used on the currently signed-in administrator. Security changes, passkey logins, and recovery-code logins are audited, and queued security notices use the existing encrypted SMTP path when enabled.
 
-The administrator Security & Access Center aggregates active-account MFA coverage, required-but-unprotected accounts, active sessions, recent successful/failed logins, and security-specific audit events. Failed password authentication writes an event for a known account; an unknown attempt remains a platform event without persisting the attacker-supplied email. Optional successful-login messages and mandatory password-change/reset notices reuse the encrypted SMTP queue and contain no credential material.
+The administrator Security & Access Center aggregates active-account MFA coverage, passkey adoption, required-but-unprotected accounts, active sessions, recent successful/failed logins, and security-specific audit events. Failed password or passkey authentication writes an event only when Nimbus can safely associate it with a known account; an unknown attempt remains non-identifying. Optional successful-login messages and mandatory password-change/reset notices reuse the encrypted SMTP queue and contain no credential material.
 
 The unauthenticated sign-in surface also handles invitations and password recovery. It removes the email token from browser history before sending it in a JSON request, validates the token's hash/purpose/expiry server-side, and never creates a session automatically after completion. Users sign in normally afterward, including the existing MFA step. Administrators can inspect pending/expired onboarding and resend or revoke links without seeing the token.
 
@@ -255,7 +265,7 @@ The unauthenticated sign-in surface also handles invitations and password recove
 - TLS is required for every Proxmox API URL.
 - Proxmox token secrets use AES-256-GCM encryption with a key derived from `APP_SECRET`.
 - SMTP passwords and queued email bodies use the same authenticated encryption boundary and are never exposed by browser APIs or logs.
-- Passwords use scrypt; TOTP secrets use AES-256-GCM; recovery codes are one-way hashed and single-use.
+- Passwords use scrypt; TOTP secrets use AES-256-GCM; recovery codes are one-way hashed and single-use; WebAuthn stores only public credentials and keyed one-time challenge tokens.
 - Invitation and password-reset tokens are random, purpose-bound, `APP_SECRET`-keyed hashes at rest, expire after 30 minutes, and are single-use.
 - Sessions are opaque, HTTP-only, SameSite=Strict, and Secure in production; users can review and revoke only their own sessions.
 - Native access tokens are opaque, short lived, and hashed at rest; refresh tokens rotate once, have a fixed maximum lifetime, and retain hashed history for reuse detection.
@@ -300,6 +310,7 @@ Recommended token privileges must be adjusted to the enabled feature set. A stat
 - Encrypted SMTP configuration, administrator connection/message tests, durable delivery retries, and sanitized delivery history.
 - Per-assignment resource alerts, private notification delivery, customer preferences, action completion events, and branded alert/recovery email.
 - TOTP two-factor authentication, one-use recovery codes, active-session management, administrator-assisted reset, and security email notices.
+- WebAuthn passkeys with discoverable credentials, required user verification, exact origin/RP binding, one-time challenges, credential counters, account management, and administrator-assisted reset.
 - Administrator Security & Access Center with enforceable role-based MFA requirements, restricted enrollment sessions, account posture, failed-login audit events, and optional successful-login email.
 - Administrator-issued customer invitations, self-service password recovery, resend/revoke controls, non-enumerating responses, and session-revoking completion.
 - Administrator Operations Center with last-good node/storage telemetry, cluster/stale-assignment/task monitoring, persistent acknowledgement, and automatic recovery.
@@ -311,7 +322,6 @@ Recommended token privileges must be adjusted to the enabled feature set. A stat
 ### Phase 2 — production hardening
 
 - Replace in-process rate limiting with Redis when running multiple replicas.
-- Add WebAuthn/passkeys.
 - Add key rotation with credential re-encryption.
 - Add a durable job runner for sync/task polling rather than one process timer.
 - Add pagination and retention policies for large audit/task tables.

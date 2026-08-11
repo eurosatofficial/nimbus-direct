@@ -41,6 +41,7 @@
           <input id="loginPassword" type="password" name="password" autocomplete="current-password" required minlength="12" />
           <p class="form-message error" id="authError" role="alert"></p>
           <button class="button primary auth-submit" type="submit">Sign in</button>
+          <button class="button secondary auth-submit passkey-login" id="passkeyLoginButton" type="button" hidden><span aria-hidden="true">⌁</span> Sign in with a passkey</button>
           <button class="auth-link" id="forgotPasswordButton" type="button">Forgot your password?</button>
         </form>
         <form id="mfaForm" hidden>
@@ -209,6 +210,6 @@
       <button class="icon-button" type="button" id="toastClose" aria-label="Dismiss message">×</button>
     </div>
 
-    <script src="/app.js?v=20260808-02" type="module"></script>
+    <script src="/app.js?v=20260809-01" type="module"></script>
   </body>
 </html>

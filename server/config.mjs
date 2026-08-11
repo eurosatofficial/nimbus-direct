@@ -47,6 +47,29 @@ export function readConfig() {
   if (apnsCredentials.some(Boolean) && (!apnsCredentials.every(Boolean) || !apnsTopic)) {
     throw new Error("APNs requires APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC, and APNS_PRIVATE_KEY_BASE64");
   }
+  const webauthnRpId = String(process.env.WEBAUTHN_RP_ID || "").trim().toLowerCase();
+  const webauthnOriginInput = String(process.env.WEBAUTHN_ORIGIN || "").trim();
+  if (Boolean(webauthnRpId) !== Boolean(webauthnOriginInput)) {
+    throw new Error("Passkeys require both WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN");
+  }
+  let webauthnOrigin = "";
+  if (webauthnOriginInput) {
+    if (!/^[a-z0-9.-]+$/.test(webauthnRpId) || webauthnRpId.startsWith(".") || webauthnRpId.endsWith(".")) {
+      throw new Error("WEBAUTHN_RP_ID must be a hostname without a scheme or port");
+    }
+    let parsed;
+    try { parsed = new URL(webauthnOriginInput); }
+    catch { throw new Error("WEBAUTHN_ORIGIN must be a valid origin"); }
+    const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+    if (parsed.protocol !== "https:" && !localHttp) throw new Error("WEBAUTHN_ORIGIN must use HTTPS");
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      throw new Error("WEBAUTHN_ORIGIN must not contain credentials, a path, query, or fragment");
+    }
+    if (parsed.hostname !== webauthnRpId && !parsed.hostname.endsWith(`.${webauthnRpId}`)) {
+      throw new Error("WEBAUTHN_RP_ID must match WEBAUTHN_ORIGIN or one of its parent domains");
+    }
+    webauthnOrigin = parsed.origin;
+  }
   let apnsPrivateKey = "";
   if (apnsPrivateKeyBase64) {
     try { apnsPrivateKey = Buffer.from(apnsPrivateKeyBase64, "base64").toString("utf8"); }
@@ -80,6 +103,12 @@ export function readConfig() {
       topic: apnsTopic,
       privateKey: apnsPrivateKey,
       timeoutMs: integer(process.env.APNS_TIMEOUT_SECONDS, 10) * 1000,
+    },
+    webauthn: {
+      enabled: Boolean(webauthnRpId && webauthnOrigin),
+      rpId: webauthnRpId,
+      origin: webauthnOrigin,
+      rpName: String(process.env.WEBAUTHN_RP_NAME || "Nimbus Direct").trim() || "Nimbus Direct",
     },
     allowDemoData,
     demoReadOnly,

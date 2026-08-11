@@ -181,10 +181,23 @@ function publicUser(row) {
     planName: row.plan_name || "Managed infrastructure",
     preferredLanguage: preferredLanguageForRow(row),
     mfaEnabled: Boolean(row.mfa_enabled),
+    passkeyCount: Number(row.passkey_count || 0),
     passwordSet: row.password_set === undefined ? true : Boolean(row.password_set),
     invitationExpiresAt: row.invitation_expires_at || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function publicPasskey(row) {
+  return row && {
+    id: row.id,
+    name: row.name,
+    deviceType: row.device_type,
+    backedUp: Boolean(row.backed_up),
+    transports: parseJson(row.transports, []),
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at || null,
   };
 }
 
@@ -850,6 +863,7 @@ function customerSelect(where = "") {
 function userSelect(where = "") {
   return `SELECT u.*,c.name AS customer_name,c.status AS customer_status,c.support_email,c.plan_name,
     CASE WHEN m.enabled=1 THEN 1 ELSE 0 END AS mfa_enabled,
+    (SELECT COUNT(*) FROM user_passkeys p WHERE p.user_id=u.id) AS passkey_count,
     (SELECT MAX(t.expires_at) FROM account_tokens t
       WHERE t.user_id=u.id AND t.purpose='invitation' AND t.used_at IS NULL
     ) AS invitation_expires_at
@@ -943,6 +957,34 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS user_passkeys (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      webauthn_user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      public_key BLOB NOT NULL,
+      counter INTEGER NOT NULL DEFAULT 0,
+      device_type TEXT NOT NULL,
+      backed_up INTEGER NOT NULL DEFAULT 0,
+      transports TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS idx_user_passkeys_user ON user_passkeys(user_id,created_at);
+
+    CREATE TABLE IF NOT EXISTS webauthn_challenges (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      purpose TEXT NOT NULL CHECK(purpose IN ('registration','authentication')),
+      challenge TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expiry ON webauthn_challenges(expires_at);
 
     CREATE TABLE IF NOT EXISTS proxmox_clusters (
       id TEXT PRIMARY KEY,
@@ -4197,6 +4239,106 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       return row;
     },
 
+    listPasskeys(userId) {
+      return database.prepare("SELECT * FROM user_passkeys WHERE user_id=? ORDER BY created_at DESC")
+        .all(userId).map(publicPasskey);
+    },
+    getPasskeyCredential(id) {
+      const row = database.prepare("SELECT * FROM user_passkeys WHERE id=?").get(String(id || ""));
+      if (!row) return null;
+      return {
+        ...publicPasskey(row),
+        userId: row.user_id,
+        webauthnUserID: row.webauthn_user_id,
+        publicKey: Buffer.from(row.public_key),
+        counter: Number(row.counter || 0),
+      };
+    },
+    createPasskey(userId, input) {
+      if (!getUserRow.get(userId)) throw problem("User does not exist", "user_not_found", 404);
+      const id = String(input?.id || "").trim();
+      const name = String(input?.name || "Passkey").trim();
+      const webauthnUserID = String(input?.webauthnUserID || "").trim();
+      if (!id || !webauthnUserID || !input?.publicKey) throw problem("Passkey credential is incomplete", "invalid_passkey");
+      if (!name || name.length > 100) throw problem("Passkey name must contain 1-100 characters", "invalid_passkey_name");
+      const now = Date.now();
+      try {
+        database.prepare(`INSERT INTO user_passkeys
+          (id,user_id,webauthn_user_id,name,public_key,counter,device_type,backed_up,transports,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+          id,
+          userId,
+          webauthnUserID,
+          name,
+          Buffer.from(input.publicKey),
+          Number(input.counter || 0),
+          String(input.deviceType || "singleDevice"),
+          Number(Boolean(input.backedUp)),
+          JSON.stringify(Array.isArray(input.transports) ? input.transports : []),
+          now,
+          now,
+        );
+      } catch (error) {
+        if (String(error.message || "").includes("UNIQUE constraint failed")) {
+          throw problem("This passkey is already registered", "passkey_already_registered", 409);
+        }
+        throw error;
+      }
+      return publicPasskey(database.prepare("SELECT * FROM user_passkeys WHERE id=?").get(id));
+    },
+    updatePasskeyCounter(id, counter) {
+      const now = Date.now();
+      return database.prepare("UPDATE user_passkeys SET counter=?,last_used_at=?,updated_at=? WHERE id=?")
+        .run(Number(counter || 0), now, now, id).changes > 0;
+    },
+    renamePasskey(userId, id, name) {
+      const normalized = String(name || "").trim();
+      if (!normalized || normalized.length > 100) throw problem("Passkey name must contain 1-100 characters", "invalid_passkey_name");
+      const changed = database.prepare("UPDATE user_passkeys SET name=?,updated_at=? WHERE id=? AND user_id=?")
+        .run(normalized, Date.now(), id, userId).changes;
+      if (!changed) throw problem("Passkey does not exist", "passkey_not_found", 404);
+      return publicPasskey(database.prepare("SELECT * FROM user_passkeys WHERE id=?").get(id));
+    },
+    deletePasskey(userId, id) {
+      return database.prepare("DELETE FROM user_passkeys WHERE id=? AND user_id=?").run(id, userId).changes > 0;
+    },
+    deleteAllPasskeys(userId) {
+      return database.prepare("DELETE FROM user_passkeys WHERE user_id=?").run(userId).changes;
+    },
+    createWebAuthnChallenge({ userId = null, purpose, challenge, ttlMs = 5 * 60_000 }) {
+      if (!['registration', 'authentication'].includes(purpose)) throw problem("Passkey challenge purpose is invalid");
+      const token = randomToken(32);
+      const now = Date.now();
+      database.prepare("DELETE FROM webauthn_challenges WHERE expires_at<=?").run(now);
+      if (userId && purpose === "registration") {
+        database.prepare("DELETE FROM webauthn_challenges WHERE user_id=? AND purpose='registration'").run(userId);
+      }
+      database.prepare(`INSERT INTO webauthn_challenges
+        (token_hash,user_id,purpose,challenge,expires_at,created_at) VALUES (?,?,?,?,?,?)`)
+        .run(hashToken(token, appSecret), userId, purpose, String(challenge), now + ttlMs, now);
+      return { token, expiresAt: now + ttlMs };
+    },
+    consumeWebAuthnChallenge(token, purpose, { userId = undefined } = {}) {
+      if (!token || !['registration', 'authentication'].includes(purpose)) return null;
+      const tokenHash = hashToken(String(token), appSecret);
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const row = database.prepare(`SELECT * FROM webauthn_challenges
+          WHERE token_hash=? AND purpose=? AND expires_at>?`).get(tokenHash, purpose, Date.now());
+        const valid = row && (userId === undefined || row.user_id === userId);
+        if (!valid) {
+          database.exec("ROLLBACK");
+          return null;
+        }
+        database.prepare("DELETE FROM webauthn_challenges WHERE token_hash=?").run(tokenHash);
+        database.exec("COMMIT");
+        return row;
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    },
+
     createApiDeviceSession({
       userId,
       accessTtlMs,
@@ -4421,7 +4563,8 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     getSession(token) {
       if (!token) return null;
       const row = database.prepare(`SELECT s.*,u.*,c.name AS customer_name,c.status AS customer_status,c.support_email,c.plan_name,
-        CASE WHEN m.enabled=1 THEN 1 ELSE 0 END AS mfa_enabled
+        CASE WHEN m.enabled=1 THEN 1 ELSE 0 END AS mfa_enabled,
+        (SELECT COUNT(*) FROM user_passkeys p WHERE p.user_id=u.id) AS passkey_count
         FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN customers c ON c.id=u.customer_id
         LEFT JOIN user_mfa m ON m.user_id=u.id
         WHERE s.id_hash=? AND s.expires_at>?`).get(hashToken(token, appSecret), Date.now());
@@ -4540,10 +4683,13 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
         FROM users u LEFT JOIN user_mfa m ON m.user_id=u.id
         WHERE u.status='active'`).get();
       const since = Date.now() - 24 * 60 * 60 * 1000;
-      const successfulLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action IN ('auth.login','auth.api_login') AND created_at>=?").get(since).count;
-      const failedLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action IN ('auth.login_failed','auth.mfa_failed') AND created_at>=?").get(since).count;
+      const successfulLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action IN ('auth.login','auth.api_login','auth.passkey_login') AND created_at>=?").get(since).count;
+      const failedLogins = database.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action IN ('auth.login_failed','auth.mfa_failed','auth.passkey_failed') AND created_at>=?").get(since).count;
       const activeAccounts = Number(accounts.active_accounts || 0);
       const mfaProtected = Number(accounts.mfa_protected || 0);
+      const passkeyAccounts = Number(database.prepare(`SELECT COUNT(DISTINCT p.user_id) AS count
+        FROM user_passkeys p JOIN users u ON u.id=p.user_id WHERE u.status='active'`).get().count || 0);
+      const passkeys = Number(database.prepare("SELECT COUNT(*) AS count FROM user_passkeys").get().count || 0);
       const requiredPending =
         (policy.requireAdminMfa ? Number(accounts.admins || 0) - Number(accounts.protected_admins || 0) : 0)
         + (policy.requireCustomerMfa ? Number(accounts.customers || 0) - Number(accounts.protected_customers || 0) : 0);
@@ -4556,6 +4702,9 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
           activeAccounts,
           mfaProtected,
           mfaCoverage: activeAccounts ? Math.round(mfaProtected / activeAccounts * 100) : 100,
+          passkeyAccounts,
+          passkeyCoverage: activeAccounts ? Math.round(passkeyAccounts / activeAccounts * 100) : 100,
+          passkeys,
           requiredPending,
           activeSessions: browserSessions + apiDeviceSessions,
           browserSessions,

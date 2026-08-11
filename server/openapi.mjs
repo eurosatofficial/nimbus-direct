@@ -53,6 +53,7 @@ const sessionId = { name: "sessionId", in: "path", required: true, schema: { typ
 const snapshotName = { name: "snapshotName", in: "path", required: true, schema: { type: "string" } };
 const imageId = { name: "imageId", in: "path", required: true, schema: { type: "string" } };
 const keyId = { name: "keyId", in: "path", required: true, schema: { type: "string" } };
+const passkeyId = { name: "passkeyId", in: "path", required: true, schema: { type: "string" } };
 const adminId = (name) => ({ name, in: "path", required: true, schema: { type: "string" } });
 
 const tokenRequest = {
@@ -82,7 +83,7 @@ export const nimbusOpenApi = {
   openapi: "3.1.0",
   info: {
     title: "Nimbus Direct API",
-    version: "1.1.0",
+    version: "1.2.0",
     description: [
       "The versioned application API for Nimbus Direct web and mobile clients.",
       "Every resource operation is checked against Nimbus's local assignment and permission database before the official Proxmox API is called.",
@@ -209,6 +210,58 @@ export const nimbusOpenApi = {
           },
         },
         success: 204,
+      }),
+    },
+    "/security/passkeys/registration/options": {
+      post: operation({
+        tags: "Account",
+        summary: "Start passkey registration",
+        description: "Requires the current account password and returns a short-lived, single-use WebAuthn challenge bound to this account.",
+        body: {
+          type: "object",
+          required: ["currentPassword"],
+          properties: { currentPassword: { type: "string", format: "password" } },
+        },
+      }),
+    },
+    "/security/passkeys/registration/verify": {
+      post: operation({
+        tags: "Account",
+        summary: "Finish passkey registration",
+        description: "Verifies the relying-party origin, RP ID, challenge, and user verification before storing the public credential.",
+        success: 201,
+        body: {
+          type: "object",
+          required: ["challengeToken", "response", "name"],
+          properties: {
+            challengeToken: { type: "string" },
+            response: { type: "object", additionalProperties: true },
+            name: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      }),
+    },
+    "/security/passkeys/{passkeyId}": {
+      patch: operation({
+        tags: "Account",
+        summary: "Rename one owned passkey",
+        parameters: [passkeyId],
+        body: {
+          type: "object",
+          required: ["name"],
+          properties: { name: { type: "string", minLength: 1, maxLength: 100 } },
+        },
+      }),
+      delete: operation({
+        tags: "Account",
+        summary: "Remove one owned passkey",
+        description: "Requires the current account password.",
+        parameters: [passkeyId],
+        body: {
+          type: "object",
+          required: ["currentPassword"],
+          properties: { currentPassword: { type: "string", format: "password" } },
+        },
       }),
     },
     "/api-keys": {
@@ -770,6 +823,18 @@ export const nimbusOpenApi = {
         summary: "Reset a user's 2FA and revoke all sessions",
         parameters: [adminId("userId")],
         body: { type: "object", additionalProperties: true },
+      }),
+    },
+    "/admin/users/{userId}/passkeys/reset": {
+      post: operation({
+        tags: "Administration",
+        summary: "Remove every passkey from a user and revoke all sessions",
+        parameters: [adminId("userId")],
+        body: {
+          type: "object",
+          required: ["currentPassword"],
+          properties: { currentPassword: { type: "string", format: "password" } },
+        },
       }),
     },
     "/admin/users/{userId}/invitation/{operation}": {

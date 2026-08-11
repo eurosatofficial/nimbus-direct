@@ -5,13 +5,19 @@ const output = document.getElementById("terminal");
 const screen = document.getElementById("screen");
 const countdown = document.getElementById("countdown");
 const terminalTools = document.getElementById("terminalTools");
+const graphicalTools = document.getElementById("graphicalTools");
+const displaySettings = document.getElementById("displaySettings");
+const virtualKeyboardInput = document.getElementById("virtualKeyboardInput");
 let activeSocket = null;
 let activeTerminal = null;
+let activeRfb = null;
 let disconnectConsole = () => {};
+let releaseGraphicalModifiers = () => {};
 let terminalConnected = false;
 const textEncoder = new TextEncoder();
 
 document.getElementById("closeButton").addEventListener("click", () => {
+  releaseGraphicalModifiers();
   disconnectConsole();
   window.close();
 });
@@ -31,6 +37,41 @@ function markDisconnected(message) {
   status.textContent = message;
   session.classList.remove("ready");
   terminalConnected = false;
+  setConsoleConnectionState(false);
+}
+
+function setConsoleConnectionState(connected) {
+  document.querySelectorAll("[data-requires-connection]").forEach((control) => {
+    control.disabled = !connected;
+  });
+}
+
+function updateFullscreenLabels() {
+  document.querySelectorAll('[data-console-action="fullscreen"]').forEach((button) => {
+    button.textContent = document.fullscreenElement ? "Exit fullscreen" : "Fullscreen";
+  });
+}
+
+function installCommonConsoleActions() {
+  setConsoleConnectionState(false);
+  document.querySelectorAll('[data-console-action="fullscreen"]').forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
+        else status.textContent = "Fullscreen is not available in this browser";
+      } catch {
+        status.textContent = "Fullscreen could not be opened";
+      }
+    });
+  });
+  document.querySelectorAll('[data-console-action="disconnect"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      releaseGraphicalModifiers();
+      disconnectConsole();
+    });
+  });
+  document.addEventListener("fullscreenchange", updateFullscreenLabels);
 }
 
 function byteLength(value) {
@@ -188,6 +229,7 @@ async function startTerminalConsole(data) {
         return;
       }
       terminalConnected = true;
+      setConsoleConnectionState(true);
       data.credentials.password = "";
       data.credentials.user = "";
       status.textContent = "Terminal connected";
@@ -213,33 +255,220 @@ async function startTerminalConsole(data) {
   fitSoon();
 }
 
+const DISPLAY_PREFERENCES_KEY = "nimbus-console-display-v1";
+
+function loadDisplayPreferences() {
+  const defaults = {
+    fit: true,
+    resizeRemote: matchMedia("(max-width: 900px)").matches,
+    quality: "balanced",
+  };
+  try {
+    const stored = JSON.parse(localStorage.getItem(DISPLAY_PREFERENCES_KEY));
+    if (!stored || typeof stored !== "object") return defaults;
+    return {
+      fit: typeof stored.fit === "boolean" ? stored.fit : defaults.fit,
+      resizeRemote: typeof stored.resizeRemote === "boolean" ? stored.resizeRemote : defaults.resizeRemote,
+      quality: ["responsive", "balanced", "sharp"].includes(stored.quality) ? stored.quality : defaults.quality,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveDisplayPreferences(preferences) {
+  try {
+    localStorage.setItem(DISPLAY_PREFERENCES_KEY, JSON.stringify(preferences));
+  } catch {
+    // The console still works when private browsing blocks local storage.
+  }
+}
+
+function applyGraphicalDisplay(rfb, preferences) {
+  const profiles = {
+    responsive: { quality: 3, compression: 7 },
+    balanced: { quality: 5, compression: 3 },
+    sharp: { quality: 8, compression: 2 },
+  };
+  const profile = profiles[preferences.quality] || profiles.balanced;
+  rfb.scaleViewport = preferences.fit;
+  rfb.clipViewport = !preferences.fit;
+  rfb.resizeSession = preferences.resizeRemote;
+  rfb.qualityLevel = profile.quality;
+  rfb.compressionLevel = profile.compression;
+  screen.classList.toggle("actual-size", !preferences.fit);
+}
+
+function installGraphicalTools(rfb, KeyTable, Keysyms) {
+  graphicalTools.hidden = false;
+  const preferences = loadDisplayPreferences();
+  const fitViewport = document.getElementById("fitViewport");
+  const resizeRemoteDisplay = document.getElementById("resizeRemoteDisplay");
+  const imageQuality = document.getElementById("imageQuality");
+  const displaySettingsButton = document.getElementById("displaySettingsButton");
+  const graphicalKeyboardButton = document.getElementById("graphicalKeyboardButton");
+  const graphicalPasteButton = document.getElementById("graphicalPasteButton");
+  const pressedModifiers = new Map();
+  const modifierKeys = {
+    control: { keysym: KeyTable.XK_Control_L, code: "ControlLeft" },
+    alt: { keysym: KeyTable.XK_Alt_L, code: "AltLeft" },
+    super: { keysym: KeyTable.XK_Super_L, code: "MetaLeft" },
+  };
+  const namedKeys = {
+    tab: { keysym: KeyTable.XK_Tab, code: "Tab" },
+    escape: { keysym: KeyTable.XK_Escape, code: "Escape" },
+  };
+  const keyboardKeys = {
+    Backspace: { keysym: KeyTable.XK_BackSpace, code: "Backspace" },
+    Enter: { keysym: KeyTable.XK_Return, code: "Enter" },
+    Tab: { keysym: KeyTable.XK_Tab, code: "Tab" },
+    Escape: { keysym: KeyTable.XK_Escape, code: "Escape" },
+    Delete: { keysym: KeyTable.XK_Delete, code: "Delete" },
+    Insert: { keysym: KeyTable.XK_Insert, code: "Insert" },
+    Home: { keysym: KeyTable.XK_Home, code: "Home" },
+    End: { keysym: KeyTable.XK_End, code: "End" },
+    PageUp: { keysym: KeyTable.XK_Page_Up, code: "PageUp" },
+    PageDown: { keysym: KeyTable.XK_Page_Down, code: "PageDown" },
+    ArrowLeft: { keysym: KeyTable.XK_Left, code: "ArrowLeft" },
+    ArrowRight: { keysym: KeyTable.XK_Right, code: "ArrowRight" },
+    ArrowUp: { keysym: KeyTable.XK_Up, code: "ArrowUp" },
+    ArrowDown: { keysym: KeyTable.XK_Down, code: "ArrowDown" },
+  };
+
+  fitViewport.checked = preferences.fit;
+  resizeRemoteDisplay.checked = preferences.resizeRemote;
+  imageQuality.value = preferences.quality;
+  applyGraphicalDisplay(rfb, preferences);
+
+  const focusRemote = () => rfb.focus({ preventScroll: true });
+  const releaseModifiers = () => {
+    for (const [name, key] of [...pressedModifiers].reverse()) {
+      rfb.sendKey(key.keysym, key.code, false);
+      const button = graphicalTools.querySelector(`[data-vnc-modifier="${name}"]`);
+      button?.classList.remove("active");
+      button?.setAttribute("aria-pressed", "false");
+    }
+    pressedModifiers.clear();
+  };
+  releaseGraphicalModifiers = releaseModifiers;
+
+  const sendKey = (key, releaseAfter = true, refocus = true) => {
+    rfb.sendKey(key.keysym, key.code);
+    if (releaseAfter) releaseModifiers();
+    if (refocus) focusRemote();
+  };
+  const sendText = (text, refocus = true) => {
+    releaseModifiers();
+    for (const character of Array.from(String(text)).slice(0, 4096)) {
+      if (character === "\n" || character === "\r") rfb.sendKey(KeyTable.XK_Return, "Enter");
+      else if (character === "\t") rfb.sendKey(KeyTable.XK_Tab, "Tab");
+      else rfb.sendKey(Keysyms.lookup(character.codePointAt(0)));
+    }
+    if (refocus) focusRemote();
+  };
+
+  graphicalTools.querySelectorAll("[data-vnc-modifier]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const name = button.dataset.vncModifier;
+      const key = modifierKeys[name];
+      if (pressedModifiers.has(name)) {
+        rfb.sendKey(key.keysym, key.code, false);
+        pressedModifiers.delete(name);
+        button.classList.remove("active");
+        button.setAttribute("aria-pressed", "false");
+      } else {
+        rfb.sendKey(key.keysym, key.code, true);
+        pressedModifiers.set(name, key);
+        button.classList.add("active");
+        button.setAttribute("aria-pressed", "true");
+      }
+      focusRemote();
+    });
+  });
+  graphicalTools.querySelectorAll("[data-vnc-key]").forEach((button) => {
+    button.addEventListener("click", () => sendKey(namedKeys[button.dataset.vncKey]));
+  });
+  document.getElementById("ctrlAltDeleteButton").addEventListener("click", () => {
+    releaseModifiers();
+    rfb.sendCtrlAltDel();
+    focusRemote();
+  });
+
+  graphicalKeyboardButton.addEventListener("click", () => {
+    virtualKeyboardInput.value = "";
+    virtualKeyboardInput.focus({ preventScroll: true });
+  });
+  virtualKeyboardInput.addEventListener("keydown", (event) => {
+    const key = keyboardKeys[event.key];
+    if (!key) return;
+    event.preventDefault();
+    sendKey(key, true, false);
+  });
+  virtualKeyboardInput.addEventListener("input", (event) => {
+    const entered = event.data ?? virtualKeyboardInput.value;
+    virtualKeyboardInput.value = "";
+    if (entered) sendText(entered, false);
+  });
+  graphicalPasteButton.addEventListener("click", async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) sendText(text);
+    } catch {
+      status.textContent = "Tap Keyboard and use the system Paste command";
+      virtualKeyboardInput.focus({ preventScroll: true });
+    }
+  });
+
+  displaySettingsButton.addEventListener("click", () => {
+    displaySettings.hidden = !displaySettings.hidden;
+    displaySettingsButton.setAttribute("aria-expanded", String(!displaySettings.hidden));
+  });
+  const updateDisplay = () => {
+    preferences.fit = fitViewport.checked;
+    preferences.resizeRemote = resizeRemoteDisplay.checked;
+    preferences.quality = imageQuality.value;
+    applyGraphicalDisplay(rfb, preferences);
+    saveDisplayPreferences(preferences);
+    focusRemote();
+  };
+  fitViewport.addEventListener("change", updateDisplay);
+  resizeRemoteDisplay.addEventListener("change", updateDisplay);
+  imageQuality.addEventListener("change", updateDisplay);
+}
+
 async function startGraphicalConsole(data) {
   output.remove();
   if (!data.credentials?.password) throw new Error("The short-lived console credential is missing.");
-  const { default: RFB } = await import("/vendor/novnc/core/rfb.js");
+  const [{ default: RFB }, { default: KeyTable }, { default: Keysyms }] = await Promise.all([
+    import("/vendor/novnc/core/rfb.js"),
+    import("/vendor/novnc/core/input/keysym.js"),
+    import("/vendor/novnc/core/input/keysymdef.js"),
+  ]);
   const rfb = new RFB(screen, websocketUrl(data.websocketUrl), {
     shared: true,
     wsProtocols: ["binary"],
     credentials: { password: data.credentials.password },
   });
-  disconnectConsole = () => rfb.disconnect();
+  activeRfb = rfb;
+  installGraphicalTools(rfb, KeyTable, Keysyms);
+  disconnectConsole = () => {
+    releaseGraphicalModifiers();
+    rfb.disconnect();
+  };
   let credentialRetry = false;
-  rfb.scaleViewport = true;
-  // A modest quality reduction saves substantial bandwidth across a tunnel,
-  // while a little extra compression keeps interactive redraws responsive.
-  rfb.qualityLevel = 5;
-  rfb.compressionLevel = 3;
   rfb.showDotCursor = true;
-  // On narrow screens, ask capable QEMU displays to match the viewport rather
-  // than continuously transferring a much larger desktop and scaling it down.
-  rfb.resizeSession = matchMedia("(max-width: 900px)").matches;
   rfb.viewOnly = false;
   rfb.addEventListener("connect", () => {
     data.credentials.password = "";
     status.textContent = "Graphical console connected";
     session.classList.add("ready");
+    setConsoleConnectionState(true);
+    activeRfb.focus({ preventScroll: true });
   });
-  rfb.addEventListener("disconnect", (event) => markDisconnected(event.detail.clean ? "Console closed" : "Console connection lost"));
+  rfb.addEventListener("disconnect", (event) => {
+    releaseGraphicalModifiers();
+    markDisconnected(event.detail.clean ? "Console closed" : "Console connection lost");
+  });
   rfb.addEventListener("securityfailure", (event) => markDisconnected(event.detail?.reason || "Console security negotiation failed"));
   rfb.addEventListener("credentialsrequired", () => {
     if (credentialRetry) {
@@ -291,7 +520,12 @@ async function initialize() {
   else await startGraphicalConsole(data);
 }
 
-window.addEventListener("pagehide", () => disconnectConsole());
+installCommonConsoleActions();
+
+window.addEventListener("pagehide", () => {
+  releaseGraphicalModifiers();
+  disconnectConsole();
+});
 
 initialize().catch((error) => {
   status.textContent = "Console unavailable";

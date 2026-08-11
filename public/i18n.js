@@ -144,7 +144,7 @@ const pluralPhrases = [
   "sessions", "users", "emails", "messages", "events", "keys", "snapshots", "clusters",
   "nodes", "tickets", "notifications", "assignments", "guests", "actions", "incidents",
   "policies", "accounts", "customers", "conversations", "unreads", "notices", "tasks",
-  "requests", "cores",
+  "requests", "cores", "passkeys", "registered passkeys",
 ];
 const singularPhrases = new Map([
   ["policies", "policy"], ["conversations", "conversation"], ["unreads", "unread"],
@@ -152,6 +152,7 @@ const singularPhrases = new Map([
   ["recovery emails", "recovery email"], ["active notices", "active notice"],
   ["scheduled windows", "scheduled window"], ["active support tickets", "active support ticket"],
   ["critical incidents", "critical incident"], ["active incidents", "active incident"],
+  ["passkeys", "passkey"], ["registered passkeys", "registered passkey"],
 ]);
 
 function translatePlural(value, language) {

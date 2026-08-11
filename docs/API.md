@@ -42,7 +42,7 @@ Native applications use opaque tokens:
 - Refresh token: `nmb_rt_…`, fixed device-session lifetime (30 days by default).
 - Refresh tokens are single-use and rotate on every refresh.
 - Reuse of an already rotated refresh token revokes the entire device session.
-- Password changes, account disablement, customer deletion, 2FA reset, and
+- Password changes, account disablement, customer deletion, 2FA/passkey reset, and
   account-link completion revoke affected native sessions.
 - Raw access and refresh tokens are never stored in the Nimbus database.
   Nimbus stores only APP_SECRET-bound token hashes.
@@ -134,6 +134,44 @@ DELETE /api/v1/auth/devices/{sessionId}
 
 The existing account session view also includes native devices. A user can
 revoke browser sessions and mobile-device sessions from either client.
+
+## Passkeys
+
+When `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGIN` are configured, the web sign-in
+screen supports passwordless, discoverable WebAuthn credentials. Nimbus
+requires authenticator user verification, validates the exact origin and
+relying-party ID, checks authenticator counters, and consumes every challenge
+exactly once. The database stores only public credential material; private keys
+remain in the authenticator or its protected synchronization service.
+
+Public browser-login endpoints are intentionally separate from the bearer-token
+API:
+
+```text
+GET  /api/auth/passkeys/status
+POST /api/auth/passkeys/options
+POST /api/auth/passkeys/verify
+```
+
+Authenticated account management is part of API v1:
+
+```text
+POST   /api/v1/security/passkeys/registration/options
+POST   /api/v1/security/passkeys/registration/verify
+PATCH  /api/v1/security/passkeys/{passkeyId}
+DELETE /api/v1/security/passkeys/{passkeyId}
+```
+
+Starting registration and removing a credential require the current account
+password. Administrators can remove all passkeys from another account through
+`POST /api/v1/admin/users/{userId}/passkeys/reset`; this also revokes that
+user's browser and native sessions. Add, remove, reset, successful-login, and
+failed-login events are audited. Security emails follow the user's configured
+email language.
+
+Native password/2FA token login remains unchanged. A native client may protect
+its locally stored Nimbus session with operating-system biometrics, but that
+local unlock is not a replacement for server-side WebAuthn verification.
 
 ## Mobile credential storage
 

@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark" />
     <title>Secure console · Nimbus Direct</title>
     <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
-    <link rel="stylesheet" href="/console.css?v=20260802-1" />
+    <link rel="stylesheet" href="/console.css?v=20260809-2" />
   </head>
   <body>
     <header>
@@ -25,12 +25,33 @@
         <button type="button" data-terminal-key="tab">Tab</button>
         <button type="button" data-terminal-key="interrupt">Ctrl C</button>
         <button type="button" id="pasteButton">Paste</button>
+        <button type="button" data-console-action="fullscreen">Fullscreen</button>
+        <button type="button" class="danger" data-console-action="disconnect" data-requires-connection>Disconnect</button>
       </div>
+      <div class="graphical-tools" id="graphicalTools" hidden aria-label="Graphical console controls">
+        <button type="button" class="primary-tool" id="graphicalKeyboardButton" data-requires-connection>Keyboard</button>
+        <button type="button" data-vnc-modifier="control" data-requires-connection aria-pressed="false">Ctrl</button>
+        <button type="button" data-vnc-modifier="alt" data-requires-connection aria-pressed="false">Alt</button>
+        <button type="button" data-vnc-modifier="super" data-requires-connection aria-pressed="false" title="Windows / Command key">Super</button>
+        <button type="button" data-vnc-key="tab" data-requires-connection>Tab</button>
+        <button type="button" data-vnc-key="escape" data-requires-connection>Esc</button>
+        <button type="button" id="ctrlAltDeleteButton" data-requires-connection>Ctrl Alt Del</button>
+        <button type="button" id="graphicalPasteButton" data-requires-connection>Paste</button>
+        <button type="button" id="displaySettingsButton" aria-expanded="false">Display</button>
+        <button type="button" data-console-action="fullscreen">Fullscreen</button>
+        <button type="button" class="danger" data-console-action="disconnect" data-requires-connection>Disconnect</button>
+      </div>
+      <section class="display-settings" id="displaySettings" hidden aria-label="Console display settings">
+        <label><input id="fitViewport" type="checkbox" checked> <span>Fit display to window</span></label>
+        <label><input id="resizeRemoteDisplay" type="checkbox"> <span>Resize remote display</span></label>
+        <label><span>Image quality</span><select id="imageQuality"><option value="responsive">Low bandwidth</option><option value="balanced" selected>Balanced</option><option value="sharp">Sharp</option></select></label>
+      </section>
+      <textarea class="virtual-keyboard-input" id="virtualKeyboardInput" aria-label="Remote keyboard input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
       <div class="screen" id="screen" role="application" aria-label="Virtual machine console">
         <div class="terminal" id="terminal"><span class="muted">Nimbus Direct secure console gateway</span><br><span class="muted">Waiting for the short-lived Proxmox ticket…</span></div>
       </div>
       <footer><span>Ticket expires in <strong id="countdown">—</strong></span><span>Credentials stay on the Nimbus server</span></footer>
     </main>
-    <script src="/console.js?v=20260809-1" type="module"></script>
+    <script src="/console.js?v=20260809-2" type="module"></script>
   </body>
 </html>

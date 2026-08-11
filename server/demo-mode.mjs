@@ -2,6 +2,8 @@ const READ_METHODS = new Set(["GET", "HEAD"]);
 const DEMO_AUTH_WRITES = new Set([
   "POST /api/auth/login",
   "POST /api/auth/mfa",
+  "POST /api/auth/passkeys/options",
+  "POST /api/auth/passkeys/verify",
   "POST /api/auth/logout",
   "POST /api/v1/auth/token",
   "POST /api/v1/auth/mfa",
@@ -33,9 +35,9 @@ export function assertDemoReadOnlyStore(config, store) {
   }
   const securityPolicy = store.getSecurityPolicy();
   if (securityPolicy.requireAdminMfa || securityPolicy.requireCustomerMfa
-    || store.listUsers().some((user) => user.mfaEnabled)) {
+    || store.listUsers().some((user) => user.mfaEnabled || user.passkeyCount > 0)) {
     throw new Error(
-      "DEMO_READ_ONLY refuses to start with required or enrolled two-factor authentication. Use fresh shared demo accounts.",
+      "DEMO_READ_ONLY refuses to start with required or enrolled two-factor/passkey authentication. Use fresh shared demo accounts.",
     );
   }
 }

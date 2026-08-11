@@ -19,6 +19,7 @@ import { createTotpEnrollment, generateRecoveryCodes, verifyTotp } from "./serve
 import { createNotificationService, localizeNotificationPage } from "./server/notifications.mjs";
 import { availableLanguages, defaultLanguage } from "./server/locales.mjs";
 import { createPushService } from "./server/push.mjs";
+import { createPasskeyService } from "./server/passkeys.mjs";
 import { nimbusOpenApi } from "./server/openapi.mjs";
 import { ProxmoxRegistry } from "./server/proxmox-registry.mjs";
 import { RateLimiter } from "./server/rate-limit.mjs";
@@ -41,6 +42,7 @@ import {
 await loadEnv(new URL("./.env", import.meta.url));
 const config = readConfig();
 const store = await openStore(config.dataDir, { appSecret: config.appSecret });
+const passkeys = createPasskeyService(config.webauthn);
 if (config.demoReadOnly) assertDemoReadOnlyStore(config, store);
 const bootstrapped = await bootstrapStore(store, config.bootstrap);
 const proxmox = new ProxmoxRegistry({
@@ -49,6 +51,7 @@ const proxmox = new ProxmoxRegistry({
 });
 const loginLimiter = new RateLimiter({ limit: 8, windowMs: 15 * 60 * 1000 });
 const mfaLimiter = new RateLimiter({ limit: 8, windowMs: 10 * 60 * 1000 });
+const passkeyLoginLimiter = new RateLimiter({ limit: 12, windowMs: 10 * 60 * 1000 });
 const apiRefreshLimiter = new RateLimiter({ limit: 30, windowMs: 10 * 60 * 1000 });
 const securityActionLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
 const forgotPasswordLimiter = new RateLimiter({ limit: 5, windowMs: 15 * 60 * 1000 });
@@ -1070,6 +1073,10 @@ function reconcileAllOperations() {
 }
 
 async function routeAuth(request, response, pathname) {
+  if (pathname === "/api/auth/passkeys/status" && request.method === "GET") {
+    sendJson(response, 200, { enabled: passkeys.enabled });
+    return true;
+  }
   if (pathname === "/api/auth/session" && request.method === "GET") {
     const session = currentSession(request);
     if (!session) {
@@ -1082,6 +1089,84 @@ async function routeAuth(request, response, pathname) {
       expiresAt: session.expiresAt,
       demoReadOnly: config.demoReadOnly,
     });
+    return true;
+  }
+  if (pathname === "/api/auth/passkeys/options" && request.method === "POST") {
+    const ip = clientIp(request);
+    const limit = passkeyLoginLimiter.consume(ip);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_passkey_attempts" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const options = await passkeys.authenticationOptions();
+    const challenge = store.createWebAuthnChallenge({
+      purpose: "authentication",
+      challenge: options.challenge,
+    });
+    sendJson(response, 200, {
+      options,
+      challengeToken: challenge.token,
+      expiresAt: challenge.expiresAt,
+    });
+    return true;
+  }
+  if (pathname === "/api/auth/passkeys/verify" && request.method === "POST") {
+    const ip = clientIp(request);
+    const limit = passkeyLoginLimiter.consume(ip);
+    if (!limit.allowed) {
+      sendJson(response, 429, { error: "too_many_passkey_attempts" }, { "retry-after": String(limit.retryAfter) });
+      return true;
+    }
+    const input = await readBody(request);
+    const challenge = store.consumeWebAuthnChallenge(input.challengeToken, "authentication");
+    const credential = store.getPasskeyCredential(input.response?.id);
+    const user = credential ? store.getUserForAuth(credential.userId) : null;
+    const returnedUserHandle = input.response?.response?.userHandle;
+    const userHandleMatches = !returnedUserHandle
+      || (credential && safeEqual(String(returnedUserHandle), credential.webauthnUserID));
+    const eligible = challenge && credential && user && user.status === "active"
+      && userHandleMatches && (user.role !== "customer" || user.customer_status === "active");
+    let verification = null;
+    if (eligible) {
+      try {
+        verification = await passkeys.verifyAuthentication({
+          response: input.response,
+          expectedChallenge: challenge.challenge,
+          passkey: credential,
+        });
+      } catch (error) {
+        log("error", "passkey_login_verification_failed", { userId: user.id, error: error.code || error.message });
+      }
+    }
+    if (!eligible || !verification?.verified) {
+      if (!config.demoReadOnly && user) {
+        store.writeAudit({
+          customerId: user.customer_id,
+          userId: user.id,
+          actorRole: user.role,
+          action: "auth.passkey_failed",
+          detail: { stage: "assertion" },
+          ipAddress: ip,
+        });
+      }
+      sendJson(response, 401, { error: "invalid_passkey" });
+      return true;
+    }
+    store.updatePasskeyCounter(credential.id, verification.authenticationInfo.newCounter);
+    passkeyLoginLimiter.clear(ip);
+    const session = createLoginSession(request, user.id);
+    if (!config.demoReadOnly) {
+      store.writeAudit({
+        customerId: user.customer_id,
+        userId: user.id,
+        actorRole: user.role,
+        action: "auth.passkey_login",
+        detail: { credentialId: credential.id },
+        ipAddress: ip,
+      });
+      queueNewLoginNotice(user, request);
+    }
+    sendAuthenticated(response, session);
     return true;
   }
   if (pathname === "/api/auth/login" && request.method === "POST") {
@@ -1728,6 +1813,33 @@ async function routeAdmin(request, response, pathname) {
     sendJson(response, 200, { reset: true });
     return true;
   }
+  match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/passkeys\/reset$/);
+  if (match && request.method === "POST") {
+    if (!requireSecurityActionRate(request, response, session.user.id)) return true;
+    const targetUserId = decodeURIComponent(match[1]);
+    if (targetUserId === session.user.id) {
+      sendJson(response, 409, { error: "passkey_self_reset_forbidden" });
+      return true;
+    }
+    const { currentPassword } = await readBody(request);
+    if (!(await requireCurrentPassword(response, session.user.id, currentPassword))) return true;
+    const target = store.getUserForAuth(targetUserId);
+    if (!target) { sendJson(response, 404, { error: "user_not_found" }); return true; }
+    const removed = store.deleteAllPasskeys(targetUserId);
+    if (!removed) { sendJson(response, 409, { error: "passkey_not_found" }); return true; }
+    const revokedSessions = store.revokeUserSessions(targetUserId);
+    audit(request, session, "admin.user.passkeys_reset", {
+      customerId: target.customer_id,
+      detail: { targetUserId, removed, revokedSessions },
+    });
+    queueSecurityNotice(target, {
+      title: "Your passkeys were reset",
+      message: "An administrator removed every passkey from your Nimbus Direct account. Your active sessions were signed out.",
+      ipAddress: clientIp(request),
+    });
+    sendJson(response, 200, { reset: true, removed });
+    return true;
+  }
   match = pathname.match(/^\/api\/admin\/users\/([^/]+)\/invitation\/(resend|revoke)$/);
   if (match && request.method === "POST") {
     const targetUserId = decodeURIComponent(match[1]);
@@ -2060,6 +2172,10 @@ async function routeCustomer(request, response, pathname) {
       demoReadOnly: config.demoReadOnly,
       user,
       security: {
+        passkeys: {
+          enabled: passkeys.enabled,
+          items: store.listPasskeys(user.id),
+        },
         mfa: {
           ...store.getMfaStatus(user.id),
           requiredByPolicy: store.isMfaRequiredForUser(user),
@@ -2077,6 +2193,7 @@ async function routeCustomer(request, response, pathname) {
         mobileApi: true,
         rotatingRefreshTokens: true,
         integrationApiKeys: true,
+        passkeys: passkeys.enabled,
         directAssignments: true,
         proxmoxPools: false,
         consoleTickets: true,
@@ -2278,6 +2395,10 @@ async function routeCustomer(request, response, pathname) {
       notificationPreferences: store.getNotificationPreferences(user.id),
       emailDeliveryAvailable: store.getEmailSettings().enabled,
       security: {
+        passkeys: {
+          enabled: passkeys.enabled,
+          items: store.listPasskeys(user.id),
+        },
         mfa: {
           ...store.getMfaStatus(user.id),
           requiredByPolicy: store.isMfaRequiredForUser(user),
@@ -2300,6 +2421,7 @@ async function routeCustomer(request, response, pathname) {
         mobileApi: true,
         rotatingRefreshTokens: true,
         integrationApiKeys: true,
+        passkeys: passkeys.enabled,
         demoReadOnly: config.demoReadOnly,
       },
     });
@@ -3256,6 +3378,100 @@ async function routeCustomer(request, response, pathname) {
     return true;
   }
 
+  if (pathname === "/api/v1/security/passkeys/registration/options" && request.method === "POST") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const { currentPassword } = await readBody(request);
+    const authUser = await requireCurrentPassword(response, user.id, currentPassword);
+    if (!authUser) return true;
+    const options = await passkeys.registrationOptions(authUser, store.listPasskeys(user.id));
+    const challenge = store.createWebAuthnChallenge({
+      userId: user.id,
+      purpose: "registration",
+      challenge: options.challenge,
+    });
+    audit(request, session, "security.passkey_setup_started");
+    sendJson(response, 200, {
+      options,
+      challengeToken: challenge.token,
+      expiresAt: challenge.expiresAt,
+    });
+    return true;
+  }
+  if (pathname === "/api/v1/security/passkeys/registration/verify" && request.method === "POST") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const input = await readBody(request);
+    const challenge = store.consumeWebAuthnChallenge(input.challengeToken, "registration", { userId: user.id });
+    if (!challenge) {
+      sendJson(response, 401, { error: "invalid_passkey_challenge" });
+      return true;
+    }
+    let verification;
+    try {
+      verification = await passkeys.verifyRegistration({
+        response: input.response,
+        expectedChallenge: challenge.challenge,
+      });
+    } catch (error) {
+      log("error", "passkey_registration_verification_failed", { userId: user.id, error: error.code || error.message });
+      sendJson(response, 400, { error: "invalid_passkey" });
+      return true;
+    }
+    if (!verification.verified || !verification.registrationInfo) {
+      sendJson(response, 400, { error: "invalid_passkey" });
+      return true;
+    }
+    const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+    const passkey = store.createPasskey(user.id, {
+      id: credential.id,
+      webauthnUserID: user.id,
+      name: input.name,
+      publicKey: credential.publicKey,
+      counter: credential.counter,
+      transports: credential.transports,
+      deviceType: credentialDeviceType,
+      backedUp: credentialBackedUp,
+    });
+    const authUser = store.getUserForAuth(user.id);
+    audit(request, session, "security.passkey_registered", {
+      detail: { credentialId: passkey.id, name: passkey.name, backedUp: passkey.backedUp },
+    });
+    queueSecurityNotice(authUser, {
+      title: "A passkey was added",
+      message: `The passkey “${passkey.name}” can now sign in to your Nimbus Direct account without a password.`,
+      ipAddress: clientIp(request),
+    });
+    sendJson(response, 201, { passkey, passkeys: store.listPasskeys(user.id) });
+    return true;
+  }
+  let passkeyMatch = pathname.match(/^\/api\/v1\/security\/passkeys\/([^/]+)$/);
+  if (passkeyMatch && request.method === "PATCH") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const passkey = store.renamePasskey(user.id, decodeURIComponent(passkeyMatch[1]), (await readBody(request)).name);
+    audit(request, session, "security.passkey_renamed", { detail: { credentialId: passkey.id, name: passkey.name } });
+    sendJson(response, 200, { passkey, passkeys: store.listPasskeys(user.id) });
+    return true;
+  }
+  if (passkeyMatch && request.method === "DELETE") {
+    if (!requireCsrf(request, response, session) || !requireSecurityActionRate(request, response, user.id)) return true;
+    const input = await readBody(request);
+    const authUser = await requireCurrentPassword(response, user.id, input.currentPassword);
+    if (!authUser) return true;
+    const id = decodeURIComponent(passkeyMatch[1]);
+    const existing = store.getPasskeyCredential(id);
+    if (!existing || existing.userId !== user.id || !store.deletePasskey(user.id, id)) {
+      sendJson(response, 404, { error: "passkey_not_found" });
+      return true;
+    }
+    audit(request, session, "security.passkey_revoked", { detail: { credentialId: id, name: existing.name } });
+    queueSecurityNotice(authUser, {
+      title: "A passkey was removed",
+      message: `The passkey “${existing.name}” can no longer sign in to your Nimbus Direct account.`,
+      ipAddress: clientIp(request),
+    });
+    sendJson(response, 200, { passkeys: store.listPasskeys(user.id) });
+    return true;
+  }
+
   match = pathname.match(/^\/api\/v1\/tasks\/([^/]+)$/);
   if (match && request.method === "GET") {
     const task = store.getTask(decodeURIComponent(match[1]), user);
@@ -3428,6 +3644,7 @@ async function routeApi(request, response, pathname) {
         refreshTokenExpiresInSeconds: Math.floor(config.apiRefreshTokenTtlMs / 1000),
         refreshRotation: true,
         twoFactorAuthentication: true,
+        passkeyAuthentication: passkeys.enabled,
       },
       capabilities: {
         resources: true,
@@ -3441,6 +3658,7 @@ async function routeApi(request, response, pathname) {
         support: true,
         administration: true,
         integrationApiKeys: true,
+        passkeys: passkeys.enabled,
       },
       localization: {
         defaultLanguage,

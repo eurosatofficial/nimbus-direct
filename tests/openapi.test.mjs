@@ -4,7 +4,7 @@ import { nimbusOpenApi } from "../server/openapi.mjs";
 
 test("Nimbus API publishes a versioned mobile and administration contract", () => {
   assert.equal(nimbusOpenApi.openapi, "3.1.0");
-  assert.equal(nimbusOpenApi.info.version, "1.1.0");
+  assert.equal(nimbusOpenApi.info.version, "1.2.0");
   assert.deepEqual(nimbusOpenApi.security, [{ bearerAuth: [] }]);
   assert.deepEqual(nimbusOpenApi.paths["/auth/token"].post.security, []);
   assert.deepEqual(nimbusOpenApi.paths["/auth/refresh"].post.security, []);
@@ -15,6 +15,9 @@ test("Nimbus API publishes a versioned mobile and administration contract", () =
     "/api-keys",
     "/api-keys/preview",
     "/api-keys/{keyId}",
+    "/security/passkeys/registration/options",
+    "/security/passkeys/registration/verify",
+    "/security/passkeys/{passkeyId}",
     "/resources",
     "/resources/refresh",
     "/resources/{resourceId}",
@@ -28,6 +31,7 @@ test("Nimbus API publishes a versioned mobile and administration contract", () =
     "/admin/state",
     "/admin/assignments",
     "/admin/users/{userId}/api-access",
+    "/admin/users/{userId}/passkeys/reset",
     "/admin/users/{userId}/api-keys/{keyId}",
   ]) {
     assert.ok(nimbusOpenApi.paths[path], `missing OpenAPI path ${path}`);

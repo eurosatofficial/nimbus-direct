@@ -7,6 +7,7 @@ const KEYS = [
   "BOOTSTRAP_SUPPORT_EMAIL", "BOOTSTRAP_PLAN_NAME", "PROXMOX_REQUEST_TIMEOUT_MS", "RESOURCE_SYNC_SECONDS",
   "ISO_MAX_UPLOAD_MB", "ISO_UPLOAD_TIMEOUT_MINUTES", "EMAIL_SMTP_TIMEOUT_SECONDS", "EMAIL_QUEUE_INTERVAL_SECONDS",
   "API_ACCESS_TOKEN_MINUTES", "API_REFRESH_TOKEN_DAYS", "API_MAX_DEVICE_SESSIONS",
+  "WEBAUTHN_RP_ID", "WEBAUTHN_ORIGIN", "WEBAUTHN_RP_NAME",
   "ALLOW_DEMO_DATA", "DEMO_READ_ONLY",
 ];
 
@@ -40,6 +41,9 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     API_ACCESS_TOKEN_MINUTES: "20",
     API_REFRESH_TOKEN_DAYS: "45",
     API_MAX_DEVICE_SESSIONS: "7",
+    WEBAUTHN_RP_ID: "nimbus.example.com",
+    WEBAUTHN_ORIGIN: "https://nimbus.example.com",
+    WEBAUTHN_RP_NAME: "Example Nimbus",
     ALLOW_DEMO_DATA: "true",
     DEMO_READ_ONLY: "true",
   }, () => {
@@ -56,6 +60,12 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     assert.equal(config.apiAccessTokenTtlMs, 20 * 60 * 1000);
     assert.equal(config.apiRefreshTokenTtlMs, 45 * 24 * 60 * 60 * 1000);
     assert.equal(config.apiMaxDeviceSessions, 7);
+    assert.deepEqual(config.webauthn, {
+      enabled: true,
+      rpId: "nimbus.example.com",
+      origin: "https://nimbus.example.com",
+      rpName: "Example Nimbus",
+    });
     assert.equal(config.allowDemoData, true);
     assert.equal(config.demoReadOnly, true);
     assert.equal("globalProxmoxTenantId" in config, false);
@@ -86,4 +96,24 @@ test("native refresh lifetime must exceed the access-token lifetime", () => {
     API_ACCESS_TOKEN_MINUTES: String(60 * 24 * 31),
     API_REFRESH_TOKEN_DAYS: "30",
   }, () => assert.throws(() => readConfig(), /API_REFRESH_TOKEN_DAYS must be longer/));
+});
+
+test("passkey configuration requires a matching HTTPS relying-party origin", () => {
+  const base = {
+    NODE_ENV: "production",
+    APP_SECRET: "a-production-secret-with-at-least-32-characters",
+  };
+  withEnvironment({ ...base, WEBAUTHN_RP_ID: "nimbus.example.com" }, () => {
+    assert.throws(() => readConfig(), /require both WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN/);
+  });
+  withEnvironment({
+    ...base,
+    WEBAUTHN_RP_ID: "nimbus.example.com",
+    WEBAUTHN_ORIGIN: "http://nimbus.example.com",
+  }, () => assert.throws(() => readConfig(), /must use HTTPS/));
+  withEnvironment({
+    ...base,
+    WEBAUTHN_RP_ID: "other.example.com",
+    WEBAUTHN_ORIGIN: "https://nimbus.example.com",
+  }, () => assert.throws(() => readConfig(), /must match WEBAUTHN_ORIGIN/));
 });

@@ -7,6 +7,8 @@ test("public demo allows reads, session lifecycle, and a safe inventory refresh"
   assert.equal(isDemoReadOnlyRequestAllowed("HEAD", "/"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/login"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/mfa"), true);
+  assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/passkeys/options"), true);
+  assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/passkeys/verify"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/auth/logout"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/token"), true);
   assert.equal(isDemoReadOnlyRequestAllowed("POST", "/api/v1/auth/mfa"), true);
@@ -25,7 +27,7 @@ test("public demo refuses real cluster and SMTP configuration", () => {
     listClusters: () => [{ id: "demo-eu", apiUrl: "https://demo.invalid:8006" }],
     getEmailSettings: () => ({ configured: false }),
     getSecurityPolicy: () => ({ requireAdminMfa: false, requireCustomerMfa: false }),
-    listUsers: () => [{ mfaEnabled: false }],
+    listUsers: () => [{ mfaEnabled: false, passkeyCount: 0 }],
   };
   assert.doesNotThrow(() => assertDemoReadOnlyStore({ demoReadOnly: true }, safeStore));
   assert.doesNotThrow(() => assertDemoReadOnlyStore({ demoReadOnly: false }, {
@@ -43,5 +45,9 @@ test("public demo refuses real cluster and SMTP configuration", () => {
   assert.throws(() => assertDemoReadOnlyStore({ demoReadOnly: true }, {
     ...safeStore,
     getSecurityPolicy: () => ({ requireAdminMfa: true, requireCustomerMfa: false }),
-  }), /two-factor authentication/);
+  }), /two-factor\/passkey authentication/);
+  assert.throws(() => assertDemoReadOnlyStore({ demoReadOnly: true }, {
+    ...safeStore,
+    listUsers: () => [{ mfaEnabled: false, passkeyCount: 1 }],
+  }), /two-factor\/passkey authentication/);
 });

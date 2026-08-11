@@ -1,6 +1,6 @@
 {
   "name": "nimbus-direct-proxmox-panel",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.9.0",
@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@novnc/novnc": "1.7.0",
+    "@simplewebauthn/server": "13.3.2",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
     "qrcode": "1.5.4"
