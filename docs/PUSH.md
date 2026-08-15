@@ -12,7 +12,7 @@ Nimbus Direct supports three explicit modes:
 
 ```env
 PUSH_MODE=relay
-PUSH_RELAY_URL=https://the-official-relay-origin.example
+PUSH_RELAY_URL=https://push.liamjayden.dev
 PUSH_RELAY_TIMEOUT_SECONDS=10
 ```
 
