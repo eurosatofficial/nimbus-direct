@@ -135,6 +135,18 @@ function normalizePreferredLanguage(value, fallback = defaultLanguage) {
   return language;
 }
 
+function normalizePreferredTimeZone(value, fallback = "UTC") {
+  const timeZone = String(value || fallback).trim();
+  if (!timeZone || timeZone.length > 100) {
+    throw problem("Preferred timezone is invalid", "invalid_preferred_timezone");
+  }
+  try {
+    return new Intl.DateTimeFormat("en", { timeZone }).resolvedOptions().timeZone;
+  } catch {
+    throw problem("Preferred timezone is invalid", "invalid_preferred_timezone");
+  }
+}
+
 function preferredLanguageForRow(row) {
   const locale = normalizeLanguage(row?.preferred_locale);
   const legacy = normalizeLanguage(row?.preferred_language);
@@ -180,6 +192,7 @@ function publicUser(row) {
     supportEmail: row.support_email || "",
     planName: row.plan_name || "Managed infrastructure",
     preferredLanguage: preferredLanguageForRow(row),
+    preferredTimeZone: normalizePreferredTimeZone(row.preferred_timezone),
     mfaEnabled: Boolean(row.mfa_enabled),
     passkeyCount: Number(row.passkey_count || 0),
     passwordSet: row.password_set === undefined ? true : Boolean(row.password_set),
@@ -941,6 +954,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       password_set INTEGER NOT NULL DEFAULT 1,
       preferred_language TEXT NOT NULL DEFAULT 'en' CHECK(preferred_language IN ('en','de')),
       preferred_locale TEXT NOT NULL DEFAULT 'en',
+      preferred_timezone TEXT NOT NULL DEFAULT 'UTC',
       role TEXT NOT NULL CHECK(role IN ('admin','customer')),
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
       created_at INTEGER NOT NULL,
@@ -1603,6 +1617,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     database.exec("ALTER TABLE users ADD COLUMN preferred_locale TEXT NOT NULL DEFAULT 'en'");
     database.exec("UPDATE users SET preferred_locale=preferred_language");
   }
+  if (!userColumns.has("preferred_timezone")) database.exec("ALTER TABLE users ADD COLUMN preferred_timezone TEXT NOT NULL DEFAULT 'UTC'");
   const apiPolicyColumns = new Set(database.prepare("PRAGMA table_info(user_api_policies)").all().map((column) => column.name));
   if (!apiPolicyColumns.has("all_visible_resources")) database.exec("ALTER TABLE user_api_policies ADD COLUMN all_visible_resources INTEGER NOT NULL DEFAULT 0");
   const emailSettingsColumns = new Set(database.prepare("PRAGMA table_info(email_settings)").all().map((column) => column.name));
@@ -2340,9 +2355,12 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const preferredLanguage = payload.preferredLanguage === undefined
         ? preferredLanguageForRow(row)
         : normalizePreferredLanguage(payload.preferredLanguage);
+      const preferredTimeZone = payload.preferredTimeZone === undefined
+        ? normalizePreferredTimeZone(row.preferred_timezone)
+        : normalizePreferredTimeZone(payload.preferredTimeZone);
       if (!name || name.length > 100) throw problem("Display name must contain 1-100 characters");
-      database.prepare("UPDATE users SET display_name=?,preferred_language=?,preferred_locale=?,updated_at=? WHERE id=?")
-        .run(name, legacyPreferredLanguage(preferredLanguage), preferredLanguage, Date.now(), id);
+      database.prepare("UPDATE users SET display_name=?,preferred_language=?,preferred_locale=?,preferred_timezone=?,updated_at=? WHERE id=?")
+        .run(name, legacyPreferredLanguage(preferredLanguage), preferredLanguage, preferredTimeZone, Date.now(), id);
       return publicUser(getUserRow.get(id));
     },
     async updatePassword(id, password, { revokeSessions = true } = {}) {

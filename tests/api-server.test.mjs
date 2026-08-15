@@ -65,6 +65,8 @@ test("Nimbus API authenticates a device and preserves assignment authorization",
     const discovery = await request("/api/v1");
     assert.equal(discovery.response.status, 200);
     assert.equal(discovery.payload.version, "v1");
+    assert.deepEqual(discovery.payload.privacy, { operatorPolicyUrl: null });
+    assert.equal("privacyPolicyUrl" in discovery.payload, false);
     assert.equal(discovery.payload.authentication.refreshRotation, true);
     assert.equal(discovery.payload.localization.defaultLanguage, "en");
     assert.deepEqual(

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/dark-mode/web-overview.png" alt="Nimbus Dashboard" width="800">
+  <img src="docs/screenshots/overview.jpg" alt="Nimbus Dashboard" width="800">
 </p>
 
 # Nimbus Direct
@@ -160,6 +160,7 @@ DEMO_READ_ONLY=false
 WEBAUTHN_RP_ID=nimbus.example.com
 WEBAUTHN_ORIGIN=https://nimbus.example.com
 WEBAUTHN_RP_NAME=Nimbus Direct
+PRIVACY_POLICY_URL=https://provider.example/privacy
 
 BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 BOOTSTRAP_ADMIN_PASSWORD=use-a-unique-password-of-at-least-12-characters
@@ -179,6 +180,18 @@ their browser. Leave both values empty to keep passkeys disabled. Changing the
 hostname or relying-party ID later prevents existing passkeys from working, so
 choose the permanent public hostname before enrollment. Passkeys protect Nimbus
 accounts only and require no additional Proxmox permission.
+
+`PRIVACY_POLICY_URL` is optional and belongs only to the operator of this
+Nimbus server. Set it to the operator's public HTTPS privacy policy. The web
+panel presents it on the login and account-settings screens, and the anonymous
+`GET /api/v1` discovery response exposes it as
+`privacy.operatorPolicyUrl` so the iOS app can show the same operator policy
+before authentication. If it is empty, the operator-specific link is hidden.
+
+This value never configures or replaces the separate Nimbus Direct iOS app
+privacy policy. The app privacy policy is a fixed developer-controlled link
+compiled into the iOS app and remains available even when no server is
+configured or reachable.
 
 ### 2. Create a least-privilege Proxmox service account
 
@@ -524,7 +537,7 @@ Mount only the public CA certificate. Never copy a private CA key into Nimbus an
 
 SQLite data is stored in the `nimbus-data` volume. Stop Nimbus before copying it, or use a SQLite-aware backup process. Back up both the database and `APP_SECRET`, store them separately, and test restoration.
 
-The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`, native Nimbus API device/refresh-token state in `migrations/014_nimbus_api.sql`, administrator-governed user integration keys in `migrations/015_user_api_keys.sql`, encrypted native push-device registrations in `migrations/016_mobile_push.sql`, hybrid console metadata in `migrations/017_hybrid_console.sql`, grouped maintenance action locks in `migrations/018_maintenance_action_locks.sql`, persisted account language preferences in `migrations/019_user_language.sql`, extensible language codes in `migrations/020_language_catalogues.sql`, maintenance-window timezones in `migrations/021_maintenance_timezone.sql`, and WebAuthn public-key credentials plus single-use challenges in `migrations/022_passkeys.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
+The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`, native Nimbus API device/refresh-token state in `migrations/014_nimbus_api.sql`, administrator-governed user integration keys in `migrations/015_user_api_keys.sql`, encrypted native push-device registrations in `migrations/016_mobile_push.sql`, hybrid console metadata in `migrations/017_hybrid_console.sql`, grouped maintenance action locks in `migrations/018_maintenance_action_locks.sql`, persisted account language preferences in `migrations/019_user_language.sql`, extensible language codes in `migrations/020_language_catalogues.sql`, maintenance-window timezones in `migrations/021_maintenance_timezone.sql`, WebAuthn public-key credentials plus single-use challenges in `migrations/022_passkeys.sql`, and per-account email timezones in `migrations/023_user_timezone.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
 
 ## Operations
 

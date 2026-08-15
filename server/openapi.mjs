@@ -112,6 +112,7 @@ export const nimbusOpenApi = {
       get: operation({
         tags: "System",
         summary: "Discover API version and capabilities",
+        description: "Public discovery includes privacy.operatorPolicyUrl when this self-hosted server's operator configured a privacy policy. A null value means clients must hide the operator-specific link; it is not a fallback for the separate iOS app privacy policy.",
         public: true,
       }),
     },
@@ -186,13 +187,14 @@ export const nimbusOpenApi = {
     "/profile": {
       patch: operation({
         tags: "Account",
-        summary: "Update the current user's profile and email language",
+        summary: "Update the current user's profile, email language, and timezone",
         body: {
           type: "object",
           minProperties: 1,
           properties: {
             displayName: { type: "string" },
             preferredLanguage: { type: "string", description: "Language code installed in public/locales/languages.json" },
+            preferredTimeZone: { type: "string", description: "IANA timezone used for account email timestamps" },
           },
         },
       }),

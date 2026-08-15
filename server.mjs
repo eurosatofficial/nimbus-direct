@@ -464,6 +464,7 @@ function queueSecurityNotice(user, { title, message, ipAddress = null }) {
       message,
       ipAddress,
       language: user.preferred_language || user.preferredLanguage,
+      timeZone: user.preferred_timezone || user.preferredTimeZone,
     });
     store.queueEmail({
       to: user.email,
@@ -511,6 +512,7 @@ function queueInvitationEmail(user, accountToken, createdBy) {
     actionUrl: accountActionUrl(settings.appUrl, "invitation", accountToken.token),
     expiresAt: accountToken.expiresAt,
     language: user.preferredLanguage,
+    timeZone: user.preferredTimeZone,
   });
   const job = store.queueEmail({
     to: user.email,
@@ -530,6 +532,7 @@ function queuePasswordResetEmail(user, accountToken) {
     actionUrl: accountActionUrl(settings.appUrl, "password_reset", accountToken.token),
     expiresAt: accountToken.expiresAt,
     language: user.preferred_language || user.preferredLanguage,
+    timeZone: user.preferred_timezone || user.preferredTimeZone,
   });
   const job = store.queueEmail({
     to: user.email,
@@ -3602,7 +3605,7 @@ async function routeCustomer(request, response, pathname) {
   if (pathname === "/api/v1/profile" && request.method === "PATCH") {
     if (!requireCsrf(request, response, session)) return true;
     const input = await readBody(request);
-    if (input.displayName === undefined && input.preferredLanguage === undefined) {
+    if (input.displayName === undefined && input.preferredLanguage === undefined && input.preferredTimeZone === undefined) {
       sendJson(response, 400, { error: "profile_update_empty" }); return true;
     }
     const user = store.updateProfile(session.user.id, input);
@@ -3663,6 +3666,9 @@ async function routeApi(request, response, pathname) {
       localization: {
         defaultLanguage,
         languages: availableLanguages,
+      },
+      privacy: {
+        operatorPolicyUrl: config.operatorPrivacyPolicyUrl || null,
       },
       demoReadOnly: config.demoReadOnly,
     });

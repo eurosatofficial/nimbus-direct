@@ -66,7 +66,6 @@ function normalizeEmailTimeZone(value) {
 function emailDate(value, language, timeZone = null) {
   const date = value instanceof Date ? value : new Date(value);
   const lang = normalizeEmailLanguage(language);
-  if (lang === defaultLanguage && !timeZone) return date.toISOString();
   return new Intl.DateTimeFormat(localeFor(lang), {
     day: "2-digit", month: "2-digit", year: "numeric",
     hour: "2-digit", minute: "2-digit",
@@ -96,7 +95,7 @@ function localizeSecurityCopy(value, language) {
   return emailCopy(language, text);
 }
 
-export function testEmailTemplate(settings, recipient, language = "en") {
+export function testEmailTemplate(settings, recipient, language = "en", timeZone = "UTC") {
   const lang = normalizeEmailLanguage(language);
   const sentAt = new Date();
   const text = [
@@ -105,7 +104,7 @@ export function testEmailTemplate(settings, recipient, language = "en") {
     emailCopy(lang, "This test was sent to {recipient}.", { recipient }),
     `${emailCopy(lang, "SMTP endpoint")}: ${settings.host}:${settings.port}`,
     `${emailCopy(lang, "Encryption")}: ${settings.security === "tls" ? "TLS" : "STARTTLS"}`,
-    `${emailCopy(lang, "Sent")}: ${emailDate(sentAt, lang)}`,
+    `${emailCopy(lang, "Sent")}: ${emailDate(sentAt, lang, timeZone)}`,
     "",
     emailCopy(lang, "You can now use this delivery channel for future account and infrastructure notifications."),
   ].join("\n");
@@ -125,7 +124,7 @@ export function testEmailTemplate(settings, recipient, language = "en") {
             <tr><td style="color:#8a93a8;font-size:12px">${escapeHtml(emailCopy(lang, "Encryption"))}</td><td align="right" style="font-size:13px;font-weight:700">${settings.security === "tls" ? "TLS" : "STARTTLS"}</td></tr>
           </table>
         </td></tr>
-        <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">${escapeHtml(emailCopy(lang, "Sent by Nimbus Direct at {date}", { date: emailDate(sentAt, lang) }))}</td></tr>
+        <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">${escapeHtml(emailCopy(lang, "Sent by Nimbus Direct at {date}", { date: emailDate(sentAt, lang, timeZone) }))}</td></tr>
       </table>
     </td></tr>
   </table>
@@ -137,7 +136,7 @@ export function testEmailTemplate(settings, recipient, language = "en") {
   };
 }
 
-export function securityEmailTemplate({ displayName, title, message, ipAddress = null, occurredAt = new Date(), language = "en" }) {
+export function securityEmailTemplate({ displayName, title, message, ipAddress = null, occurredAt = new Date(), language = "en", timeZone = "UTC" }) {
   const lang = normalizeEmailLanguage(language);
   const greeting = emailGreeting(lang, displayName);
   const safeTitle = oneLine(localizeSecurityCopy(title, lang), "Security email title", 160);
@@ -149,7 +148,7 @@ export function securityEmailTemplate({ displayName, title, message, ipAddress =
     safeTitle,
     safeMessage,
     "",
-    `${emailCopy(lang, "Time")}: ${emailDate(time, lang)}`,
+    `${emailCopy(lang, "Time")}: ${emailDate(time, lang, timeZone)}`,
     ipAddress ? `${emailCopy(lang, "IP address")}: ${ipAddress}` : null,
     "",
     emailCopy(lang, "If you did not make this change, contact your infrastructure provider immediately and change your Nimbus Direct password."),
@@ -165,7 +164,7 @@ export function securityEmailTemplate({ displayName, title, message, ipAddress =
           <h1 style="margin:18px 0 10px;font-size:26px;line-height:1.25">${escapeHtml(safeTitle)}</h1>
           <p style="margin:0 0 22px;color:#667087;font-size:15px;line-height:1.65">${escapeHtml(greeting)} ${escapeHtml(safeMessage)}</p>
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0 8px">
-            <tr><td style="color:#8a93a8;font-size:12px">${escapeHtml(emailCopy(lang, "Time"))}</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(emailDate(time, lang))}</td></tr>
+            <tr><td style="color:#8a93a8;font-size:12px">${escapeHtml(emailCopy(lang, "Time"))}</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(emailDate(time, lang, timeZone))}</td></tr>
             ${ipAddress ? `<tr><td style="color:#8a93a8;font-size:12px">${escapeHtml(emailCopy(lang, "IP address"))}</td><td align="right" style="font-size:13px;font-weight:700">${escapeHtml(ipAddress)}</td></tr>` : ""}
           </table>
           <div style="margin-top:24px;padding:15px 16px;border-radius:12px;background:#fff4e8;color:#8a531d;font-size:13px;line-height:1.55">${escapeHtml(emailCopy(lang, "If you did not make this change, contact your infrastructure provider immediately and change your Nimbus Direct password."))}</div>
@@ -360,6 +359,7 @@ function accountActionEmailTemplate({
   expiresAt,
   ignoreMessage,
   language = "en",
+  timeZone = "UTC",
 }) {
   const lang = normalizeEmailLanguage(language);
   const greeting = emailGreeting(lang, displayName);
@@ -376,7 +376,7 @@ function accountActionEmailTemplate({
     safeMessage,
     "",
     `${actionLabel}: ${safeUrl}`,
-    emailCopy(lang, "This link expires at {date} and can be used once.", { date: emailDate(expiry, lang) }),
+    emailCopy(lang, "This link expires at {date} and can be used once.", { date: emailDate(expiry, lang, timeZone) }),
     "",
     ignoreMessage,
   ].join("\n");
@@ -391,7 +391,7 @@ function accountActionEmailTemplate({
           <h1 style="margin:18px 0 10px;font-size:26px;line-height:1.25">${escapeHtml(safeTitle)}</h1>
           <p style="margin:0 0 22px;color:#667087;font-size:15px;line-height:1.65">${escapeHtml(greeting)} ${escapeHtml(safeMessage)}</p>
           <table role="presentation" cellspacing="0" cellpadding="0"><tr><td style="border-radius:10px;background:#5b67e8"><a href="${escapeHtml(safeUrl)}" style="padding:13px 20px;display:inline-block;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700">${escapeHtml(actionLabel)}</a></td></tr></table>
-          <p style="margin:20px 0 0;color:#8a93a8;font-size:12px;line-height:1.55">${escapeHtml(emailCopy(lang, "This private link expires at {date} and can be used once.", { date: emailDate(expiry, lang) }))}</p>
+          <p style="margin:20px 0 0;color:#8a93a8;font-size:12px;line-height:1.55">${escapeHtml(emailCopy(lang, "This private link expires at {date} and can be used once.", { date: emailDate(expiry, lang, timeZone) }))}</p>
           <div style="margin-top:22px;padding:14px 16px;border-radius:12px;background:#f7f8fb;color:#717b90;font-size:12px;line-height:1.55">${escapeHtml(ignoreMessage)}</div>
         </td></tr>
         <tr><td style="padding:18px 28px;border-top:1px solid #edf0f5;color:#929aad;font-size:11px">${escapeHtml(emailCopy(lang, "Automatic account message from Nimbus Direct"))}</td></tr>
@@ -402,7 +402,7 @@ function accountActionEmailTemplate({
   return { subject: safeSubject, text, html };
 }
 
-export function invitationEmailTemplate({ displayName, customerName, actionUrl, expiresAt, language = "en" }) {
+export function invitationEmailTemplate({ displayName, customerName, actionUrl, expiresAt, language = "en", timeZone = "UTC" }) {
   const lang = normalizeEmailLanguage(language);
   return accountActionEmailTemplate({
     displayName,
@@ -417,10 +417,11 @@ export function invitationEmailTemplate({ displayName, customerName, actionUrl, 
     expiresAt,
     ignoreMessage: emailCopy(lang, "If you were not expecting this invitation, you can safely ignore this email."),
     language: lang,
+    timeZone,
   });
 }
 
-export function passwordResetEmailTemplate({ displayName, actionUrl, expiresAt, language = "en" }) {
+export function passwordResetEmailTemplate({ displayName, actionUrl, expiresAt, language = "en", timeZone = "UTC" }) {
   const lang = normalizeEmailLanguage(language);
   return accountActionEmailTemplate({
     displayName,
@@ -433,6 +434,7 @@ export function passwordResetEmailTemplate({ displayName, actionUrl, expiresAt, 
     expiresAt,
     ignoreMessage: emailCopy(lang, "If you did not request this reset, no action is required and your current password remains valid."),
     language: lang,
+    timeZone,
   });
 }
 
@@ -770,7 +772,8 @@ export function createEmailService({
   async function sendTest(recipient, createdBy) {
     const settings = connection({ allowDisabled: true });
     const to = normalizeMailbox(recipient, "Test recipient");
-    const content = testEmailTemplate(settings, to, store.getUser(createdBy)?.preferredLanguage);
+    const user = store.getUser(createdBy);
+    const content = testEmailTemplate(settings, to, user?.preferredLanguage, user?.preferredTimeZone);
     const job = store.queueEmail({
       to,
       ...content,

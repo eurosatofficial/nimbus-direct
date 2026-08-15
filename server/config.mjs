@@ -49,6 +49,7 @@ export function readConfig() {
   }
   const webauthnRpId = String(process.env.WEBAUTHN_RP_ID || "").trim().toLowerCase();
   const webauthnOriginInput = String(process.env.WEBAUTHN_ORIGIN || "").trim();
+  const operatorPrivacyPolicyUrlInput = String(process.env.PRIVACY_POLICY_URL || "").trim();
   if (Boolean(webauthnRpId) !== Boolean(webauthnOriginInput)) {
     throw new Error("Passkeys require both WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN");
   }
@@ -70,6 +71,18 @@ export function readConfig() {
     }
     webauthnOrigin = parsed.origin;
   }
+  let operatorPrivacyPolicyUrl = "";
+  if (operatorPrivacyPolicyUrlInput) {
+    let parsed;
+    try { parsed = new URL(operatorPrivacyPolicyUrlInput); }
+    catch { throw new Error("PRIVACY_POLICY_URL must be a valid absolute URL"); }
+    const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+    if (parsed.protocol !== "https:" && !localHttp) throw new Error("PRIVACY_POLICY_URL must use HTTPS");
+    if (parsed.username || parsed.password || parsed.hash) {
+      throw new Error("PRIVACY_POLICY_URL must not contain credentials or a fragment");
+    }
+    operatorPrivacyPolicyUrl = parsed.href;
+  }
   let apnsPrivateKey = "";
   if (apnsPrivateKeyBase64) {
     try { apnsPrivateKey = Buffer.from(apnsPrivateKeyBase64, "base64").toString("utf8"); }
@@ -86,6 +99,7 @@ export function readConfig() {
     appSecret,
     secureCookies: boolean(process.env.SESSION_COOKIE_SECURE, production),
     trustProxy: boolean(process.env.TRUST_PROXY, false),
+    operatorPrivacyPolicyUrl,
     sessionTtlMs: integer(process.env.SESSION_TTL_HOURS, 12) * 60 * 60 * 1000,
     apiAccessTokenTtlMs,
     apiRefreshTokenTtlMs,

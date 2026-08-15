@@ -8,6 +8,7 @@ const KEYS = [
   "ISO_MAX_UPLOAD_MB", "ISO_UPLOAD_TIMEOUT_MINUTES", "EMAIL_SMTP_TIMEOUT_SECONDS", "EMAIL_QUEUE_INTERVAL_SECONDS",
   "API_ACCESS_TOKEN_MINUTES", "API_REFRESH_TOKEN_DAYS", "API_MAX_DEVICE_SESSIONS",
   "WEBAUTHN_RP_ID", "WEBAUTHN_ORIGIN", "WEBAUTHN_RP_NAME",
+  "PRIVACY_POLICY_URL",
   "ALLOW_DEMO_DATA", "DEMO_READ_ONLY",
 ];
 
@@ -44,6 +45,7 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
     WEBAUTHN_RP_ID: "nimbus.example.com",
     WEBAUTHN_ORIGIN: "https://nimbus.example.com",
     WEBAUTHN_RP_NAME: "Example Nimbus",
+    PRIVACY_POLICY_URL: "https://legal.example.com/nimbus/privacy/",
     ALLOW_DEMO_DATA: "true",
     DEMO_READ_ONLY: "true",
   }, () => {
@@ -66,9 +68,23 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
       origin: "https://nimbus.example.com",
       rpName: "Example Nimbus",
     });
+    assert.equal(config.operatorPrivacyPolicyUrl, "https://legal.example.com/nimbus/privacy/");
     assert.equal(config.allowDemoData, true);
     assert.equal(config.demoReadOnly, true);
     assert.equal("globalProxmoxTenantId" in config, false);
+  });
+});
+
+test("privacy policy URL requires a safe HTTPS destination", () => {
+  const base = {
+    NODE_ENV: "production",
+    APP_SECRET: "a-production-secret-with-at-least-32-characters",
+  };
+  withEnvironment({ ...base, PRIVACY_POLICY_URL: "not a URL" }, () => {
+    assert.throws(() => readConfig(), /valid absolute URL/);
+  });
+  withEnvironment({ ...base, PRIVACY_POLICY_URL: "http://privacy.example.com/" }, () => {
+    assert.throws(() => readConfig(), /must use HTTPS/);
   });
 });
 

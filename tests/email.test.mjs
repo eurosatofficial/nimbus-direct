@@ -145,12 +145,15 @@ test("security notices use the branded template without trusting user content", 
     message: "Authenticator protection is active.",
     ipAddress: "192.0.2.44",
     occurredAt: new Date("2026-07-25T12:00:00.000Z"),
+    timeZone: "Europe/Berlin",
   });
   assert.equal(content.subject, "Nimbus Direct: Two-factor authentication enabled");
   assert.match(content.text, /192\.0\.2\.44/);
   assert.match(content.html, /Account security/);
   assert.equal(content.html.includes("<Operator>"), false);
   assert.match(content.html, /&lt;Operator&gt;/);
+  assert.match(content.text, /07\/25\/2026, 02:00 PM GMT\+2/);
+  assert.equal(content.text.includes("2026-07-25T12:00:00.000Z"), false);
 });
 
 test("maintenance emails escape customer-facing content and describe the service window", () => {

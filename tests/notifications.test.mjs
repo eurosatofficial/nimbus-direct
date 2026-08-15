@@ -127,7 +127,7 @@ test("notification service delivers once per user preference and queues the bran
     const content = notificationEmailTemplate(result.event, store.getResource(resourceId));
     assert.match(content.html, /nimbus <span[^>]*>direct/);
     assert.match(content.text, /QEMU 101/);
-    const german = notificationEmailTemplate(result.event, store.getResource(resourceId), "de");
+    const german = notificationEmailTemplate(result.event, store.getResource(resourceId), "de", "Europe/Berlin");
     assert.equal(german.subject, "Neustart abgeschlossen");
     assert.match(german.text, /erfolgreich abgeschlossen/);
     assert.match(german.html, /lang="de"/);

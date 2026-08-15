@@ -16,6 +16,7 @@ const state = {
   user: null,
   csrfToken: null,
   demoReadOnly: false,
+  operatorPrivacyPolicyUrl: null,
   dashboard: null,
   network: null,
   notifications: null,
@@ -128,6 +129,36 @@ const appearanceOptions = {
   light: { label: "Light", icon: "☀", description: "Always use light" },
   dark: { label: "Dark", icon: "☾", description: "Always use dark" },
 };
+
+function normalizedOperatorPrivacyPolicyUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value), location.origin);
+    const localHttp = url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+    if (url.protocol !== "https:" && !localHttp) throw new Error("insecure privacy URL");
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function refreshOperatorPrivacyPolicyLinks() {
+  const href = normalizedOperatorPrivacyPolicyUrl(state.operatorPrivacyPolicyUrl);
+  document.querySelectorAll("[data-operator-privacy-link]").forEach((link) => {
+    link.hidden = !href;
+    if (href) link.href = href;
+    else link.removeAttribute("href");
+  });
+}
+
+function operatorPrivacyPolicyPanelMarkup() {
+  const href = normalizedOperatorPrivacyPolicyUrl(state.operatorPrivacyPolicyUrl);
+  if (!href) return "";
+  return `<section class="panel form-panel privacy-policy-panel">
+    <div class="security-heading"><span class="security-icon enabled">◇</span><span><h2>Server Operator Privacy Policy</h2><p>Review the privacy policy supplied by the operator of this Nimbus server.</p></span></div>
+    <a class="button secondary" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" data-operator-privacy-link>Open operator privacy policy</a>
+  </section>`;
+}
 
 function currentAppearance() {
   return window.NimbusAppearance?.get?.() || "system";
@@ -467,6 +498,7 @@ function friendlyError(error) {
     email_disabled: "Email delivery is currently disabled.",
     invalid_email_address: "Enter a valid email address.",
     invalid_preferred_language: "Choose an installed language for account emails.",
+    invalid_preferred_timezone: "Choose a valid timezone for account emails.",
     email_in_use: "A Nimbus account already uses that email address.",
     customer_disabled: "Activate the customer account before sending an invitation.",
     invalid_smtp_host: "Enter an SMTP hostname without a protocol or path.",
@@ -597,11 +629,12 @@ async function loadSession() {
 async function syncPreferredLanguage({ quiet = true } = {}) {
   if (!state.user || state.demoReadOnly) return;
   const preferredLanguage = getResolvedLanguage();
-  if (state.user.preferredLanguage === preferredLanguage) return;
+  const preferredTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  if (state.user.preferredLanguage === preferredLanguage && state.user.preferredTimeZone === preferredTimeZone) return;
   try {
     const result = await apiFetch("/api/v1/profile", {
       method: "PATCH",
-      body: { preferredLanguage },
+      body: { preferredLanguage, preferredTimeZone },
     });
     state.user = result.user;
     if (state.dashboard) state.dashboard.user = result.user;
@@ -1675,9 +1708,10 @@ function renderSettings() {
     <button class="row-button ${item.current ? "danger" : ""}" type="button" data-revoke-session="${escapeHtml(item.id)}">${item.current ? "Sign out" : "Revoke"}</button>
   </article>`).join("");
   if (enrollmentRequired) {
-    els.viewRoot.innerHTML = `${languagePanelMarkup()}${appearancePanelMarkup()}${policyBanner}${mfaPanel}`;
+    els.viewRoot.innerHTML = `${languagePanelMarkup()}${appearancePanelMarkup()}${policyBanner}${mfaPanel}${operatorPrivacyPolicyPanelMarkup()}`;
     refreshLanguageControls();
     refreshAppearanceControls();
+    refreshOperatorPrivacyPolicyLinks();
     return;
   }
   els.viewRoot.innerHTML = `${languagePanelMarkup()}${appearancePanelMarkup()}${recoveryPanel}<section class="layout-grid equal">
@@ -1686,9 +1720,10 @@ function renderSettings() {
   </section>
   <div class="settings-security-grid">${passkeyPanel}${mfaPanel}
     <section class="panel form-panel security-panel"><div class="security-heading"><span class="security-icon">◷</span><span><h2>Active sessions</h2><p>Review devices signed in to this account.</p></span><span class="pill">${plural(sessions.length, "session")}</span></div><div class="session-list">${sessionRows || `<p>No active sessions.</p>`}</div>${sessions.length > 1 ? `<form id="revokeOtherSessionsForm"><div class="field"><label for="revokeSessionsPassword">Current password</label><input id="revokeSessionsPassword" name="currentPassword" type="password" required autocomplete="current-password"></div><div class="form-actions"><button class="button secondary" type="submit">Revoke all other sessions</button><p class="form-message"></p></div></form>` : ""}</section>
-  </div>${apiKeyCenterMarkup(mfa)}`;
+  </div>${apiKeyCenterMarkup(mfa)}${operatorPrivacyPolicyPanelMarkup()}`;
   refreshLanguageControls();
   refreshAppearanceControls();
+  refreshOperatorPrivacyPolicyLinks();
 }
 
 function operationsStatusPill(value) {
@@ -2963,6 +2998,13 @@ async function initializeAccountFlow(purpose, token) {
 }
 
 async function initializeApp() {
+  try {
+    const discovery = await apiFetch("/api/v1");
+    state.operatorPrivacyPolicyUrl = discovery.privacy?.operatorPolicyUrl || null;
+  } catch {
+    state.operatorPrivacyPolicyUrl = null;
+  }
+  refreshOperatorPrivacyPolicyLinks();
   void configurePasskeyLogin();
   const params = new URLSearchParams(location.search);
   const inviteToken = params.get("invite");

@@ -104,6 +104,9 @@ svg { display: block; }
 .auth-card input { width: 100%; min-height: 46px; padding: 0 13px; border: 1px solid #d8dde7; border-radius: 9px; background: #fff; }
 .auth-card input:focus { border-color: var(--primary); outline: 0; box-shadow: var(--focus); }
 .auth-card > small { margin-top: 20px; display: block; color: var(--muted); font-size: 12px; text-align: center; }
+.auth-policy-link { width: fit-content; margin: 12px auto 0; display: flex; align-items: center; gap: 7px; color: var(--primary); font-size: 11px; font-weight: 800; text-decoration: none; }
+.auth-policy-link::before { content: "◇"; }
+.auth-policy-link:hover { text-decoration: underline; }
 .auth-submit { width: 100%; margin-top: 9px; }
 .auth-link { justify-self: center; padding: 8px; border: 0; color: var(--primary); background: transparent; font: 700 12px/1.2 Inter, sans-serif; cursor: pointer; }
 .auth-link:hover { text-decoration: underline; }
@@ -504,6 +507,9 @@ body.authenticated .auth-view { display: none; }
 
 .settings-security-grid { margin-top: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
 .security-panel { min-width: 0; }
+.privacy-policy-panel { margin-top: 18px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.privacy-policy-panel .security-heading { flex: 1; }
+.privacy-policy-panel .button { flex: 0 0 auto; }
 .security-heading { margin-bottom: 20px; display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 12px; }
 .security-heading h2, .security-heading p { margin: 0; }
 .security-heading p { margin-top: 3px; color: var(--muted); font-size: 11px; }
@@ -1696,4 +1702,5 @@ body.authenticated .auth-view { display: none; }
 @media (max-width: 720px) {
   .appearance-options { grid-template-columns: 1fr; }
   .appearance-option { min-height: 66px; }
+  .privacy-policy-panel { align-items: stretch; flex-direction: column; }
 }

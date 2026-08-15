@@ -35,7 +35,16 @@ test("invitations are single-use, hashed at rest, and activate a pending account
     });
     assert.equal(invited.passwordSet, false);
     assert.equal(invited.preferredLanguage, "de");
-    assert.equal(store.updateProfile(invited.id, { preferredLanguage: "en" }).preferredLanguage, "en");
+    const updatedProfile = store.updateProfile(invited.id, {
+      preferredLanguage: "en",
+      preferredTimeZone: "Europe/Berlin",
+    });
+    assert.equal(updatedProfile.preferredLanguage, "en");
+    assert.equal(updatedProfile.preferredTimeZone, "Europe/Berlin");
+    assert.throws(
+      () => store.updateProfile(invited.id, { preferredTimeZone: "Not/A-Timezone" }),
+      (error) => error.code === "invalid_preferred_timezone",
+    );
     assert.equal(store.findUserForLogin(invited.email).password_set, 0);
 
     const first = store.createAccountToken({

@@ -98,7 +98,7 @@ function categoryEnabled(preferences, category) {
   }[category] !== false;
 }
 
-export function notificationEmailTemplate(event, resource, language = "en") {
+export function notificationEmailTemplate(event, resource, language = "en", timeZone = "UTC") {
   const lang = normalizeLanguage(language) || defaultLanguage;
   event = localizedNotificationEvent(event, resource, lang);
   const sentAt = new Date();
@@ -115,7 +115,7 @@ export function notificationEmailTemplate(event, resource, language = "en") {
   const sentDate = new Intl.DateTimeFormat(localeFor(lang), {
     day: "2-digit", month: "2-digit", year: "numeric",
     hour: "2-digit", minute: "2-digit", second: "2-digit",
-    timeZone: "UTC", timeZoneName: "short",
+    timeZone, timeZoneName: "short",
   }).format(sentAt);
   const text = [
     event.title,
@@ -173,7 +173,7 @@ export function createNotificationService({
       deliveries += 1;
       if (sendEmail) {
         try {
-          const content = notificationEmailTemplate(created.event, resource, user.preferredLanguage);
+          const content = notificationEmailTemplate(created.event, resource, user.preferredLanguage, user.preferredTimeZone);
           const job = store.queueEmail({
             to: user.email,
             ...content,
