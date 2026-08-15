@@ -131,7 +131,7 @@ const email = createEmailService({
   transport: createSmtpTransport({ timeoutMs: config.emailSmtpTimeoutMs }),
   queueIntervalMs: config.emailQueueIntervalMs,
 });
-const push = createPushService({ store, config: config.apns, log });
+const push = createPushService({ store, config: config.push, log });
 const notifications = createNotificationService({ store, email, push, log });
 
 function sendJson(response, status, payload, extraHeaders = {}) {

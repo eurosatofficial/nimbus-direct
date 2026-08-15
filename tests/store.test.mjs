@@ -114,6 +114,21 @@ test("direct assignments authorize by customer, resource, and permission", async
       assert.equal(store.unregisterPushDevice(betaUser.id, pushToken), true);
       assert.equal(store.listPushDevices(betaUser.id).length, 0);
 
+      const relayPrivateKey = "test-only encrypted relay identity";
+      store.savePushRelayCredential({
+        installationId: "ndi_test-installation",
+        publicKey: "-----BEGIN PUBLIC KEY-----\npublic relay identity\n-----END PUBLIC KEY-----",
+        privateKey: relayPrivateKey,
+      });
+      const relayRow = store.database.prepare("SELECT * FROM push_relay_credentials").get();
+      assert.equal(relayRow.private_key_encrypted.includes("test-only encrypted relay identity"), false);
+      assert.equal(store.getPushRelayCredential().privateKey, relayPrivateKey);
+      assert.equal(store.getPushRelayCredential().registeredAt, null);
+      store.markPushRelayRegistered("ndi_test-installation");
+      assert.ok(store.getPushRelayCredential().registeredAt);
+      store.clearPushRelayRegistration("ndi_test-installation");
+      assert.equal(store.getPushRelayCredential().registeredAt, null);
+
       store.writeAudit({ customerId: "beta", userId: betaUser.id, actorRole: "customer", action: "resource.reboot.requested", resourceId: webId });
       assert.equal(store.listAudit("beta").total, 1);
       assert.equal(store.listAudit("acme").total, 0);

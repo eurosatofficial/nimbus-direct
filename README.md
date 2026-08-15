@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/overview.jpg" alt="Nimbus Dashboard" width="800">
+  <img src="docs/screenshots/dark-mode/web-overview.png" alt="Nimbus Dashboard" width="800">
 </p>
 
 # Nimbus Direct
@@ -497,28 +497,41 @@ only the features already granted to Nimbus's central service account.
 
 ### 17. Enable native iOS push notifications (optional)
 
-Push is disabled unless every APNs value is configured. The panel and iOS app
-continue to work without it.
+Push is optional. The panel and iOS app continue to work when `PUSH_MODE` is
+`disabled`.
 
-Create an Apple APNs `.p8` key, record the Key ID and Team ID, and set:
+Normal operators using the official App Store app use the developer-operated
+Nimbus Push Relay:
 
 ```env
+PUSH_MODE=relay
+PUSH_RELAY_URL=https://push.liamjayden.dev
+```
+
+Use the real HTTPS relay origin supplied by the Nimbus Direct app developer.
+Do not add a path to this URL. In relay mode, remove every `APNS_*` value. A
+panel installation creates its own Ed25519 identity automatically, encrypts the
+private part with `APP_SECRET`, registers its public key, and signs each minimal
+delivery request. The developer's Apple `.p8` key exists only on the relay and
+is never distributed in Nimbus panel releases.
+
+Direct APNs remains available only for an operator who forks and signs a custom
+iOS app with a separate bundle identifier and operator-owned Apple credentials:
+
+```env
+PUSH_MODE=direct
 APNS_KEY_ID=XXXXXXXXXX
 APNS_TEAM_ID=YOURTEAMID
-APNS_TOPIC=de.liamjayden.nimbusdirect
-APNS_PRIVATE_KEY_BASE64=BASE64_ENCODED_P8_FILE
+APNS_TOPIC=com.example.your-custom-app
+APNS_PRIVATE_KEY_BASE64=BASE64_ENCODED_OPERATOR_OWNED_P8_FILE
 ```
 
-Generate the one-line private-key value with:
-
-```bash
-base64 < AuthKey_XXXXXXXXXX.p8 | tr -d '\n'
-```
-
-The APNs topic must exactly match the iOS bundle identifier. Device tokens are
-stored as `APP_SECRET`-bound hashes plus AES-256-GCM encrypted delivery values.
-Invalid or unregistered tokens are disabled automatically after an APNs
-response. The Apple private key and Proxmox credentials never reach the app.
+Device tokens remain on the selected self-hosted panel as `APP_SECRET`-bound
+hashes plus AES-256-GCM encrypted delivery values. The relay processes the
+token and minimal notification payload only for delivery and does not retain
+them. Structured APNs outcomes allow the panel to disable invalid or
+unregistered tokens while keeping authentication, rate-limit, temporary, and
+provider failures distinct. See [docs/PUSH.md](docs/PUSH.md).
 
 ## Internal Proxmox addresses and private CAs
 
@@ -537,7 +550,7 @@ Mount only the public CA certificate. Never copy a private CA key into Nimbus an
 
 SQLite data is stored in the `nimbus-data` volume. Stop Nimbus before copying it, or use a SQLite-aware backup process. Back up both the database and `APP_SECRET`, store them separately, and test restoration.
 
-The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`, native Nimbus API device/refresh-token state in `migrations/014_nimbus_api.sql`, administrator-governed user integration keys in `migrations/015_user_api_keys.sql`, encrypted native push-device registrations in `migrations/016_mobile_push.sql`, hybrid console metadata in `migrations/017_hybrid_console.sql`, grouped maintenance action locks in `migrations/018_maintenance_action_locks.sql`, persisted account language preferences in `migrations/019_user_language.sql`, extensible language codes in `migrations/020_language_catalogues.sql`, maintenance-window timezones in `migrations/021_maintenance_timezone.sql`, WebAuthn public-key credentials plus single-use challenges in `migrations/022_passkeys.sql`, and per-account email timezones in `migrations/023_user_timezone.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
+The numbered schema is in `migrations/001_initial.sql`, with additive task indexes in `migrations/002_task_tracking_indexes.sql`, ISO ownership/policy tables in `migrations/003_iso_media.sql`, one-time boot restoration state in `migrations/004_iso_boot_once.sql`, the per-assignment snapshot limit in `migrations/005_snapshot_policy.sql`, SMTP/queue tables in `migrations/006_email_delivery.sql`, notification/alert state in `migrations/007_notifications.sql`, MFA/session metadata in `migrations/008_mfa_sessions.sql`, account invitation/recovery state in `migrations/009_account_lifecycle.sql`, Operations Center telemetry/incidents in `migrations/010_operations_center.sql`, targeted maintenance notices/deliveries in `migrations/011_maintenance_system.sql`, customer-scoped support conversations/read state in `migrations/012_support_ticket_center.sql`, durable Security & Access Center policy/index state in `migrations/013_security_access_center.sql`, native Nimbus API device/refresh-token state in `migrations/014_nimbus_api.sql`, administrator-governed user integration keys in `migrations/015_user_api_keys.sql`, encrypted native push-device registrations in `migrations/016_mobile_push.sql`, hybrid console metadata in `migrations/017_hybrid_console.sql`, grouped maintenance action locks in `migrations/018_maintenance_action_locks.sql`, persisted account language preferences in `migrations/019_user_language.sql`, extensible language codes in `migrations/020_language_catalogues.sql`, maintenance-window timezones in `migrations/021_maintenance_timezone.sql`, WebAuthn public-key credentials plus single-use challenges in `migrations/022_passkeys.sql`, per-account email timezones in `migrations/023_user_timezone.sql`, and the encrypted push-relay installation identity in `migrations/024_push_relay.sql`. Runtime startup creates the new tables and adds legacy columns automatically, so this release does not require a manual migration command. Take a database backup before every update.
 
 ## Operations
 

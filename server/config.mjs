@@ -44,8 +44,31 @@ export function readConfig() {
   const apnsTopic = String(process.env.APNS_TOPIC || "").trim();
   const apnsPrivateKeyBase64 = String(process.env.APNS_PRIVATE_KEY_BASE64 || "").trim();
   const apnsCredentials = [apnsKeyId, apnsTeamId, apnsPrivateKeyBase64];
-  if (apnsCredentials.some(Boolean) && (!apnsCredentials.every(Boolean) || !apnsTopic)) {
-    throw new Error("APNs requires APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC, and APNS_PRIVATE_KEY_BASE64");
+  const pushModeInput = String(process.env.PUSH_MODE || "").trim().toLowerCase();
+  const inferredPushMode = apnsCredentials.some(Boolean) || apnsTopic ? "direct" : "disabled";
+  const pushMode = pushModeInput || (process.env.PUSH_RELAY_URL ? "relay" : inferredPushMode);
+  if (!["disabled", "relay", "direct"].includes(pushMode)) {
+    throw new Error("PUSH_MODE must be disabled, relay, or direct");
+  }
+  if (pushMode === "relay" && (apnsCredentials.some(Boolean) || apnsTopic)) {
+    throw new Error("Relay mode must not contain APNs credentials; remove APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC, and APNS_PRIVATE_KEY_BASE64");
+  }
+  if (pushMode === "direct" && (!apnsCredentials.every(Boolean) || !apnsTopic)) {
+    throw new Error("Direct push mode requires APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC, and APNS_PRIVATE_KEY_BASE64");
+  }
+  const relayUrlInput = String(process.env.PUSH_RELAY_URL || "").trim();
+  let relayUrl = "";
+  if (pushMode === "relay") {
+    if (!relayUrlInput) throw new Error("Relay push mode requires PUSH_RELAY_URL");
+    let parsed;
+    try { parsed = new URL(relayUrlInput); }
+    catch { throw new Error("PUSH_RELAY_URL must be a valid absolute URL"); }
+    const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+    if (parsed.protocol !== "https:" && !localHttp) throw new Error("PUSH_RELAY_URL must use HTTPS");
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      throw new Error("PUSH_RELAY_URL must be an origin without credentials, a path, query, or fragment");
+    }
+    relayUrl = parsed.origin;
   }
   const webauthnRpId = String(process.env.WEBAUTHN_RP_ID || "").trim().toLowerCase();
   const webauthnOriginInput = String(process.env.WEBAUTHN_ORIGIN || "").trim();
@@ -84,7 +107,7 @@ export function readConfig() {
     operatorPrivacyPolicyUrl = parsed.href;
   }
   let apnsPrivateKey = "";
-  if (apnsPrivateKeyBase64) {
+  if (pushMode === "direct" && apnsPrivateKeyBase64) {
     try { apnsPrivateKey = Buffer.from(apnsPrivateKeyBase64, "base64").toString("utf8"); }
     catch { throw new Error("APNS_PRIVATE_KEY_BASE64 is invalid"); }
     if (!apnsPrivateKey.includes("BEGIN PRIVATE KEY")) {
@@ -110,13 +133,20 @@ export function readConfig() {
     isoUploadTimeoutMs: integer(process.env.ISO_UPLOAD_TIMEOUT_MINUTES, 120) * 60 * 1000,
     emailSmtpTimeoutMs: integer(process.env.EMAIL_SMTP_TIMEOUT_SECONDS, 10) * 1000,
     emailQueueIntervalMs: integer(process.env.EMAIL_QUEUE_INTERVAL_SECONDS, 5) * 1000,
-    apns: {
-      enabled: apnsCredentials.every(Boolean) && Boolean(apnsTopic),
-      keyId: apnsKeyId,
-      teamId: apnsTeamId,
-      topic: apnsTopic,
-      privateKey: apnsPrivateKey,
-      timeoutMs: integer(process.env.APNS_TIMEOUT_SECONDS, 10) * 1000,
+    push: {
+      mode: pushMode,
+      enabled: pushMode !== "disabled",
+      relay: {
+        url: relayUrl,
+        timeoutMs: integer(process.env.PUSH_RELAY_TIMEOUT_SECONDS, 10) * 1000,
+      },
+      direct: {
+        keyId: apnsKeyId,
+        teamId: apnsTeamId,
+        topic: apnsTopic,
+        privateKey: apnsPrivateKey,
+        timeoutMs: integer(process.env.APNS_TIMEOUT_SECONDS, 10) * 1000,
+      },
     },
     webauthn: {
       enabled: Boolean(webauthnRpId && webauthnOrigin),

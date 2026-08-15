@@ -9,6 +9,8 @@ const KEYS = [
   "API_ACCESS_TOKEN_MINUTES", "API_REFRESH_TOKEN_DAYS", "API_MAX_DEVICE_SESSIONS",
   "WEBAUTHN_RP_ID", "WEBAUTHN_ORIGIN", "WEBAUTHN_RP_NAME",
   "PRIVACY_POLICY_URL",
+  "PUSH_MODE", "PUSH_RELAY_URL", "PUSH_RELAY_TIMEOUT_SECONDS",
+  "APNS_KEY_ID", "APNS_TEAM_ID", "APNS_TOPIC", "APNS_PRIVATE_KEY_BASE64", "APNS_TIMEOUT_SECONDS",
   "ALLOW_DEMO_DATA", "DEMO_READ_ONLY",
 ];
 
@@ -69,6 +71,7 @@ test("configuration exposes direct-assignment bootstrap and sync settings", () =
       rpName: "Example Nimbus",
     });
     assert.equal(config.operatorPrivacyPolicyUrl, "https://legal.example.com/nimbus/privacy/");
+    assert.equal(config.push.mode, "disabled");
     assert.equal(config.allowDemoData, true);
     assert.equal(config.demoReadOnly, true);
     assert.equal("globalProxmoxTenantId" in config, false);
@@ -132,4 +135,44 @@ test("passkey configuration requires a matching HTTPS relying-party origin", () 
     WEBAUTHN_RP_ID: "other.example.com",
     WEBAUTHN_ORIGIN: "https://nimbus.example.com",
   }, () => assert.throws(() => readConfig(), /must match WEBAUTHN_ORIGIN/));
+});
+
+test("relay push mode never accepts operator APNs credentials", () => {
+  const base = {
+    NODE_ENV: "production",
+    APP_SECRET: "a-production-secret-with-at-least-32-characters",
+    PUSH_MODE: "relay",
+    PUSH_RELAY_URL: "https://push.nimbus.example/",
+  };
+  withEnvironment(base, () => {
+    const config = readConfig();
+    assert.equal(config.push.mode, "relay");
+    assert.equal(config.push.enabled, true);
+    assert.equal(config.push.relay.url, "https://push.nimbus.example");
+    assert.equal(config.push.direct.privateKey, "");
+  });
+  withEnvironment({ ...base, APNS_KEY_ID: "secret-key-id" }, () => {
+    assert.throws(() => readConfig(), /must not contain APNs credentials/);
+  });
+  withEnvironment({ ...base, PUSH_RELAY_URL: "http://push.nimbus.example" }, () => {
+    assert.throws(() => readConfig(), /must use HTTPS/);
+  });
+});
+
+test("direct push mode remains available for custom app forks", () => {
+  const privateKey = Buffer.from("test-only BEGIN PRIVATE KEY marker").toString("base64");
+  withEnvironment({
+    NODE_ENV: "production",
+    APP_SECRET: "a-production-secret-with-at-least-32-characters",
+    PUSH_MODE: "direct",
+    APNS_KEY_ID: "KEY123",
+    APNS_TEAM_ID: "TEAM123",
+    APNS_TOPIC: "com.example.custom-nimbus",
+    APNS_PRIVATE_KEY_BASE64: privateKey,
+  }, () => {
+    const config = readConfig();
+    assert.equal(config.push.mode, "direct");
+    assert.equal(config.push.direct.topic, "com.example.custom-nimbus");
+    assert.match(config.push.direct.privateKey, /BEGIN PRIVATE KEY/);
+  });
 });

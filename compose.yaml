@@ -37,6 +37,11 @@ services:
       ISO_UPLOAD_TIMEOUT_MINUTES: ${ISO_UPLOAD_TIMEOUT_MINUTES:-120}
       EMAIL_SMTP_TIMEOUT_SECONDS: ${EMAIL_SMTP_TIMEOUT_SECONDS:-10}
       EMAIL_QUEUE_INTERVAL_SECONDS: ${EMAIL_QUEUE_INTERVAL_SECONDS:-5}
+      # Empty preserves automatic direct-mode compatibility for existing
+      # deployments that already configured all four APNS_* values.
+      PUSH_MODE: ${PUSH_MODE:-}
+      PUSH_RELAY_URL: ${PUSH_RELAY_URL:-}
+      PUSH_RELAY_TIMEOUT_SECONDS: ${PUSH_RELAY_TIMEOUT_SECONDS:-10}
       APNS_KEY_ID: ${APNS_KEY_ID:-}
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_TOPIC: ${APNS_TOPIC:-}

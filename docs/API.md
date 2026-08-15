@@ -367,8 +367,11 @@ internal notes are enforced on the server.
 Push-device endpoints accept only normal native bearer sessions, never
 integration API keys. An iOS registration supplies its APNs token, sandbox or
 production environment, and app version. Nimbus stores a keyed hash plus an
-encrypted token. APNs delivery is optional and reports `pushAvailable: false`
-when the panel has no Apple signing key configured.
+encrypted token. Push delivery is optional and reports `pushAvailable: false`
+when the panel has neither relay nor direct delivery enabled. In relay mode the
+device token remains registered only with the selected panel; the panel sends a
+signed, minimal delivery request to the Nimbus Push Relay. The relay does not
+provide account, resource, support, analytics, or Proxmox APIs.
 
 ## Administrator API
 

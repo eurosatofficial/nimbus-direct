@@ -21,9 +21,9 @@ Customer browser         Native mobile app         Administrator browser
                     authorization service
                     assignment + permission lookup
                               |
-                 +------------+-------------+----------------+
-                 |                          |                |
-          SQLite control DB          Proxmox service layer  Email service
+                 +------------+-------------+----------------+----------------+
+                 |                          |                |                |
+          SQLite control DB          Proxmox service layer  Email service  Push service
           - users                    - API token auth        - SMTP TLS
           - customers                - response allowlists  - retry queue
           - assignments/limits       - task normalization   - templates
@@ -38,10 +38,15 @@ Customer browser         Native mobile app         Administrator browser
           - refresh-token history
           - operations telemetry
           - operations incidents
+          - encrypted relay identity
           - audit/tasks
                  |                          |
           background sync        Proxmox VE cluster(s)
                                   (no Nimbus node agent)
+                                                                          |
+                                                              signed HTTPS (relay mode)
+                                                                          |
+                                                              Nimbus Push Relay -> APNs
 ```
 
 The server is the only component that knows the Proxmox service-account credentials. Every customer request resolves a resource from the database using the authenticated customer ID, requested Nimbus resource ID, active assignment, and required permission. Only the server-derived cluster, node, type, and VMID are sent to Proxmox.
@@ -95,6 +100,7 @@ Core tables:
 - `support_tickets`: customer ownership, optional assigned resource, subject/category/priority, administrator assignment, workflow status, and lifecycle timestamps.
 - `support_ticket_messages`: customer, administrator, system, and administrator-only internal messages for one ticket.
 - `support_ticket_reads`: individual per-login read position for a customer-shared or administrator-visible ticket.
+- `push_relay_credentials`: one automatically generated Ed25519 installation identity; its private key is encrypted with `APP_SECRET`, while registration state is local to the panel.
 
 Important keys:
 
@@ -207,6 +213,19 @@ Email delivery is a separate service layer and never calls Proxmox. Administrato
 Alert evaluation runs only after a successful resource synchronization. Each enabled assignment condition progresses through healthy, pending, and firing states. Conditions must remain active for the configured duration; an incident creates one deduplicated alert event and its transition back to normal creates one recovery event. Existing stopped guests are baselined without an alert, recent Nimbus stop/shutdown requests suppress expected offline events, and an API synchronization failure never alters alert state. Reassignment resets policy and incident state.
 
 One customer event can fan out to multiple active users in that customer, but every delivery row and preference row belongs to one user. API reads and read-state mutations always filter by the authenticated user ID. Email delivery is opt-in and uses the same encrypted queue and branded template system as administrator test messages.
+
+Native push is an optional delivery branch. In official relay mode, the panel
+keeps its users' encrypted APNs device tokens and decides notification content
+and timing. It signs the exact relay request with its local Ed25519 installation
+key. The relay stores only the corresponding public key, status, bounded replay
+nonces, and delivery counters. It validates signatures, clock skew, one-time
+nonces, payload limits, token format, environment, and rate limits before using
+the developer-owned APNs key with the fixed official topic
+`de.liamjayden.nimbusdirect`. Notification content and device tokens are not
+written to relay storage or logs. Structured APNs outcomes return to the panel,
+which disables only invalid or unregistered device tokens. Direct mode keeps
+the same panel-side notification path for custom app forks that use an
+operator-owned Apple key and topic. Disabled mode makes no external push call.
 
 Maintenance publication is a separate local authorization flow. Nimbus resolves an all/cluster/node/resource/customer target through current active assignments, converts the result to active customer users, and writes one delivery per affected user in the same transaction that marks the notice published. Customer reads query the delivery user ID rather than recalculating current ownership. A later reassignment therefore cannot transfer historical maintenance visibility or action locks. Drafts have no delivery rows. Scheduled/active state advances from server time, while cancellation and resolution remain administrator-only, CSRF-protected, and audited. For active deliveries, the central resource authorization path maps requested permissions into optional power, console, snapshot-change, or installation-media lock groups and rejects matching customer writes with HTTP 423 before any Proxmox request. Administrators bypass maintenance locks, and read-only operations remain available.
 

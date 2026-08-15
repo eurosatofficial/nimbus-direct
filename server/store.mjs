@@ -1193,6 +1193,16 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     CREATE INDEX IF NOT EXISTS mobile_push_devices_user_status
       ON mobile_push_devices(user_id, status, updated_at DESC);
 
+    CREATE TABLE IF NOT EXISTS push_relay_credentials (
+      id TEXT PRIMARY KEY CHECK(id='default'),
+      installation_id TEXT NOT NULL UNIQUE,
+      public_key TEXT NOT NULL,
+      private_key_encrypted TEXT NOT NULL,
+      registered_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+
     CREATE TABLE IF NOT EXISTS user_api_policies (
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       enabled INTEGER NOT NULL DEFAULT 0,
@@ -3408,6 +3418,44 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
     disablePushDevice(id, reason = "delivery_failed") {
       database.prepare(`UPDATE mobile_push_devices SET status='disabled',failure_reason=?,updated_at=?
         WHERE id=?`).run(String(reason).slice(0, 120), Date.now(), id);
+    },
+    getPushRelayCredential() {
+      const row = database.prepare("SELECT * FROM push_relay_credentials WHERE id='default'").get();
+      return row ? {
+        installationId: row.installation_id,
+        publicKey: row.public_key,
+        privateKey: decryptSecret(row.private_key_encrypted, appSecret),
+        registeredAt: row.registered_at || null,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      } : null;
+    },
+    savePushRelayCredential({ installationId, publicKey, privateKey }) {
+      const now = Date.now();
+      database.prepare(`INSERT INTO push_relay_credentials
+        (id,installation_id,public_key,private_key_encrypted,registered_at,created_at,updated_at)
+        VALUES ('default',?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,
+          public_key=excluded.public_key,private_key_encrypted=excluded.private_key_encrypted,
+          registered_at=NULL,updated_at=excluded.updated_at`)
+        .run(
+          String(installationId),
+          String(publicKey),
+          encryptSecret(String(privateKey), appSecret),
+          null,
+          now,
+          now,
+        );
+      return this.getPushRelayCredential();
+    },
+    markPushRelayRegistered(installationId) {
+      const now = Date.now();
+      database.prepare(`UPDATE push_relay_credentials SET registered_at=?,updated_at=?
+        WHERE id='default' AND installation_id=?`).run(now, now, String(installationId));
+    },
+    clearPushRelayRegistration(installationId) {
+      database.prepare(`UPDATE push_relay_credentials SET registered_at=NULL,updated_at=?
+        WHERE id='default' AND installation_id=?`).run(Date.now(), String(installationId));
     },
 
     createMaintenanceEvent(input, { userId = null } = {}) {
