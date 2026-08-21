@@ -269,6 +269,15 @@ test("account, security, maintenance, support, and alert templates support Germa
   assert.equal(security.subject, "Nimbus Direct: Zwei-Faktor-Authentifizierung aktiviert");
   assert.match(security.html, /Kontosicherheit/);
 
+  const revokedApiKey = securityEmailTemplate({
+    displayName: "Liam",
+    title: "An API key was revoked",
+    message: "The API key “Home Assistant” was revoked and can no longer access your Nimbus Direct account.",
+    language: "de",
+  });
+  assert.equal(revokedApiKey.subject, "Nimbus Direct: Ein API-Schlüssel wurde widerrufen");
+  assert.match(revokedApiKey.text, /API-Schlüssel „Home Assistant“ wurde widerrufen/);
+
   const maintenance = maintenanceEmailTemplate({
     displayName: "Liam",
     language: "de",

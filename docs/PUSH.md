@@ -8,11 +8,20 @@ Nimbus Direct supports three explicit modes:
 | `relay` | Official App Store app | Never |
 | `direct` | Custom/forked app signed by its operator | Operator-owned key only |
 
+When enabled, native pushes cover customer-authorized VM/LXC action outcomes,
+customer infrastructure alerts and recoveries, administrator Operations Center
+incidents and recoveries, published/resolved/cancelled maintenance, support
+ticket creation/replies/status changes, and important account-security events.
+Support recipients and maintenance audiences are resolved from the
+same server-side tenant and delivery records used by the web panel. The actor
+does not receive a duplicate support push for their own action, and private
+internal notes never generate a customer push.
+
 ## Official relay mode
 
 ```env
 PUSH_MODE=relay
-PUSH_RELAY_URL=https://push.liamjayden.dev
+PUSH_RELAY_URL=https://the-official-relay-origin.example
 PUSH_RELAY_TIMEOUT_SECONDS=10
 ```
 

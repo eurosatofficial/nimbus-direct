@@ -1798,6 +1798,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       ? `AND u.customer_id IN (${customerIds.map(() => "?").join(",")})`
       : "";
     return database.prepare(`SELECT u.id,u.customer_id,u.email,u.display_name,u.preferred_language,u.preferred_locale,
+      COALESCE(p.in_app_enabled,1) AS in_app_enabled,
       COALESCE(p.email_enabled,0) AS email_enabled,
       COALESCE(p.infrastructure_alerts,1) AS infrastructure_alerts,
       COALESCE(p.resolution_alerts,1) AS resolution_alerts
@@ -1810,6 +1811,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       email: row.email,
       displayName: row.display_name,
       preferredLanguage: preferredLanguageForRow(row),
+      inAppEnabled: Boolean(row.in_app_enabled),
       emailEnabled: Boolean(row.email_enabled),
       infrastructureAlerts: Boolean(row.infrastructure_alerts),
       resolutionAlerts: Boolean(row.resolution_alerts),
@@ -1818,6 +1820,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
 
   function maintenanceDeliveryRecipients(eventId) {
     return database.prepare(`SELECT d.id AS delivery_id,u.id,u.customer_id,u.email,u.display_name,u.preferred_language,u.preferred_locale,
+      COALESCE(p.in_app_enabled,1) AS in_app_enabled,
       COALESCE(p.email_enabled,0) AS email_enabled,
       COALESCE(p.infrastructure_alerts,1) AS infrastructure_alerts,
       COALESCE(p.resolution_alerts,1) AS resolution_alerts
@@ -1831,6 +1834,7 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       email: row.email,
       displayName: row.display_name,
       preferredLanguage: preferredLanguageForRow(row),
+      inAppEnabled: Boolean(row.in_app_enabled),
       emailEnabled: Boolean(row.email_enabled),
       infrastructureAlerts: Boolean(row.infrastructure_alerts),
       resolutionAlerts: Boolean(row.resolution_alerts),
@@ -3677,6 +3681,12 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       const column = resolution ? "resolution_email_job_id" : "email_job_id";
       database.prepare(`UPDATE maintenance_deliveries SET ${column}=? WHERE id=?`).run(emailJobId, deliveryId);
     },
+    listMaintenanceDeliveryRecipients(eventId) {
+      if (!database.prepare("SELECT 1 FROM maintenance_events WHERE id=?").get(eventId)) {
+        throw problem("Maintenance notice does not exist", "maintenance_not_found", 404);
+      }
+      return maintenanceDeliveryRecipients(eventId);
+    },
     resolveMaintenanceEvent(id, { userId = null } = {}) {
       this.advanceMaintenanceEvents();
       const row = database.prepare("SELECT * FROM maintenance_events WHERE id=?").get(id);
@@ -3928,26 +3938,58 @@ export async function openStore(dataDir, { appSecret = "" } = {}) {
       if (!row) throw problem("Support ticket does not exist", "support_ticket_not_found", 404);
       if (audience === "admin") {
         if (row.assigned_to) {
-          const assigned = database.prepare(`SELECT id,email,display_name,preferred_language,preferred_locale FROM users
-            WHERE id=? AND role='admin' AND status='active'`).get(row.assigned_to);
-          if (assigned) return [{ id: assigned.id, email: assigned.email, displayName: assigned.display_name, preferredLanguage: preferredLanguageForRow(assigned) }];
+          const assigned = database.prepare(`SELECT u.id,u.email,u.display_name,u.preferred_language,u.preferred_locale,
+            COALESCE(p.in_app_enabled,1) AS in_app_enabled FROM users u
+            LEFT JOIN notification_preferences p ON p.user_id=u.id
+            WHERE u.id=? AND u.role='admin' AND u.status='active'`).get(row.assigned_to);
+          if (assigned) return [{
+            id: assigned.id,
+            email: assigned.email,
+            displayName: assigned.display_name,
+            preferredLanguage: preferredLanguageForRow(assigned),
+            inAppEnabled: Boolean(assigned.in_app_enabled),
+          }];
         }
-        return database.prepare(`SELECT id,email,display_name,preferred_language,preferred_locale FROM users
-          WHERE role='admin' AND status='active' ORDER BY id`).all().map((entry) => ({
-          id: entry.id, email: entry.email, displayName: entry.display_name, preferredLanguage: preferredLanguageForRow(entry),
+        return database.prepare(`SELECT u.id,u.email,u.display_name,u.preferred_language,u.preferred_locale,
+          COALESCE(p.in_app_enabled,1) AS in_app_enabled FROM users u
+          LEFT JOIN notification_preferences p ON p.user_id=u.id
+          WHERE u.role='admin' AND u.status='active' ORDER BY u.id`).all().map((entry) => ({
+          id: entry.id,
+          email: entry.email,
+          displayName: entry.display_name,
+          preferredLanguage: preferredLanguageForRow(entry),
+          inAppEnabled: Boolean(entry.in_app_enabled),
         }));
       }
-      return database.prepare(`SELECT u.id,u.email,u.display_name,u.preferred_language,u.preferred_locale FROM users u
+      return database.prepare(`SELECT u.id,u.email,u.display_name,u.preferred_language,u.preferred_locale,
+        COALESCE(p.in_app_enabled,1) AS in_app_enabled FROM users u
         JOIN customers c ON c.id=u.customer_id
+        LEFT JOIN notification_preferences p ON p.user_id=u.id
         WHERE u.customer_id=? AND u.role='customer' AND u.status='active' AND c.status='active'
         ORDER BY u.id`).all(row.customer_id).map((entry) => ({
-        id: entry.id, email: entry.email, displayName: entry.display_name, preferredLanguage: preferredLanguageForRow(entry),
+        id: entry.id,
+        email: entry.email,
+        displayName: entry.display_name,
+        preferredLanguage: preferredLanguageForRow(entry),
+        inAppEnabled: Boolean(entry.in_app_enabled),
       }));
     },
     listSupportAssignees() {
       return database.prepare(`SELECT id,email,display_name FROM users
         WHERE role='admin' AND status='active' ORDER BY display_name`).all().map((row) => ({
         id: row.id, email: row.email, displayName: row.display_name,
+      }));
+    },
+    listActiveAdministrators() {
+      return database.prepare(`SELECT u.id,u.email,u.display_name,u.preferred_language,u.preferred_locale,
+        COALESCE(p.in_app_enabled,1) AS in_app_enabled FROM users u
+        LEFT JOIN notification_preferences p ON p.user_id=u.id
+        WHERE u.role='admin' AND u.status='active' ORDER BY u.id`).all().map((row) => ({
+        id: row.id,
+        email: row.email,
+        displayName: row.display_name,
+        preferredLanguage: preferredLanguageForRow(row),
+        inAppEnabled: Boolean(row.in_app_enabled),
       }));
     },
 

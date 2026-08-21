@@ -8,7 +8,7 @@ export function createPushService({
   log = () => {},
   connectClient,
   fetchClient,
-  softwareVersion = "1.7.1",
+  softwareVersion = "1.7.3",
   deliveryClient,
 } = {}) {
   const mode = config.mode || (config.enabled ? "direct" : "disabled");

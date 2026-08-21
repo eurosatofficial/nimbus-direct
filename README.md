@@ -29,6 +29,8 @@ Nimbus Direct is a modern, self-hosted customer control panel for Proxmox VE. Ad
 - Authenticator-app two-factor authentication with QR enrollment, one-use recovery codes, short-lived login challenges, active-session review/revocation, administrator-assisted reset, and security email notices.
 - Administrator Security & Access Center with MFA coverage, account posture, active-session totals, failed/successful login counts, focused security events, enforceable administrator/customer 2FA policies, and optional successful-login email alerts.
 - Mobile-ready Nimbus API v1 with short-lived bearer access tokens, single-use rotating refresh tokens, device-session review/revocation, refresh-reuse detection, existing 2FA support, and a built-in OpenAPI 3.1 contract.
+- Official Nimbus Direct iOS app for secure mobile access to compatible self-hosted panels, available on the [App Store](https://apps.apple.com/us/app/nimbus-direct/id6801336814).
+- Localized native push delivery for VM/LXC action results, customer infrastructure alerts and recoveries, administrator Operations Center incidents and recoveries, maintenance publication/resolution/cancellation, support ticket creation/replies/status changes, and important account-security events.
 - User-managed integration API keys with administrator-defined grouped permission ceilings, per-key VM/LXC allowlists, expiry and active-key limits, one-time secret display, live effective-action previews, hash-only storage, immediate revocation, and assignment-aware authorization on every request.
 - Passwordless administrator-issued invitations and self-service password recovery with 30-minute single-use links, hashed token storage, resend/revoke controls, non-enumerating responses, and session revocation after reset.
 - Selected configuration and a short-lived hybrid console gateway: termproxy/xterm.js for LXC and serial-display QEMU guests, with noVNC retained for graphical QEMU guests. The graphical toolbar adds an on-screen keyboard, Ctrl/Alt/Super modifiers, Tab, Esc, Ctrl+Alt+Delete, safe text paste, display quality/scaling, fullscreen, and disconnect controls.
@@ -500,12 +502,20 @@ only the features already granted to Nimbus's central service account.
 Push is optional. The panel and iOS app continue to work when `PUSH_MODE` is
 `disabled`.
 
+The official [Nimbus Direct app is available on the App Store](https://apps.apple.com/us/app/nimbus-direct/id6801336814).
+Once a user enables push notifications in the app, Nimbus can deliver localized
+action outcomes, customer infrastructure alerts and recoveries, administrator
+Operations Center incidents and recoveries, maintenance updates, support-ticket
+activity, and important account-security notices. Recipient
+scope and preferences are checked before a push is queued; internal support
+notes and events outside the user's customer scope are never delivered.
+
 Normal operators using the official App Store app use the developer-operated
 Nimbus Push Relay:
 
 ```env
 PUSH_MODE=relay
-PUSH_RELAY_URL=https://push.liamjayden.dev
+PUSH_RELAY_URL=https://push.example.nimbus-relay.invalid
 ```
 
 Use the real HTTPS relay origin supplied by the Nimbus Direct app developer.

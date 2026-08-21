@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f4f6fb" />
+    <meta name="description" content="Privacy policy for the Nimbus Direct iOS app and its developer." />
+    <title>Nimbus Direct App Privacy</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme.js?v=20260803-02"></script>
+    <link rel="stylesheet" href="/styles.css?v=20260815-01" />
+    <style>
+      .privacy-page { min-height: 100vh; background: var(--canvas); }
+      .privacy-header {
+        z-index: 20;
+        min-height: 76px;
+        top: 0;
+        position: sticky;
+        display: flex;
+        align-items: center;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-glass);
+        backdrop-filter: blur(18px);
+      }
+      .privacy-header-inner {
+        width: min(1180px, calc(100% - 40px));
+        min-height: 76px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 22px;
+      }
+      .privacy-brand { min-height: 48px; display: inline-flex; align-items: center; gap: 11px; }
+      .privacy-brand .brand-mark { width: 34px; height: 29px; }
+      .privacy-brand .brand-mark span { width: 9px; }
+      .privacy-brand .brand-mark span:first-child { height: 15px; }
+      .privacy-brand .brand-mark span:nth-child(2) { height: 23px; }
+      .privacy-brand .brand-mark span:last-child { height: 29px; }
+      .privacy-brand .brand-name { font-size: 19px; }
+      .privacy-header-actions { display: flex; align-items: center; gap: 8px; }
+      .privacy-language {
+        padding: 4px;
+        display: flex;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface-soft);
+      }
+      .privacy-language button {
+        min-width: 44px;
+        min-height: 34px;
+        padding: 0 11px;
+        border: 0;
+        border-radius: 7px;
+        color: var(--muted);
+        background: transparent;
+        font-size: 11px;
+        font-weight: 800;
+      }
+      .privacy-language button[aria-pressed="true"] {
+        color: var(--primary);
+        background: var(--surface);
+        box-shadow: 0 2px 8px rgba(29, 38, 68, .08);
+      }
+      .privacy-home { min-height: 42px; white-space: nowrap; }
+      .privacy-appearance { border: 1px solid var(--line); background: var(--surface); }
+      .privacy-hero {
+        position: relative;
+        overflow: hidden;
+        border-bottom: 1px solid var(--line);
+        background:
+          radial-gradient(circle at 86% 20%, rgba(91, 103, 232, .16), transparent 27%),
+          radial-gradient(circle at 12% 0%, rgba(30, 170, 118, .08), transparent 22%),
+          var(--surface);
+      }
+      .privacy-hero::after {
+        width: 340px;
+        height: 340px;
+        right: max(-170px, calc((100vw - 1180px) / 2 - 120px));
+        bottom: -250px;
+        position: absolute;
+        border: 64px solid rgba(91, 103, 232, .08);
+        border-radius: 50%;
+        content: "";
+        pointer-events: none;
+      }
+      .privacy-hero-inner {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: clamp(60px, 8vw, 94px) 0 48px;
+        position: relative;
+      }
+      .privacy-hero-copy { max-width: 780px; }
+      .privacy-hero h1 {
+        margin: 10px 0 17px;
+        font: 800 clamp(38px, 6vw, 66px)/1.03 Manrope, Inter, sans-serif;
+        letter-spacing: -2.6px;
+      }
+      .privacy-hero-copy > p:last-child {
+        max-width: 720px;
+        margin: 0;
+        color: var(--body);
+        font-size: clamp(16px, 2vw, 19px);
+        line-height: 1.65;
+      }
+      .privacy-trust-grid {
+        margin-top: 42px;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+      .privacy-trust-card {
+        min-height: 112px;
+        padding: 18px;
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr);
+        align-items: start;
+        gap: 13px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface-glass);
+        box-shadow: var(--shadow);
+      }
+      .privacy-trust-icon {
+        width: 42px;
+        height: 42px;
+        display: grid;
+        place-items: center;
+        border-radius: 11px;
+        color: var(--primary);
+        background: var(--primary-soft);
+        font-size: 18px;
+        font-weight: 900;
+      }
+      .privacy-trust-card:nth-child(2) .privacy-trust-icon { color: var(--green); background: var(--green-soft); }
+      .privacy-trust-card:nth-child(3) .privacy-trust-icon { color: var(--orange); background: var(--orange-soft); }
+      .privacy-trust-card strong, .privacy-trust-card small { display: block; }
+      .privacy-trust-card strong { margin-top: 1px; font: 800 13px Manrope, Inter, sans-serif; }
+      .privacy-trust-card small { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+      .privacy-shell {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 38px 0 74px;
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        align-items: start;
+        gap: 28px;
+      }
+      .privacy-toc {
+        top: 104px;
+        padding: 18px;
+        position: sticky;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .privacy-toc-label { margin: 0 0 12px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+      .privacy-toc nav { display: grid; gap: 3px; }
+      .privacy-toc a {
+        min-height: 36px;
+        padding: 8px 9px;
+        display: flex;
+        align-items: center;
+        border-radius: 8px;
+        color: var(--body);
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .privacy-toc a:hover { color: var(--primary); background: var(--primary-soft); }
+      .privacy-toc-meta { margin: 17px 0 0; padding: 14px 9px 0; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 10px; line-height: 1.55; }
+      .privacy-article { min-width: 0; display: grid; gap: 18px; }
+      .privacy-card {
+        padding: clamp(22px, 4vw, 34px);
+        scroll-margin-top: 100px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .privacy-card-header { margin-bottom: 20px; display: flex; align-items: flex-start; gap: 14px; }
+      .privacy-section-number {
+        width: 37px;
+        height: 37px;
+        flex: 0 0 37px;
+        display: grid;
+        place-items: center;
+        border-radius: 10px;
+        color: var(--primary);
+        background: var(--primary-soft);
+        font-size: 11px;
+        font-weight: 900;
+      }
+      .privacy-card h2 { margin: 1px 0 3px; font: 800 clamp(19px, 2.5vw, 23px)/1.25 Manrope, Inter, sans-serif; letter-spacing: -.45px; }
+      .privacy-card h3 { margin: 25px 0 8px; font: 800 15px/1.4 Manrope, Inter, sans-serif; }
+      .privacy-card p { margin: 0 0 13px; color: var(--body); line-height: 1.72; }
+      .privacy-card p:last-child { margin-bottom: 0; }
+      .privacy-card ul { margin: 12px 0 16px; padding-left: 21px; color: var(--body); }
+      .privacy-card li { margin: 7px 0; padding-left: 3px; line-height: 1.62; }
+      .privacy-card strong { color: var(--ink); }
+      .privacy-callout {
+        margin: 18px 0;
+        padding: 16px 17px;
+        display: grid;
+        grid-template-columns: 35px minmax(0, 1fr);
+        gap: 12px;
+        border: 1px solid #d9ddfb;
+        border-radius: 12px;
+        background: var(--primary-soft);
+      }
+      .privacy-callout > span:first-child {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border-radius: 9px;
+        color: var(--primary);
+        background: var(--surface);
+        font-weight: 900;
+      }
+      .privacy-callout strong, .privacy-callout small { display: block; }
+      .privacy-callout small { margin-top: 3px; color: var(--body); line-height: 1.55; }
+      .privacy-callout.warning { border-color: #efd9bc; background: var(--orange-soft); }
+      .privacy-callout.warning > span:first-child { color: var(--orange); }
+      .privacy-data-list { margin-top: 18px; display: grid; gap: 10px; }
+      .privacy-data-row {
+        padding: 17px;
+        display: grid;
+        grid-template-columns: minmax(135px, .75fr) minmax(0, 1.65fr) minmax(130px, .75fr);
+        gap: 18px;
+        border: 1px solid var(--line-soft);
+        border-radius: 11px;
+        background: var(--surface-soft);
+      }
+      .privacy-data-row > strong { font-size: 12px; }
+      .privacy-data-row > span { color: var(--body); font-size: 11px; line-height: 1.55; }
+      .privacy-data-row > small { color: var(--muted); font-size: 10px; line-height: 1.55; }
+      .privacy-chip-list { display: flex; flex-wrap: wrap; gap: 8px; }
+      .privacy-chip {
+        padding: 7px 10px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 999px;
+        color: var(--body);
+        background: var(--surface-soft);
+        border: 1px solid var(--line);
+        font-size: 10px;
+        font-weight: 700;
+      }
+      .privacy-chip::before { color: var(--green); content: "✓"; font-weight: 900; }
+      .privacy-contact-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .privacy-contact-card { padding: 18px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--surface-soft); }
+      .privacy-contact-card strong, .privacy-contact-card span { display: block; }
+      .privacy-contact-card span { margin-top: 5px; color: var(--body); font-size: 12px; line-height: 1.6; }
+      .privacy-contact-card a { color: var(--primary); font-weight: 750; }
+      .privacy-footer { border-top: 1px solid var(--line); background: var(--surface); }
+      .privacy-footer-inner {
+        width: min(1180px, calc(100% - 40px));
+        min-height: 100px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .privacy-footer a { color: var(--primary); font-weight: 750; }
+      .privacy-version { display: inline-flex; align-items: center; gap: 8px; }
+      .privacy-version::before { width: 7px; height: 7px; border-radius: 50%; background: var(--green); content: ""; }
+      :root[data-theme="dark"] .privacy-language button[aria-pressed="true"] { box-shadow: 0 2px 10px rgba(0, 0, 0, .24); }
+      :root[data-theme="dark"] .privacy-callout { border-color: #3d4776; }
+      :root[data-theme="dark"] .privacy-callout.warning { border-color: #5b4630; }
+      @media (max-width: 900px) {
+        .privacy-trust-grid { grid-template-columns: 1fr; }
+        .privacy-trust-card { min-height: 0; }
+        .privacy-shell { grid-template-columns: 1fr; }
+        .privacy-toc { top: auto; position: static; }
+        .privacy-toc nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+      @media (max-width: 650px) {
+        .privacy-header-inner, .privacy-hero-inner, .privacy-shell, .privacy-footer-inner { width: min(100% - 28px, 1180px); }
+        .privacy-header-inner { min-height: 68px; }
+        .privacy-header { min-height: 68px; }
+        .privacy-brand .brand-name { display: none; }
+        .privacy-home { width: 42px; min-width: 42px; padding: 0; }
+        .privacy-home span:last-child { display: none; }
+        .privacy-hero-inner { padding-top: 48px; }
+        .privacy-hero h1 { letter-spacing: -1.7px; }
+        .privacy-trust-grid { margin-top: 32px; }
+        .privacy-shell { padding-top: 22px; gap: 18px; }
+        .privacy-toc { padding: 14px; }
+        .privacy-toc nav { grid-template-columns: 1fr; }
+        .privacy-data-row { grid-template-columns: 1fr; gap: 6px; }
+        .privacy-contact-grid { grid-template-columns: 1fr; }
+        .privacy-footer-inner { padding: 24px 0; flex-direction: column; align-items: flex-start; gap: 8px; }
+      }
+      @media print {
+        .privacy-header-actions, .privacy-toc, .privacy-home { display: none !important; }
+        .privacy-header { position: static; }
+        .privacy-shell { width: 100%; display: block; }
+        .privacy-card { margin-bottom: 12px; break-inside: avoid; box-shadow: none; }
+        .privacy-hero-inner, .privacy-footer-inner { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#privacyContent">Skip to privacy policy</a>
+    <div class="privacy-page">
+      <header class="privacy-header">
+        <div class="privacy-header-inner">
+          <a class="privacy-brand" href="/" aria-label="Nimbus Direct">
+            <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+            <span class="brand-name">nimbus<span>direct</span></span>
+          </a>
+          <div class="privacy-header-actions">
+            <div class="privacy-language" aria-label="Policy language">
+              <button type="button" data-privacy-language="en" aria-pressed="true">EN</button>
+              <button type="button" data-privacy-language="de" aria-pressed="false">DE</button>
+            </div>
+            <button class="icon-button privacy-appearance" id="privacyAppearance" type="button" aria-label="Appearance: System" title="Appearance: System">
+              <span aria-hidden="true">◐</span>
+            </button>
+            <a class="button secondary privacy-home" href="/">
+              <span aria-hidden="true">←</span><span data-en="Back to Nimbus" data-de="Zurück zu Nimbus">Back to Nimbus</span>
+            </a>
+          </div>
+        </div>
+      </header>
+
+      <main id="privacyContent">
+        <section class="privacy-hero">
+          <div class="privacy-hero-inner">
+            <div class="privacy-hero-copy" data-language-root="en">
+              <p class="eyebrow">iOS app privacy · clear by design</p>
+              <h1>Nimbus Direct App Privacy</h1>
+              <p>This policy covers the Nimbus Direct iOS app and Liam Jayden Schleiß as its developer and distributor. The operator of each self-hosted Nimbus server has a separate privacy responsibility and may provide a separate policy in the app.</p>
+            </div>
+            <div class="privacy-hero-copy" data-language-root="de" hidden>
+              <p class="eyebrow">iOS-App-Datenschutz · verständlich erklärt</p>
+              <h1>Datenschutz der Nimbus Direct App</h1>
+              <p>Diese Erklärung gilt für die Nimbus-Direct-iOS-App und Liam Jayden Schleiß als ihren Entwickler und Anbieter. Der Betreiber jedes selbst gehosteten Nimbus-Servers trägt eine eigene Datenschutzverantwortung und kann in der App eine separate Erklärung bereitstellen.</p>
+            </div>
+
+            <div class="privacy-trust-grid" data-language-root="en">
+              <article class="privacy-trust-card"><span class="privacy-trust-icon" aria-hidden="true">◎</span><span><strong>No advertising or tracking</strong><small>Nimbus contains no advertising, cross-app tracking, or third-party analytics integration.</small></span></article>
+              <article class="privacy-trust-card"><span class="privacy-trust-icon" aria-hidden="true">⌂</span><span><strong>Local protection</strong><small>Preferences stay on the device, while the mobile refresh token is protected by the iOS Keychain.</small></span></article>
+              <article class="privacy-trust-card"><span class="privacy-trust-icon" aria-hidden="true">↗</span><span><strong>Your selected server</strong><small>The app connects directly to the Nimbus server you choose. The app developer does not operate or control third-party instances.</small></span></article>
+            </div>
+            <div class="privacy-trust-grid" data-language-root="de" hidden>
+              <article class="privacy-trust-card"><span class="privacy-trust-icon" aria-hidden="true">◎</span><span><strong>Keine Werbung und kein Tracking</strong><small>Nimbus enthält keine Werbung, kein App-übergreifendes Tracking und keine Analysedienste von Drittanbietern.</small></span></article>
+              <article class="privacy-trust-card"><span class="privacy-trust-icon" aria-hidden="true">⌂</span><span><strong>Lokaler Schutz</strong><small>Einstellungen bleiben auf dem Gerät; das mobile Aktualisierungstoken wird durch den iOS-Schlüsselbund geschützt.</small></span></article>
+              <article class="privacy-trust-card"><span class="privacy-trust-icon" aria-hidden="true">↗</span><span><strong>Ihr ausgewählter Server</strong><small>Die App verbindet sich direkt mit dem von Ihnen gewählten Nimbus-Server. Der App-Entwickler betreibt oder kontrolliert keine fremden Instanzen.</small></span></article>
+            </div>
+          </div>
+        </section>
+
+        <div class="privacy-shell" data-language-root="en">
+          <aside class="privacy-toc" aria-label="Privacy policy contents">
+            <p class="privacy-toc-label">On this page</p>
+            <nav>
+              <a href="#en-scope">Scope and responsibility</a>
+              <a href="#en-data">Information the app handles</a>
+              <a href="#en-device">Information on your device</a>
+              <a href="#en-use">How information is used</a>
+              <a href="#en-sharing">Recipients and services</a>
+              <a href="#en-storage">Local storage and Keychain</a>
+              <a href="#en-retention">Retention and deletion</a>
+              <a href="#en-rights">Your rights and choices</a>
+              <a href="#en-security">Security</a>
+              <a href="#en-contact">Contact and updates</a>
+            </nav>
+            <p class="privacy-toc-meta">Effective 15 August 2026<br />Policy version 1.1</p>
+          </aside>
+
+          <article class="privacy-article">
+            <section class="privacy-card" id="en-scope">
+              <header class="privacy-card-header"><span class="privacy-section-number">01</span><div><p class="eyebrow">The self-hosted model</p><h2>Scope and responsibility</h2></div></header>
+              <p>This policy covers the standard Nimbus Direct iOS app distributed by Liam Jayden Schleiß. The app is a client: it communicates directly with the Nimbus server address selected by you and has no developer-operated central account, analytics, or advertising backend.</p>
+              <p>The app developer does not operate, administer, or control third-party Nimbus instances. The organization that issued your account and operates the selected server is separately responsible for data processed by that instance, including hosting, SMTP, reverse proxies, retention, infrastructure records, and support content.</p>
+              <div class="privacy-callout"><span aria-hidden="true">i</span><span><strong>Two separate policies</strong><small>This App Privacy Policy is always available in the iOS app. When your selected server publishes an operator policy, the app shows it as a separate “Server Operator Privacy Policy” link. One policy never replaces the other.</small></span></div>
+              <p>The Nimbus web panel and any processing performed by a self-hosted server are outside this App Privacy Policy and belong in the server operator’s own privacy information.</p>
+            </section>
+
+            <section class="privacy-card" id="en-data">
+              <header class="privacy-card-header"><span class="privacy-section-number">02</span><div><p class="eyebrow">Data inventory</p><h2>Information the app handles</h2></div></header>
+              <p>The app handles the following categories on your device or transmits them directly to and from your selected Nimbus server. The app developer does not receive this information merely because you use the app.</p>
+              <div class="privacy-data-list">
+                <div class="privacy-data-row"><strong>Account and organization</strong><span>Email address, display name, internal user and customer identifiers, customer or company name, support email, plan, role, status, language, locale, time zone, and account timestamps returned by your server.</span><small>Displaying your account, localizing the app, and enabling support.</small></div>
+                <div class="privacy-data-row"><strong>Authentication and security</strong><span>Password, authenticator or recovery code during sign-in; short-lived access token; rotating refresh token; 2FA status and active mobile-session information.</span><small>Authenticating directly with your selected server and maintaining a secure session.</small></div>
+                <div class="privacy-data-row"><strong>Device, session, and network</strong><span>Selected server address, device name, platform, app version, APNs token when enabled, and connection metadata such as the IP address visible to the selected server.</span><small>Connecting to the server, managing devices, push delivery, and diagnostics.</small></div>
+                <div class="privacy-data-row"><strong>Infrastructure</strong><span>Assigned clusters, nodes, VMs and containers; VMID, name, type, status, CPU, memory, storage, uptime, IP and interface information, guest configuration, snapshots, ISO state, permissions, and Proxmox task results.</span><small>Displaying and operating the infrastructure assigned to your account.</small></div>
+                <div class="privacy-data-row"><strong>Actions and activity</strong><span>Power, snapshot, ISO, console, notification, maintenance, support, and security requests and the task or audit results returned by the server.</span><small>Providing requested app functions and showing recent activity.</small></div>
+                <div class="privacy-data-row"><strong>Support content</strong><span>Ticket subject, messages and replies, category, priority, linked resource, author, assigned administrator, status, read state, and timestamps.</span><small>Responding to support requests and preserving the support history.</small></div>
+                <div class="privacy-data-row"><strong>User-provided files and labels</strong><span>ISO file bytes, original filename, size, checksum, destination and upload state; snapshot names and descriptions; API-key names and permission selections.</span><small>Providing media, recovery, automation, and integration features.</small></div>
+                <div class="privacy-data-row"><strong>Notifications and maintenance</strong><span>Notification preferences, events, titles, messages, read state, maintenance or incident details, affected resources, time windows, and action locks.</span><small>Showing service information and delivering optional push notifications.</small></div>
+              </div>
+              <h3>Passwords and biometrics</h3>
+              <p>Your password and 2FA response are sent over HTTPS only to the selected Nimbus server for authentication. The app does not retain the plain password. Face ID, Touch ID, or Optic ID matching is performed by iOS; neither the app developer nor the selected server receives a facial image, fingerprint, iris pattern, or biometric template.</p>
+              <h3>Console sessions</h3>
+              <p>Console screen traffic, terminal output, keyboard input, pointer events, and pasted text pass in real time between your device and the selected Nimbus server, which relays them to Proxmox. The standard app does not record console video, terminal transcripts, or individual keystrokes.</p>
+            </section>
+
+            <section class="privacy-card" id="en-device">
+              <header class="privacy-card-header"><span class="privacy-section-number">03</span><div><p class="eyebrow">Your iPhone</p><h2>Information stored or processed on your device</h2></div></header>
+              <ul>
+                <li>The selected Nimbus server URL, language, appearance, and biometric-lock preference are saved locally.</li>
+                <li>The mobile refresh token is stored in the iOS Keychain. The short-lived access token is kept in app memory.</li>
+                <li>If push notifications are enabled, the APNs token is stored locally and registered with the selected Nimbus server.</li>
+                <li>Biometric matching is performed by iOS. Nimbus never receives a facial image, fingerprint, iris pattern, or biometric template.</li>
+                <li>When you upload an ISO, the app reads only the file you explicitly select through the iOS file picker.</li>
+              </ul>
+              <h3>Information the standard app does not request</h3>
+              <div class="privacy-chip-list">
+                <span class="privacy-chip">Location</span><span class="privacy-chip">Contacts</span><span class="privacy-chip">Photos and camera</span><span class="privacy-chip">Microphone</span><span class="privacy-chip">Health and fitness</span><span class="privacy-chip">Payment data</span><span class="privacy-chip">Advertising identifier</span><span class="privacy-chip">Browsing history</span>
+              </div>
+            </section>
+
+            <section class="privacy-card" id="en-use">
+              <header class="privacy-card-header"><span class="privacy-section-number">04</span><div><p class="eyebrow">Purpose limitation</p><h2>How information is used</h2></div></header>
+              <ul>
+                <li>Connect to the Nimbus server selected by you and authenticate your account.</li>
+                <li>Display the account, infrastructure, activity, maintenance, and support data returned by that server.</li>
+                <li>Send actions you request, such as power, console, snapshot, and ISO operations, to that server.</li>
+                <li>Store local preferences and protect the mobile session using the iOS Keychain and optional device authentication.</li>
+                <li>Register for and display push notifications only when you enable the feature.</li>
+                <li>Maintain app security, compatibility, and reliability without advertising or cross-app tracking.</li>
+              </ul>
+              <p>The server operator determines the legal basis for processing performed by its instance. Push notifications require your iOS permission and can be disabled at any time. The app developer does not use data from your selected server for independent advertising, profiling, or analytics purposes.</p>
+              <div class="privacy-callout"><span aria-hidden="true">✓</span><span><strong>No advertising profile</strong><small>Nimbus does not sell personal information, use it for targeted advertising, combine it with third-party data for advertising measurement, or track activity across other companies’ apps and websites.</small></span></div>
+            </section>
+
+            <section class="privacy-card" id="en-sharing">
+              <header class="privacy-card-header"><span class="privacy-section-number">05</span><div><p class="eyebrow">Controlled data flows</p><h2>Recipients and external services</h2></div></header>
+              <p>The app communicates with the following recipients only when required by the selected function:</p>
+              <ul>
+                <li><strong>Your selected Nimbus server and its operator</strong> receive login details and app requests and return account, infrastructure, support, security, and activity data.</li>
+                <li><strong>Apple Push Notification service</strong> receives an APNs device token and notification payload when you enable push notifications.</li>
+                <li><strong>iOS and Apple platform services</strong> provide Keychain storage, biometric authentication, networking, and system file selection on the device.</li>
+                <li><strong>Proxmox, email, hosting, network, and reverse-proxy providers</strong> may receive data through the selected Nimbus server. Those services are selected and controlled by the server operator, not the app developer.</li>
+              </ul>
+              <p>The app developer does not receive a copy of your account, infrastructure, support, or console data and does not choose the processors used by third-party Nimbus operators.</p>
+            </section>
+
+            <section class="privacy-card" id="en-storage">
+              <header class="privacy-card-header"><span class="privacy-section-number">06</span><div><p class="eyebrow">On-device storage</p><h2>Local storage and Keychain</h2></div></header>
+              <p>The app stores the selected server URL, language, appearance, and biometric-lock preference locally. Its rotating refresh token is stored in the iOS Keychain and the short-lived access token is held in memory. Signing out removes the stored mobile credentials; deleting the app removes its ordinary local data under iOS behavior.</p>
+              <p>The iOS app does not use browser cookies, advertising identifiers, third-party analytics SDKs, tracking pixels, or cross-app behavioral tracking. The Nimbus web panel has separate storage behavior governed by the server operator’s policy.</p>
+            </section>
+
+            <section class="privacy-card" id="en-retention">
+              <header class="privacy-card-header"><span class="privacy-section-number">07</span><div><p class="eyebrow">Storage periods</p><h2>Retention and deletion</h2></div></header>
+              <ul>
+                <li>Server URL and app preferences remain on the device until changed, reset, or removed with the app.</li>
+                <li>The short-lived access token remains in memory. The rotating refresh token remains in Keychain until sign-out, revocation, expiry, account removal, or app credential cleanup.</li>
+                <li>APNs registration data remains locally and at the selected server until push is disabled, the device is unregistered, the token becomes invalid, or the account is removed.</li>
+                <li>A file selected for an ISO upload is accessed for that requested transfer; the app does not keep a separate managed ISO library.</li>
+                <li>The app developer does not retain your Nimbus account, infrastructure, console, support, audit, or task data on a central developer service.</li>
+              </ul>
+              <div class="privacy-callout warning"><span aria-hidden="true">!</span><span><strong>Server retention is separate</strong><small>Your server operator determines how long its account, audit, task, support, notification, email, infrastructure, and proxy records remain. Consult the separately labeled Server Operator Privacy Policy or contact that operator.</small></span></div>
+            </section>
+
+            <section class="privacy-card" id="en-rights">
+              <header class="privacy-card-header"><span class="privacy-section-number">08</span><div><p class="eyebrow">Control and transparency</p><h2>Your rights and choices</h2></div></header>
+              <p>Depending on your location, you may have the right to request access, correction, deletion, restriction, objection, or portability of your personal information and to withdraw consent for optional processing. Users in the European Economic Area may also complain to their competent data-protection supervisory authority.</p>
+              <ul>
+                <li>Change language, biometric-lock, notification, and appearance preferences in the app or iOS Settings.</li>
+                <li>Disable push permission in iOS Settings and unregister the device from Nimbus.</li>
+                <li>View and revoke active mobile and browser sessions.</li>
+                <li>Request account access, correction, or deletion from the provider that issued the account.</li>
+              </ul>
+              <p>For questions about the app developer’s own processing, use the privacy contact below. For account, infrastructure, support, server-log, or retention requests, contact the operator that issued your account. Deleting the app does not delete information held by the selected server or Proxmox.</p>
+            </section>
+
+            <section class="privacy-card" id="en-security">
+              <header class="privacy-card-header"><span class="privacy-section-number">09</span><div><p class="eyebrow">Protection measures</p><h2>Security</h2></div></header>
+              <p>The app requires normal iOS transport security, stores the rotating refresh token in Keychain, keeps the access token in memory, can use device biometric protection, and receives only short-lived console handoffs. It does not provide a certificate-bypass mode.</p>
+              <p>No internet service can guarantee absolute security. Users should protect their credentials, enable MFA or passkeys, keep devices updated, and immediately report suspected unauthorized access.</p>
+              <h3>International transfers</h3>
+              <p>Apple may process push and platform-service data in countries outside your country of residence. A selected Nimbus server and its operator’s providers may do the same; the operator is responsible for those providers and any legally required transfer safeguards.</p>
+              <h3>Children</h3>
+              <p>Nimbus Direct is an infrastructure administration service and is not designed or intentionally offered to children. Accounts are provisioned by an infrastructure provider or organization.</p>
+            </section>
+
+            <section class="privacy-card" id="en-contact">
+              <header class="privacy-card-header"><span class="privacy-section-number">10</span><div><p class="eyebrow">Questions and requests</p><h2>Contact and policy updates</h2></div></header>
+              <div class="privacy-contact-grid">
+                <div class="privacy-contact-card"><strong>App developer and privacy contact</strong><span>Liam Jayden Schleiß<br />Beethovenstraße 2<br />76593 Gernsbach<br />Germany<br /><a href="mailto:nimbus-privacy@liamjayden.dev">nimbus-privacy@liamjayden.dev</a></span></div>
+                <div class="privacy-contact-card"><strong>Your Nimbus server and account</strong><span>For server-side data, contact the infrastructure provider that issued your account through its separately supplied operator policy, Support Center, or account contact.</span></div>
+              </div>
+              <p style="margin-top:18px">We may update this App Privacy Policy when app features, legal requirements, or Apple platform services change. The effective date at the top of this page identifies the current version. Changes made by a Nimbus server operator belong in that operator’s separate policy.</p>
+            </section>
+          </article>
+        </div>
+
+        <div class="privacy-shell" data-language-root="de" hidden>
+          <aside class="privacy-toc" aria-label="Inhalt der Datenschutzerklärung">
+            <p class="privacy-toc-label">Auf dieser Seite</p>
+            <nav>
+              <a href="#de-scope">Geltung und Verantwortung</a>
+              <a href="#de-data">Von der App verarbeitete Daten</a>
+              <a href="#de-device">Daten auf Ihrem Gerät</a>
+              <a href="#de-use">Verwendungszwecke</a>
+              <a href="#de-sharing">Empfänger und Dienste</a>
+              <a href="#de-storage">Lokaler Speicher und Schlüsselbund</a>
+              <a href="#de-retention">Speicherdauer und Löschung</a>
+              <a href="#de-rights">Ihre Rechte und Optionen</a>
+              <a href="#de-security">Sicherheit</a>
+              <a href="#de-contact">Kontakt und Änderungen</a>
+            </nav>
+            <p class="privacy-toc-meta">Gültig ab 15. August 2026<br />Version 1.1</p>
+          </aside>
+
+          <article class="privacy-article">
+            <section class="privacy-card" id="de-scope">
+              <header class="privacy-card-header"><span class="privacy-section-number">01</span><div><p class="eyebrow">Das Self-Hosting-Modell</p><h2>Geltungsbereich und Verantwortung</h2></div></header>
+              <p>Diese Erklärung gilt für die standardmäßige Nimbus-Direct-iOS-App, die von Liam Jayden Schleiß angeboten wird. Die App ist ein Client: Sie kommuniziert direkt mit der von Ihnen gewählten Nimbus-Serveradresse und besitzt kein vom Entwickler betriebenes zentrales Konto-, Analyse- oder Werbe-Backend.</p>
+              <p>Der App-Entwickler betreibt, verwaltet oder kontrolliert keine fremden Nimbus-Instanzen. Die Organisation, die Ihr Konto eingerichtet hat und den ausgewählten Server betreibt, ist separat für die Verarbeitung durch diese Instanz verantwortlich, etwa für Hosting, SMTP, Reverse Proxies, Aufbewahrung, Infrastrukturdaten und Supportinhalte.</p>
+              <div class="privacy-callout"><span aria-hidden="true">i</span><span><strong>Zwei getrennte Erklärungen</strong><small>Dieser App-Datenschutz ist in der iOS-App immer verfügbar. Veröffentlicht Ihr ausgewählter Server eine Betreibererklärung, zeigt die App sie separat als „Datenschutz des Betreibers“ an. Keine Erklärung ersetzt die andere.</small></span></div>
+              <p>Das Nimbus-Webpanel und jede Verarbeitung durch einen selbst gehosteten Server fallen nicht unter diesen App-Datenschutz und gehören in die eigenen Datenschutzhinweise des Serverbetreibers.</p>
+            </section>
+
+            <section class="privacy-card" id="de-data">
+              <header class="privacy-card-header"><span class="privacy-section-number">02</span><div><p class="eyebrow">Datenübersicht</p><h2>Welche Daten die App verarbeitet</h2></div></header>
+              <p>Die App verarbeitet die folgenden Kategorien auf Ihrem Gerät oder übermittelt sie direkt an den beziehungsweise vom ausgewählten Nimbus-Server. Der App-Entwickler erhält diese Daten nicht allein dadurch, dass Sie die App verwenden.</p>
+              <div class="privacy-data-list">
+                <div class="privacy-data-row"><strong>Konto und Organisation</strong><span>E-Mail-Adresse, Anzeigename, interne Benutzer- und Kundenkennungen, Kunden- oder Firmenname, Support-E-Mail, Tarif, Rolle, Status, Sprache, Gebietsschema, Zeitzone und vom Server gelieferte Kontozeitstempel.</span><small>Anzeige Ihres Kontos, Lokalisierung der App und Support.</small></div>
+                <div class="privacy-data-row"><strong>Anmeldung und Sicherheit</strong><span>Passwort sowie Authenticator- oder Wiederherstellungscode bei der Anmeldung; kurzlebiges Zugriffstoken; rotierendes Aktualisierungstoken; 2FA-Status und Informationen zu aktiven mobilen Sitzungen.</span><small>Direkte Authentifizierung beim ausgewählten Server und Aufrechterhaltung einer sicheren Sitzung.</small></div>
+                <div class="privacy-data-row"><strong>Gerät, Sitzung und Netzwerk</strong><span>Ausgewählte Serveradresse, Gerätename, Plattform, App-Version, APNs-Token bei Aktivierung und Verbindungsmetadaten wie die für den ausgewählten Server sichtbare IP-Adresse.</span><small>Serververbindung, Geräteverwaltung, Push-Zustellung und Diagnose.</small></div>
+                <div class="privacy-data-row"><strong>Infrastruktur</strong><span>Zugewiesene Cluster, Nodes, VMs und Container; VMID, Name, Typ, Status, CPU, Arbeitsspeicher, Speicher, Laufzeit, IP- und Schnittstelleninformationen, Gastkonfiguration, Snapshots, ISO-Status, Berechtigungen und Proxmox-Aufgabenergebnisse.</span><small>Anzeige und Verwaltung der Ihrem Konto zugewiesenen Infrastruktur.</small></div>
+                <div class="privacy-data-row"><strong>Aktionen und Aktivität</strong><span>Strom-, Snapshot-, ISO-, Konsolen-, Benachrichtigungs-, Wartungs-, Support- und Sicherheitsanfragen sowie die vom Server gelieferten Aufgaben- oder Auditergebnisse.</span><small>Bereitstellung angeforderter App-Funktionen und Anzeige der letzten Aktivität.</small></div>
+                <div class="privacy-data-row"><strong>Supportinhalte</strong><span>Ticketbetreff, Nachrichten und Antworten, Kategorie, Priorität, verknüpfte Ressource, Autor, zugewiesener Administrator, Status, Lesestatus und Zeitstempel.</span><small>Bearbeitung von Supportanfragen und Erhalt des Supportverlaufs.</small></div>
+                <div class="privacy-data-row"><strong>Bereitgestellte Dateien und Bezeichnungen</strong><span>ISO-Datei, ursprünglicher Dateiname, Größe, Prüfsumme, Ziel und Uploadstatus; Snapshot-Namen und -Beschreibungen; API-Schlüsselnamen und Berechtigungsauswahl.</span><small>Medien-, Wiederherstellungs-, Automatisierungs- und Integrationsfunktionen.</small></div>
+                <div class="privacy-data-row"><strong>Benachrichtigungen und Wartung</strong><span>Benachrichtigungseinstellungen, Ereignisse, Titel, Nachrichten, Lesestatus, Wartungs- oder Störungsinformationen, betroffene Ressourcen, Zeitfenster und Aktionssperren.</span><small>Anzeige von Serviceinformationen und optionale Push-Mitteilungen.</small></div>
+              </div>
+              <h3>Passwörter und Biometrie</h3>
+              <p>Ihr Passwort und die 2FA-Antwort werden über HTTPS ausschließlich zur Authentifizierung an den ausgewählten Nimbus-Server gesendet. Die App speichert das Klartextpasswort nicht. Der Abgleich per Face ID, Touch ID oder Optic ID erfolgt durch iOS; weder der App-Entwickler noch der ausgewählte Server erhalten Gesichtsbild, Fingerabdruck, Irismuster oder biometrische Vorlage.</p>
+              <h3>Konsolensitzungen</h3>
+              <p>Bildschirminhalte, Terminalausgaben, Tastatureingaben, Zeigerereignisse und eingefügter Text werden in Echtzeit zwischen Ihrem Gerät und dem ausgewählten Nimbus-Server übertragen, der sie an Proxmox weiterleitet. Die Standard-App zeichnet keine Konsolenvideos, Terminalprotokolle oder einzelnen Tastenanschläge auf.</p>
+            </section>
+
+            <section class="privacy-card" id="de-device">
+              <header class="privacy-card-header"><span class="privacy-section-number">03</span><div><p class="eyebrow">Ihr iPhone</p><h2>Daten auf Ihrem Gerät</h2></div></header>
+              <ul>
+                <li>Die ausgewählte Nimbus-Server-URL sowie Sprach-, Darstellungs- und Biometriesperren-Einstellungen werden lokal gespeichert.</li>
+                <li>Das mobile Aktualisierungstoken liegt im iOS-Schlüsselbund. Das kurzlebige Zugriffstoken wird nur im App-Arbeitsspeicher gehalten.</li>
+                <li>Wenn Push-Mitteilungen aktiviert sind, wird das APNs-Token lokal gespeichert und beim ausgewählten Nimbus-Server registriert.</li>
+                <li>Der biometrische Abgleich erfolgt durch iOS. Nimbus erhält niemals ein Gesichtsbild, einen Fingerabdruck, ein Irismuster oder eine biometrische Vorlage.</li>
+                <li>Bei einem ISO-Upload liest die App nur die Datei, die Sie ausdrücklich über die iOS-Dateiauswahl gewählt haben.</li>
+              </ul>
+              <h3>Daten, die die Standard-App nicht anfordert</h3>
+              <div class="privacy-chip-list">
+                <span class="privacy-chip">Standort</span><span class="privacy-chip">Kontakte</span><span class="privacy-chip">Fotos und Kamera</span><span class="privacy-chip">Mikrofon</span><span class="privacy-chip">Gesundheit und Fitness</span><span class="privacy-chip">Zahlungsdaten</span><span class="privacy-chip">Werbe-ID</span><span class="privacy-chip">Browserverlauf</span>
+              </div>
+            </section>
+
+            <section class="privacy-card" id="de-use">
+              <header class="privacy-card-header"><span class="privacy-section-number">04</span><div><p class="eyebrow">Zweckbindung</p><h2>Wie Daten verwendet werden</h2></div></header>
+              <ul>
+                <li>Verbindung mit dem von Ihnen gewählten Nimbus-Server und Authentifizierung Ihres Kontos.</li>
+                <li>Anzeige der vom Server gelieferten Konto-, Infrastruktur-, Aktivitäts-, Wartungs- und Supportdaten.</li>
+                <li>Übermittlung angeforderter Aktionen wie Strom-, Konsolen-, Snapshot- und ISO-Vorgänge an diesen Server.</li>
+                <li>Lokale Speicherung von Einstellungen und Schutz der mobilen Sitzung mit iOS-Schlüsselbund und optionaler Geräteauthentifizierung.</li>
+                <li>Registrierung und Anzeige von Push-Mitteilungen nur nach Aktivierung dieser Funktion.</li>
+                <li>Erhalt von Sicherheit, Kompatibilität und Zuverlässigkeit der App ohne Werbung oder App-übergreifendes Tracking.</li>
+              </ul>
+              <p>Der Serverbetreiber bestimmt die Rechtsgrundlage für die Verarbeitung seiner Instanz. Push-Mitteilungen benötigen Ihre iOS-Erlaubnis und können jederzeit deaktiviert werden. Der App-Entwickler verwendet Daten des ausgewählten Servers nicht für eigene Werbung, Profilbildung oder Analysen.</p>
+              <div class="privacy-callout"><span aria-hidden="true">✓</span><span><strong>Kein Werbeprofil</strong><small>Nimbus verkauft keine personenbezogenen Daten, verwendet sie nicht für zielgerichtete Werbung, verbindet sie nicht zur Werbemessung mit Drittanbieterdaten und verfolgt keine Aktivitäten über Apps oder Websites anderer Unternehmen hinweg.</small></span></div>
+            </section>
+
+            <section class="privacy-card" id="de-sharing">
+              <header class="privacy-card-header"><span class="privacy-section-number">05</span><div><p class="eyebrow">Kontrollierte Datenflüsse</p><h2>Empfänger und externe Dienste</h2></div></header>
+              <p>Die App kommuniziert nur dann mit folgenden Empfängern, wenn dies für die gewählte Funktion erforderlich ist:</p>
+              <ul>
+                <li><strong>Ihr ausgewählter Nimbus-Server und dessen Betreiber</strong> erhalten Anmeldedaten und App-Anfragen und liefern Konto-, Infrastruktur-, Support-, Sicherheits- und Aktivitätsdaten zurück.</li>
+                <li><strong>Apple Push Notification service</strong> erhält ein APNs-Gerätetoken und den Benachrichtigungsinhalt, wenn Sie Push-Mitteilungen aktivieren.</li>
+                <li><strong>iOS- und Apple-Plattformdienste</strong> stellen Schlüsselbundspeicher, biometrische Authentifizierung, Netzwerkfunktionen und System-Dateiauswahl auf dem Gerät bereit.</li>
+                <li><strong>Proxmox-, E-Mail-, Hosting-, Netzwerk- und Reverse-Proxy-Anbieter</strong> können Daten über den ausgewählten Nimbus-Server erhalten. Diese Dienste werden vom Serverbetreiber und nicht vom App-Entwickler ausgewählt und kontrolliert.</li>
+              </ul>
+              <p>Der App-Entwickler erhält keine Kopie Ihrer Konto-, Infrastruktur-, Support- oder Konsolendaten und wählt die Auftragsverarbeiter fremder Nimbus-Betreiber nicht aus.</p>
+            </section>
+
+            <section class="privacy-card" id="de-storage">
+              <header class="privacy-card-header"><span class="privacy-section-number">06</span><div><p class="eyebrow">Speicher auf dem Gerät</p><h2>Lokaler Speicher und Schlüsselbund</h2></div></header>
+              <p>Die App speichert die ausgewählte Server-URL sowie Sprach-, Darstellungs- und Biometriesperren-Einstellungen lokal. Das rotierende Aktualisierungstoken liegt im iOS-Schlüsselbund, das kurzlebige Zugriffstoken im Arbeitsspeicher. Beim Abmelden werden mobile Anmeldedaten entfernt; das Löschen der App entfernt ihre gewöhnlichen lokalen Daten nach dem Verhalten von iOS.</p>
+              <p>Die iOS-App verwendet keine Browser-Cookies, Werbekennungen, Analyse-SDKs von Drittanbietern, Trackingpixel oder App-übergreifendes Verhaltenstracking. Das Nimbus-Webpanel hat ein separates Speicherverhalten, das den Hinweisen des Serverbetreibers unterliegt.</p>
+            </section>
+
+            <section class="privacy-card" id="de-retention">
+              <header class="privacy-card-header"><span class="privacy-section-number">07</span><div><p class="eyebrow">Speicherfristen</p><h2>Speicherdauer und Löschung</h2></div></header>
+              <ul>
+                <li>Server-URL und App-Einstellungen bleiben auf dem Gerät, bis sie geändert, zurückgesetzt oder mit der App entfernt werden.</li>
+                <li>Das kurzlebige Zugriffstoken bleibt im Arbeitsspeicher. Das rotierende Aktualisierungstoken verbleibt bis zur Abmeldung, zum Widerruf, Ablauf, zur Kontolöschung oder Bereinigung der App-Anmeldedaten im Schlüsselbund.</li>
+                <li>APNs-Registrierungsdaten verbleiben lokal und beim ausgewählten Server, bis Push deaktiviert, das Gerät abgemeldet, das Token ungültig oder das Konto entfernt wird.</li>
+                <li>Eine für einen ISO-Upload gewählte Datei wird für diese angeforderte Übertragung gelesen; die App führt keine eigene verwaltete ISO-Bibliothek.</li>
+                <li>Der App-Entwickler speichert Ihre Nimbus-Konto-, Infrastruktur-, Konsolen-, Support-, Audit- oder Aufgabendaten nicht in einem zentralen Entwicklerdienst.</li>
+              </ul>
+              <div class="privacy-callout warning"><span aria-hidden="true">!</span><span><strong>Serveraufbewahrung ist getrennt</strong><small>Ihr Serverbetreiber legt fest, wie lange Konto-, Audit-, Aufgaben-, Support-, Benachrichtigungs-, E-Mail-, Infrastruktur- und Proxy-Daten gespeichert bleiben. Beachten Sie den separat bezeichneten Datenschutz des Betreibers oder kontaktieren Sie diesen.</small></span></div>
+            </section>
+
+            <section class="privacy-card" id="de-rights">
+              <header class="privacy-card-header"><span class="privacy-section-number">08</span><div><p class="eyebrow">Kontrolle und Transparenz</p><h2>Ihre Rechte und Wahlmöglichkeiten</h2></div></header>
+              <p>Abhängig von Ihrem Aufenthaltsort können Sie Rechte auf Auskunft, Berichtigung, Löschung, Einschränkung, Widerspruch oder Datenübertragbarkeit haben und eine Einwilligung in optionale Verarbeitungen widerrufen. Personen im Europäischen Wirtschaftsraum können sich außerdem bei der zuständigen Datenschutzaufsichtsbehörde beschweren.</p>
+              <ul>
+                <li>Ändern Sie Sprache, Biometriesperre, Benachrichtigungen und Darstellung in der App oder den iOS-Einstellungen.</li>
+                <li>Deaktivieren Sie Push-Mitteilungen in den iOS-Einstellungen und melden Sie das Gerät in Nimbus ab.</li>
+                <li>Zeigen Sie aktive mobile und Browser-Sitzungen an und widerrufen Sie diese.</li>
+                <li>Fordern Sie Auskunft, Berichtigung oder Löschung Ihres Kontos bei dem Anbieter an, der das Konto eingerichtet hat.</li>
+              </ul>
+              <p>Bei Fragen zur eigenen Verarbeitung des App-Entwicklers verwenden Sie den Datenschutzkontakt unten. Für Konto-, Infrastruktur-, Support-, Serverprotokoll- oder Aufbewahrungsanfragen wenden Sie sich an den Betreiber, der Ihr Konto eingerichtet hat. Das Löschen der App löscht keine Daten beim ausgewählten Server oder in Proxmox.</p>
+            </section>
+
+            <section class="privacy-card" id="de-security">
+              <header class="privacy-card-header"><span class="privacy-section-number">09</span><div><p class="eyebrow">Schutzmaßnahmen</p><h2>Sicherheit</h2></div></header>
+              <p>Die App verlangt den normalen iOS-Transportschutz, speichert das rotierende Aktualisierungstoken im Schlüsselbund, hält das Zugriffstoken im Arbeitsspeicher, kann den biometrischen Geräteschutz verwenden und erhält nur kurzlebige Konsolenübergaben. Einen Modus zum Umgehen von Zertifikatsprüfungen gibt es nicht.</p>
+              <p>Kein Internetdienst kann absolute Sicherheit garantieren. Benutzer sollten ihre Zugangsdaten schützen, MFA oder Passkeys aktivieren, Geräte aktuell halten und vermutete unbefugte Zugriffe sofort melden.</p>
+              <h3>Internationale Datenübermittlungen</h3>
+              <p>Apple kann Push- und Plattformdienstdaten in Ländern außerhalb Ihres Wohnsitzlandes verarbeiten. Ein ausgewählter Nimbus-Server und die Anbieter seines Betreibers können dies ebenfalls tun; der Betreiber ist für diese Anbieter und gesetzlich erforderliche Übermittlungsgarantien verantwortlich.</p>
+              <h3>Kinder</h3>
+              <p>Nimbus Direct ist ein Dienst zur Infrastrukturverwaltung und richtet sich nicht gezielt an Kinder. Konten werden durch einen Infrastrukturanbieter oder eine Organisation bereitgestellt.</p>
+            </section>
+
+            <section class="privacy-card" id="de-contact">
+              <header class="privacy-card-header"><span class="privacy-section-number">10</span><div><p class="eyebrow">Fragen und Anfragen</p><h2>Kontakt und Änderungen</h2></div></header>
+              <div class="privacy-contact-grid">
+                <div class="privacy-contact-card"><strong>App-Entwickler und Datenschutzkontakt</strong><span>Liam Jayden Schleiß<br />Beethovenstraße 2<br />76593 Gernsbach<br />Deutschland<br /><a href="mailto:nimbus-privacy@liamjayden.dev">nimbus-privacy@liamjayden.dev</a></span></div>
+                <div class="privacy-contact-card"><strong>Ihr Nimbus-Server und Konto</strong><span>Für serverseitige Daten kontaktieren Sie den Infrastrukturanbieter, der Ihr Konto eingerichtet hat, über dessen separat bereitgestellte Betreibererklärung, Support-Center oder Kontaktdaten.</span></div>
+              </div>
+              <p style="margin-top:18px">Wir können diesen App-Datenschutz aktualisieren, wenn sich App-Funktionen, rechtliche Anforderungen oder Apple-Plattformdienste ändern. Das oben angegebene Gültigkeitsdatum kennzeichnet die aktuelle Fassung. Änderungen eines Nimbus-Serverbetreibers gehören in dessen separate Erklärung.</p>
+            </section>
+          </article>
+        </div>
+      </main>
+
+      <footer class="privacy-footer">
+        <div class="privacy-footer-inner">
+          <span>© 2026 Nimbus Direct · <a href="/privacy.html">App Privacy / App-Datenschutz</a></span>
+          <span class="privacy-version" data-en="Policy version 1.1 · Effective 15 August 2026" data-de="Version 1.1 · Gültig ab 15. August 2026">Policy version 1.1 · Effective 15 August 2026</span>
+        </div>
+      </footer>
+    </div>
+    <script src="/privacy.js?v=20260815-01" defer></script>
+  </body>
+</html>

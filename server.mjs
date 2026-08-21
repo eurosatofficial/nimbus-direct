@@ -17,6 +17,7 @@ import {
 } from "./server/email.mjs";
 import { createTotpEnrollment, generateRecoveryCodes, verifyTotp } from "./server/mfa.mjs";
 import { createNotificationService, localizeNotificationPage } from "./server/notifications.mjs";
+import { createEventPushService } from "./server/event-push.mjs";
 import { availableLanguages, defaultLanguage } from "./server/locales.mjs";
 import { createPushService } from "./server/push.mjs";
 import { createPasskeyService } from "./server/passkeys.mjs";
@@ -133,6 +134,7 @@ const email = createEmailService({
 });
 const push = createPushService({ store, config: config.push, log });
 const notifications = createNotificationService({ store, email, push, log });
+const eventPush = createEventPushService({ store, push, log });
 
 function sendJson(response, status, payload, extraHeaders = {}) {
   response.writeHead(status, { ...headers, "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extraHeaders });
@@ -456,6 +458,7 @@ function verifyMfaCredential(userId, code, { allowRecovery = true } = {}) {
 }
 
 function queueSecurityNotice(user, { title, message, ipAddress = null }) {
+  eventPush.security(user, { title, message });
   try {
     if (!store.getEmailSettings().enabled || !user?.email) return;
     const content = securityEmailTemplate({
@@ -589,6 +592,13 @@ function queueMaintenanceEmails({ event, deliveries }, { resolution = false, cre
   return queued;
 }
 
+function queueMaintenanceNotifications(result, { phase = null, resolution = false, createdBy = null } = {}) {
+  return {
+    queuedEmails: queueMaintenanceEmails(result, { resolution, createdBy }),
+    queuedPushes: eventPush.maintenance(result, { phase }),
+  };
+}
+
 function supportPanelUrl(ticketId) {
   const value = store.getEmailSettings().appUrl;
   if (!value) return "";
@@ -639,6 +649,13 @@ function queueSupportEmails({
   }
   if (queued) void email.processDue();
   return queued;
+}
+
+function queueSupportNotifications(input) {
+  return {
+    queuedEmails: queueSupportEmails(input),
+    queuedPushes: eventPush.support(input),
+  };
 }
 
 async function waitForUniformResponse(startedAt, minimumMs = 300) {
@@ -999,6 +1016,19 @@ async function refreshClusterTasks(clusterId) {
   }
 }
 
+function reconcileOperationsWithPush(clusterId, options) {
+  const before = store.getOperationsCenter().incidents
+    .filter((incident) => incident.clusterId === clusterId && incident.status !== "resolved");
+  const active = store.reconcileOperations(clusterId, options);
+  const activeIds = new Set(active.map((incident) => incident.id));
+  const previousIds = new Set(before.map((incident) => incident.id));
+  eventPush.operations({
+    opened: active.filter((incident) => !previousIds.has(incident.id)),
+    resolved: before.filter((incident) => !activeIds.has(incident.id)),
+  });
+  return active;
+}
+
 async function syncCluster(clusterId) {
   if (config.allowDemoData && clusterId === "demo-eu") {
     const synced = store.syncResources(clusterId, demoResources.map((resource) => {
@@ -1007,7 +1037,7 @@ async function syncCluster(clusterId) {
     }));
     store.saveOperationsSnapshot(clusterId, { ...demoOperations, collectedAt: Date.now() });
     await refreshClusterTasks(clusterId);
-    store.reconcileOperations(clusterId, {
+    reconcileOperationsWithPush(clusterId, {
       staleAfterMs: Math.max(config.syncIntervalMs * 3, 5 * 60_000),
     });
     try { await notifications.evaluateResourceAlerts({ clusterId }); }
@@ -1023,7 +1053,7 @@ async function syncCluster(clusterId) {
     const synced = store.syncResources(clusterId, resources);
     store.saveOperationsSnapshot(clusterId, operations);
     await refreshClusterTasks(clusterId);
-    store.reconcileOperations(clusterId, {
+    reconcileOperationsWithPush(clusterId, {
       staleAfterMs: Math.max(config.syncIntervalMs * 3, 5 * 60_000),
     });
     try { await notifications.evaluateResourceAlerts({ clusterId }); }
@@ -1031,7 +1061,7 @@ async function syncCluster(clusterId) {
     return synced;
   } catch (error) {
     store.setClusterSync(clusterId, { error: error.code || "proxmox_sync_failed" });
-    store.reconcileOperations(clusterId, {
+    reconcileOperationsWithPush(clusterId, {
       staleAfterMs: Math.max(config.syncIntervalMs * 3, 5 * 60_000),
     });
     throw error;
@@ -1069,7 +1099,7 @@ async function syncAllClusters() {
 function reconcileAllOperations() {
   if (config.demoReadOnly) return;
   for (const cluster of store.listClusters()) {
-    store.reconcileOperations(cluster.id, {
+    reconcileOperationsWithPush(cluster.id, {
       staleAfterMs: Math.max(config.syncIntervalMs * 3, 5 * 60_000),
     });
   }
@@ -1466,9 +1496,13 @@ async function routeAdmin(request, response, pathname) {
     const event = store.createMaintenanceEvent(input, { userId: session.user.id });
     let published = null;
     let queuedEmails = 0;
+    let queuedPushes = 0;
     if (shouldPublish) {
       published = store.publishMaintenanceEvent(event.id, { userId: session.user.id });
-      queuedEmails = queueMaintenanceEmails(published, { createdBy: session.user.id });
+      ({ queuedEmails, queuedPushes } = queueMaintenanceNotifications(published, {
+        phase: published.event.status,
+        createdBy: session.user.id,
+      }));
     }
     const result = published?.event || event;
     audit(request, session, published ? "admin.maintenance.published" : "admin.maintenance.draft_created", {
@@ -1480,9 +1514,10 @@ async function routeAdmin(request, response, pathname) {
         recipientCount: result.recipientCount,
         lockGroups: result.lockGroups.map((group) => group.id),
         queuedEmails,
+        queuedPushes,
       },
     });
-    sendJson(response, 201, { event: result, queuedEmails });
+    sendJson(response, 201, { event: result, queuedEmails, queuedPushes });
     return true;
   }
   let maintenanceMatch = pathname.match(/^\/api\/admin\/maintenance-events\/([^/]+)$/);
@@ -1516,6 +1551,7 @@ async function routeAdmin(request, response, pathname) {
     const operation = maintenanceMatch[2];
     let event;
     let queuedEmails = 0;
+    let queuedPushes = 0;
     if (operation === "publish") {
       const limit = maintenancePublishLimiter.consume(`${session.user.id}:${clientIp(request)}`);
       if (!limit.allowed) {
@@ -1524,13 +1560,24 @@ async function routeAdmin(request, response, pathname) {
       }
       const result = store.publishMaintenanceEvent(id, { userId: session.user.id });
       event = result.event;
-      queuedEmails = queueMaintenanceEmails(result, { createdBy: session.user.id });
+      ({ queuedEmails, queuedPushes } = queueMaintenanceNotifications(result, {
+        phase: event.status,
+        createdBy: session.user.id,
+      }));
     } else if (operation === "resolve") {
       const result = store.resolveMaintenanceEvent(id, { userId: session.user.id });
       event = result.event;
-      queuedEmails = queueMaintenanceEmails(result, { resolution: true, createdBy: session.user.id });
+      ({ queuedEmails, queuedPushes } = queueMaintenanceNotifications(result, {
+        phase: "resolved",
+        resolution: true,
+        createdBy: session.user.id,
+      }));
     } else {
       event = store.cancelMaintenanceEvent(id, { userId: session.user.id });
+      queuedPushes = eventPush.maintenance({
+        event,
+        deliveries: store.listMaintenanceDeliveryRecipients(id),
+      }, { phase: "cancelled" });
     }
     const auditAction = {
       publish: "admin.maintenance.published",
@@ -1545,9 +1592,10 @@ async function routeAdmin(request, response, pathname) {
         recipientCount: event.recipientCount,
         lockGroups: event.lockGroups.map((group) => group.id),
         queuedEmails,
+        queuedPushes,
       },
     });
-    sendJson(response, 200, { event, queuedEmails });
+    sendJson(response, 200, { event, queuedEmails, queuedPushes });
     return true;
   }
   if (pathname === "/api/admin/operations" && request.method === "GET") {
@@ -1746,11 +1794,20 @@ async function routeAdmin(request, response, pathname) {
     if (!requireSecurityActionRate(request, response, session.user.id)) return true;
     const targetUserId = decodeURIComponent(match[1]);
     const keyId = decodeURIComponent(match[2]);
+    const existingKey = store.getUserApiKey(targetUserId, keyId);
     if (!store.revokeUserApiKey(targetUserId, keyId, { revokedBy: session.user.id, reason: "admin_revoked" })) {
       sendJson(response, 404, { error: "api_key_not_found" });
       return true;
     }
     audit(request, session, "admin.user.api_key_revoked", { detail: { targetUserId, keyId } });
+    const target = store.getUserForAuth(targetUserId);
+    if (target && existingKey) {
+      queueSecurityNotice(target, {
+        title: "An administrator revoked an API key",
+        message: `An administrator revoked the API key “${existingKey.name}” for your Nimbus Direct account.`,
+        ipAddress: clientIp(request),
+      });
+    }
     sendJson(response, 204, null);
     return true;
   }
@@ -1760,6 +1817,14 @@ async function routeAdmin(request, response, pathname) {
     const targetUserId = decodeURIComponent(match[1]);
     const revoked = store.revokeAllUserApiKeys(targetUserId, { revokedBy: session.user.id });
     audit(request, session, "admin.user.api_keys_revoked", { detail: { targetUserId, revoked } });
+    const target = store.getUserForAuth(targetUserId);
+    if (target && revoked > 0) {
+      queueSecurityNotice(target, {
+        title: "An administrator revoked all API keys",
+        message: "An administrator revoked all API keys for your Nimbus Direct account.",
+        ipAddress: clientIp(request),
+      });
+    }
     sendJson(response, 200, { revoked });
     return true;
   }
@@ -2283,11 +2348,19 @@ async function routeCustomer(request, response, pathname) {
       return true;
     }
     const keyId = decodeURIComponent(apiKeyMatch[1]);
+    const existingKey = store.getUserApiKey(user.id, keyId);
     if (!store.revokeUserApiKey(user.id, keyId)) {
       sendJson(response, 404, { error: "api_key_not_found" });
       return true;
     }
     audit(request, session, "security.api_key_revoked", { detail: { keyId } });
+    if (existingKey) {
+      queueSecurityNotice(store.getUserForAuth(user.id), {
+        title: "An API key was revoked",
+        message: `The API key “${existingKey.name}” was revoked and can no longer access your Nimbus Direct account.`,
+        ipAddress: clientIp(request),
+      });
+    }
     sendJson(response, 204, null);
     return true;
   }
@@ -2538,7 +2611,7 @@ async function routeCustomer(request, response, pathname) {
       customerId: user.customerId,
       userId: user.id,
     });
-    const queuedEmails = queueSupportEmails({
+    const { queuedEmails, queuedPushes } = queueSupportNotifications({
       ticket: result.ticket,
       message: result.messages[0]?.body,
       actor: user,
@@ -2555,9 +2628,10 @@ async function routeCustomer(request, response, pathname) {
         category: result.ticket.category,
         priority: result.ticket.priority,
         queuedEmails,
+        queuedPushes,
       },
     });
-    sendJson(response, 201, { ...result, queuedEmails });
+    sendJson(response, 201, { ...result, queuedEmails, queuedPushes });
     return true;
   }
   let supportTicketMatch = pathname.match(/^\/api\/v1\/support\/tickets\/([^/]+)$/);
@@ -2579,15 +2653,16 @@ async function routeCustomer(request, response, pathname) {
     const previous = store.getSupportTicket(id, user).ticket;
     const ticket = store.updateSupportTicket(id, await readBody(request), user);
     let queuedEmails = 0;
+    let queuedPushes = 0;
     if (previous.status !== ticket.status) {
-      queuedEmails = queueSupportEmails({
+      ({ queuedEmails, queuedPushes } = queueSupportNotifications({
         ticket,
         message: `The ticket status changed from ${previous.status.replaceAll("_", " ")} to ${ticket.status.replaceAll("_", " ")}.`,
         actor: user,
         audience: "customer",
         eventType: "status",
         createdBy: user.id,
-      });
+      }));
     }
     audit(request, session, "admin.support.ticket_updated", {
       customerId: ticket.customerId,
@@ -2599,9 +2674,10 @@ async function routeCustomer(request, response, pathname) {
         priority: ticket.priority,
         assignedTo: ticket.assignedTo,
         queuedEmails,
+        queuedPushes,
       },
     });
-    sendJson(response, 200, { ticket, queuedEmails });
+    sendJson(response, 200, { ticket, queuedEmails, queuedPushes });
     return true;
   }
   supportTicketMatch = pathname.match(/^\/api\/v1\/support\/tickets\/([^/]+)\/messages$/);
@@ -2616,7 +2692,9 @@ async function routeCustomer(request, response, pathname) {
     const input = await readBody(request);
     const internal = user.role === "admin" && Boolean(input.internal);
     const result = store.addSupportTicketMessage(id, input, user, { internal });
-    const queuedEmails = internal ? 0 : queueSupportEmails({
+    const { queuedEmails, queuedPushes } = internal
+      ? { queuedEmails: 0, queuedPushes: 0 }
+      : queueSupportNotifications({
       ticket: result.ticket,
       message: result.message.body,
       actor: user,
@@ -2633,9 +2711,10 @@ async function routeCustomer(request, response, pathname) {
         messageId: result.message.id,
         internal,
         queuedEmails,
+        queuedPushes,
       },
     });
-    sendJson(response, 201, { ...result, queuedEmails });
+    sendJson(response, 201, { ...result, queuedEmails, queuedPushes });
     return true;
   }
   supportTicketMatch = pathname.match(/^\/api\/v1\/support\/tickets\/([^/]+)\/(read|close|reopen)$/);
@@ -2651,7 +2730,7 @@ async function routeCustomer(request, response, pathname) {
     const ticket = operation === "close"
       ? store.closeSupportTicket(id, user)
       : store.reopenSupportTicket(id, user);
-    const queuedEmails = queueSupportEmails({
+    const { queuedEmails, queuedPushes } = queueSupportNotifications({
       ticket,
       message: operation === "close"
         ? "The customer marked this support request as closed."
@@ -2664,9 +2743,9 @@ async function routeCustomer(request, response, pathname) {
     audit(request, session, operation === "close" ? "support.ticket.closed" : "support.ticket.reopened", {
       customerId: ticket.customerId,
       resourceId: ticket.resourceId,
-      detail: { ticketId: ticket.id, reference: ticket.reference, queuedEmails },
+      detail: { ticketId: ticket.id, reference: ticket.reference, queuedEmails, queuedPushes },
     });
-    sendJson(response, 200, { ticket, queuedEmails });
+    sendJson(response, 200, { ticket, queuedEmails, queuedPushes });
     return true;
   }
 

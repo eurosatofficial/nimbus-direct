@@ -88,6 +88,10 @@ function localizeSecurityCopy(value, language) {
   const text = String(value || "");
   const apiKey = text.match(/^The API key “(.+)” was created for your Nimbus Direct account\. Revoke it immediately if you did not create it\.$/);
   if (apiKey) return emailCopy(language, "The API key “{name}” was created for your Nimbus Direct account. Revoke it immediately if you did not create it.", { name: apiKey[1] });
+  const revokedApiKey = text.match(/^The API key “(.+)” was revoked and can no longer access your Nimbus Direct account\.$/);
+  if (revokedApiKey) return emailCopy(language, "The API key “{name}” was revoked and can no longer access your Nimbus Direct account.", { name: revokedApiKey[1] });
+  const adminRevokedApiKey = text.match(/^An administrator revoked the API key “(.+)” for your Nimbus Direct account\.$/);
+  if (adminRevokedApiKey) return emailCopy(language, "An administrator revoked the API key “{name}” for your Nimbus Direct account.", { name: adminRevokedApiKey[1] });
   const passkeyAdded = text.match(/^The passkey “(.+)” can now sign in to your Nimbus Direct account without a password\.$/);
   if (passkeyAdded) return emailCopy(language, "The passkey “{name}” can now sign in to your Nimbus Direct account without a password.", { name: passkeyAdded[1] });
   const passkeyRemoved = text.match(/^The passkey “(.+)” can no longer sign in to your Nimbus Direct account\.$/);
