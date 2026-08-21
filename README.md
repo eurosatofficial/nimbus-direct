@@ -515,7 +515,7 @@ Nimbus Push Relay:
 
 ```env
 PUSH_MODE=relay
-PUSH_RELAY_URL=https://push.example.nimbus-relay.invalid
+PUSH_RELAY_URL=https://push.liamjayden.dev
 ```
 
 Use the real HTTPS relay origin supplied by the Nimbus Direct app developer.
