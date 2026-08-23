@@ -121,6 +121,9 @@ svg { display: block; }
 body.auth-pending .auth-view { visibility: hidden; }
 body.auth-pending .app-shell, body:not(.authenticated) .app-shell { display: none; }
 body.authenticated .auth-view { display: none; }
+.script-required { width: min(calc(100% - 32px), 520px); margin: 12vh auto 0; padding: 22px; display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 16px; color: var(--ink); background: var(--surface); box-shadow: var(--shadow); }
+.script-required strong { font-size: 17px; }
+.script-required span { color: var(--body); font-size: 13px; line-height: 1.6; }
 
 .app-shell { min-height: 100vh; }
 .sidebar { z-index: 30; width: var(--sidebar); top: 0; bottom: 0; left: 0; padding: 25px 18px 18px; position: fixed; display: flex; flex-direction: column; border-right: 1px solid #e4e7ee; background: #fff; }

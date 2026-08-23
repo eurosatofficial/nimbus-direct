@@ -251,6 +251,11 @@ docker compose -f compose.yaml -f compose.internal.yaml logs --tail=100 panel
 
 Put an HTTPS reverse proxy in front of Nimbus. Docker Compose publishes port `4173` on all host interfaces so it is reachable across internal/external host networking; restrict access to the reverse proxy or trusted networks with the host firewall. Preserve `Host`, `X-Forwarded-For`, and `X-Forwarded-Proto`.
 
+Apply Nimbus's security headers at the outer HTTPS virtual host with the Nginx
+`always` parameter so they remain present on proxy-generated `4xx` and `5xx`
+responses too. A complete Nginx/Plesk example is provided in
+[`docs/REVERSE_PROXY_SECURITY.md`](docs/REVERSE_PROXY_SECURITY.md).
+
 For this internal-address deployment, always include both Compose files. Starting only `compose.yaml` omits the internal Proxmox hostname/address and private-CA wiring and can make resource-detail API requests fail.
 
 ### 4. Add Proxmox clusters

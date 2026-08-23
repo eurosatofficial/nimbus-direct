@@ -3806,6 +3806,9 @@ const server = createServer(async (request, response) => {
       }));
     }
     if (url.pathname.startsWith("/api/")) return await routeApi(request, response, url.pathname);
+    if (!["GET", "HEAD"].includes(request.method)) {
+      return sendJson(response, 405, { error: "method_not_allowed", requestId }, { allow: "GET, HEAD" });
+    }
     const vendor = [
       { prefix: "/vendor/novnc/", root: noVncRoot },
       { prefix: "/vendor/xterm/", root: xtermRoot },
@@ -3826,13 +3829,24 @@ const server = createServer(async (request, response) => {
     response.writeHead(200, { ...headers, "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": cacheControl });
     if (request.method === "HEAD") response.end(); else response.end(contents);
   } catch (error) {
-    const status = error.status || (error.code === "ENOENT" ? 404 : 500);
+    const filesystemError = typeof error?.path === "string" && typeof error?.code === "string";
+    const missingFile = filesystemError && ["ENOENT", "ENOTDIR", "EISDIR"].includes(error.code);
+    const status = error.status || (missingFile ? 404 : 500);
     if (status >= 500) {
       let safePath = "unknown";
       try { safePath = new URL(request.url, `http://${request.headers.host || "localhost"}`).pathname; } catch { /* omit malformed URLs */ }
       log("error", "request_failed", { requestId, method: request.method, path: safePath, error: error.message, code: error.code });
     }
-    if (!response.headersSent) sendJson(response, status, { error: error.code || (status === 404 ? "not_found" : "request_failed"), message: status < 500 ? error.message : undefined, requestId });
+    if (!response.headersSent) {
+      const publicError = filesystemError
+        ? (status === 404 ? "not_found" : "request_failed")
+        : (error.code || (status === 404 ? "not_found" : "request_failed"));
+      sendJson(response, status, {
+        error: publicError,
+        message: !filesystemError && status < 500 ? error.message : undefined,
+        requestId,
+      });
+    }
     else response.end();
   }
 });

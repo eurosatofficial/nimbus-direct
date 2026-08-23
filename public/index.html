@@ -12,6 +12,12 @@
     <link rel="stylesheet" href="/styles.css?v=20260815-01" />
   </head>
   <body class="auth-pending">
+    <noscript>
+      <section class="script-required" role="alert">
+        <strong>JavaScript is required for secure sign-in.</strong>
+        <span>Enable JavaScript and reload Nimbus Direct. Credentials cannot be submitted from this fallback page.</span>
+      </section>
+    </noscript>
     <a class="skip-link" href="#pageContent">Skip to content</a>
 
     <section class="auth-view" id="authView" aria-labelledby="loginTitle">
@@ -34,7 +40,7 @@
           <span aria-hidden="true">◇</span>
           <span><strong>Public read-only demo</strong><small>You can explore every screen, but this shared instance cannot be changed.</small></span>
         </div>
-        <form id="loginForm">
+        <form id="loginForm" method="post" action="/api/auth/login">
           <label for="loginEmail">Email address</label>
           <input id="loginEmail" type="email" name="email" autocomplete="username" required placeholder="you@company.com" />
           <label for="loginPassword">Password</label>
@@ -44,21 +50,21 @@
           <button class="button secondary auth-submit passkey-login" id="passkeyLoginButton" type="button" hidden><span aria-hidden="true">⌁</span> Sign in with a passkey</button>
           <button class="auth-link" id="forgotPasswordButton" type="button">Forgot your password?</button>
         </form>
-        <form id="mfaForm" hidden>
+        <form id="mfaForm" method="post" action="/api/auth/mfa" hidden>
           <label for="mfaLoginCode">Authenticator or recovery code</label>
           <input id="mfaLoginCode" type="text" name="code" autocomplete="one-time-code" maxlength="16" required placeholder="123456" />
           <p class="form-message error" id="mfaAuthError" role="alert"></p>
           <button class="button primary auth-submit" type="submit">Verify and sign in</button>
           <button class="button quiet auth-back" id="mfaBackButton" type="button">← Use another account</button>
         </form>
-        <form id="forgotPasswordForm" hidden>
+        <form id="forgotPasswordForm" method="post" action="/api/auth/password/forgot" hidden>
           <label for="forgotPasswordEmail">Email address</label>
           <input id="forgotPasswordEmail" type="email" name="email" autocomplete="email" required placeholder="you@company.com" />
           <p class="form-message" id="forgotPasswordMessage" role="status"></p>
           <button class="button primary auth-submit" type="submit">Send reset link</button>
           <button class="button quiet auth-back" id="forgotPasswordBackButton" type="button">← Back to sign in</button>
         </form>
-        <form id="accountCompletionForm" hidden>
+        <form id="accountCompletionForm" method="post" action="/api/auth/account/complete" hidden>
           <p class="account-flow-recipient" id="accountFlowRecipient"></p>
           <label for="accountPassword">New password</label>
           <input id="accountPassword" type="password" name="password" autocomplete="new-password" minlength="12" maxlength="256" required />
@@ -176,7 +182,7 @@
     </dialog>
 
     <dialog id="editDialog" class="dialog form-dialog" aria-labelledby="editDialogTitle">
-      <form id="editForm" class="dialog-shell">
+      <form id="editForm" class="dialog-shell" method="post" action="/api/form-fallback">
         <header class="dialog-header">
           <div><p class="eyebrow">Platform administration</p><h2 id="editDialogTitle">Edit record</h2></div>
           <button class="icon-button dialog-close" type="button" data-close-dialog aria-label="Close editor">×</button>
@@ -191,7 +197,7 @@
     </dialog>
 
     <dialog id="snapshotDialog" class="dialog snapshot-dialog" aria-labelledby="snapshotDialogTitle">
-      <form id="snapshotForm" class="dialog-shell">
+      <form id="snapshotForm" class="dialog-shell" method="post" action="/api/form-fallback">
         <header class="dialog-header">
           <div><p class="eyebrow" id="snapshotDialogEyebrow">Recovery point</p><h2 id="snapshotDialogTitle">Manage snapshot</h2></div>
           <button class="icon-button dialog-close" type="button" data-close-dialog aria-label="Close snapshot dialog">×</button>

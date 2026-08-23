@@ -66,6 +66,33 @@ test("customer ISO boot and Snapshot Center workflows stay assignment-scoped", a
 
   try {
     await waitForServer(baseUrl, child, logs);
+    const missingFile = await fetch(`${baseUrl}/missing-${process.pid}.txt`);
+    const missingBody = await missingFile.text();
+    assert.equal(missingFile.status, 404);
+    assert.match(missingFile.headers.get("content-type") || "", /^application\/json/);
+    assert.deepEqual(Object.keys(JSON.parse(missingBody)).sort(), ["error", "requestId"]);
+    assert.equal(JSON.parse(missingBody).error, "not_found");
+    assert.doesNotMatch(missingBody, /ENOENT|no such file|\/app\/public|server\.mjs|at file:/i);
+
+    const securityContact = await fetch(`${baseUrl}/.well-known/security.txt`);
+    const securityContactBody = await securityContact.text();
+    assert.equal(securityContact.status, 200);
+    assert.match(securityContact.headers.get("content-type") || "", /^text\/plain/);
+    assert.match(securityContactBody, /^Contact: mailto:nimbus@servers4free\.de$/m);
+    assert.match(securityContactBody, /^Expires: 2027-08-22T23:59:59\.000Z$/m);
+    assert.match(securityContactBody, /^Preferred-Languages: en, de$/m);
+
+    const nativeLoginFallback = await fetch(`${baseUrl}/`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "email=synthetic%40example.test&password=NotARealPassword%212026",
+    });
+    assert.equal(nativeLoginFallback.status, 405);
+    assert.equal(nativeLoginFallback.headers.get("allow"), "GET, HEAD");
+    assert.match(nativeLoginFallback.headers.get("content-security-policy") || "", /form-action 'none'/);
+    assert.equal(nativeLoginFallback.url, `${baseUrl}/`);
+    assert.doesNotMatch(nativeLoginFallback.url, /email|password|synthetic/i);
+
     const login = await request("/api/auth/login", {
       method: "POST",
       body: { email: "admin@example.test", password: "admin password for server test" },

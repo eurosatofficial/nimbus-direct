@@ -85,4 +85,16 @@ node scripts/sync-locales.mjs
 
 This generates the Xcode string catalogue and bundled language registry. The
 generated files are committed with the app, so adding a language still requires
-no Swift or Xcode-project edits.
+no Swift or Xcode-project edits. Translations must not be maintained directly in
+`Localizable.xcstrings`, because synchronization deliberately regenerates it
+from the shared JSON catalogues.
+
+The iOS project also provides a release check:
+
+```bash
+node scripts/check-localizations.mjs
+```
+
+It verifies the generated catalogue, performs a temporary unsigned simulator
+build, and rejects localized SwiftUI strings that have not been added to the
+shared English catalogue.

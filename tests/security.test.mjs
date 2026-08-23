@@ -63,9 +63,27 @@ test("security headers deny framing and unnecessary browser capabilities", () =>
   const headers = securityHeaders();
   assert.equal(headers["x-frame-options"], "DENY");
   assert.match(headers["content-security-policy"], /frame-ancestors 'none'/);
+  assert.match(headers["content-security-policy"], /form-action 'none'/);
   assert.match(headers["permissions-policy"], /camera=\(\)/);
   assert.match(headers["strict-transport-security"], /includeSubDomains/);
   assert.equal(normalizeEmail("  Admin@Example.COM "), "admin@example.com");
+});
+
+test("pre-authentication forms cannot fall back to credential-bearing GET requests", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const expectedForms = [
+    ["loginForm", "/api/auth/login"],
+    ["mfaForm", "/api/auth/mfa"],
+    ["forgotPasswordForm", "/api/auth/password/forgot"],
+    ["accountCompletionForm", "/api/auth/account/complete"],
+  ];
+  for (const [id, action] of expectedForms) {
+    const tag = html.match(new RegExp(`<form[^>]*id=["']${id}["'][^>]*>`))?.[0];
+    assert.ok(tag, `missing ${id}`);
+    assert.match(tag, /method=["']post["']/i);
+    assert.match(tag, new RegExp(`action=["']${action.replaceAll("/", "\\/")}["']`, "i"));
+  }
+  assert.match(html, /<noscript>[\s\S]*JavaScript is required for secure sign-in/);
 });
 
 test("the Security control-center renderer returns markup to the shared tab shell", async () => {
