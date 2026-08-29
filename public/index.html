@@ -168,15 +168,15 @@
       <form method="dialog" id="actionForm" class="dialog-shell">
         <header class="dialog-header">
           <div><p class="eyebrow">Confirm action</p><h2 id="actionDialogTitle">Update instance?</h2></div>
-          <button class="icon-button dialog-close" value="cancel" aria-label="Cancel action">×</button>
+          <button class="icon-button dialog-close" type="button" data-cancel-action aria-label="Cancel action">×</button>
         </header>
         <div class="dialog-body">
           <p id="actionDialogDescription"></p>
           <div class="dialog-resource" id="actionDialogResource"></div>
         </div>
         <footer class="dialog-footer">
-          <button class="button secondary" value="cancel">Cancel</button>
-          <button class="button danger" id="confirmAction" value="confirm">Confirm</button>
+          <button class="button secondary" type="button" data-cancel-action>Cancel</button>
+          <button class="button danger" id="confirmAction" type="submit" value="confirm">Confirm</button>
         </footer>
       </form>
     </dialog>

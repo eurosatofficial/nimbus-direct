@@ -2600,7 +2600,17 @@ function confirmAction(resourceId, action) {
   els.confirmAction.textContent = action[0].toUpperCase() + action.slice(1);
   els.actionForm.dataset.resource = resourceId;
   els.actionForm.dataset.action = action;
+  els.confirmAction.disabled = false;
   els.actionDialog.showModal();
+}
+
+function cancelActionDialog() {
+  if (els.actionDialog.open) els.actionDialog.close("cancel");
+}
+
+function clearPendingAction() {
+  delete els.actionForm.dataset.resource;
+  delete els.actionForm.dataset.action;
 }
 
 async function runAction(resourceId, action) {
@@ -3158,14 +3168,30 @@ els.toastClose.addEventListener("click", () => els.toast.classList.remove("show"
 els.globalSearch.addEventListener("input", (event) => { state.search = event.target.value; route(); });
 window.addEventListener("hashchange", route);
 document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
+document.querySelectorAll("[data-cancel-action]").forEach((button) => button.addEventListener("click", cancelActionDialog));
 els.menuButton.addEventListener("click", () => { const open = els.sidebar.classList.toggle("open"); els.sidebarBackdrop.hidden = !open; els.menuButton.setAttribute("aria-expanded", String(open)); });
 els.sidebarBackdrop.addEventListener("click", closeSidebar);
 
-els.actionForm.addEventListener("submit", (event) => {
+els.actionDialog.addEventListener("click", (event) => {
+  if (event.target === els.actionDialog) cancelActionDialog();
+});
+els.actionDialog.addEventListener("close", clearPendingAction);
+
+els.actionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (event.submitter !== els.confirmAction) {
+    cancelActionDialog();
+    return;
+  }
   const { resource, action } = event.currentTarget.dataset;
-  els.actionDialog.close();
-  runAction(resource, action);
+  if (!resource || !action || els.confirmAction.disabled) return;
+  els.confirmAction.disabled = true;
+  els.actionDialog.close("confirm");
+  try {
+    await runAction(resource, action);
+  } finally {
+    els.confirmAction.disabled = false;
+  }
 });
 
 els.snapshotForm.addEventListener("submit", (event) => {
